@@ -27,12 +27,12 @@ function refresh() {
     if (!bridge) return;
     bridge.get_data(raw => {
         let data; try { data = JSON.parse(raw); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false); return;
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return;
         }
         try { render(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 function showStatus(text, isError) {
@@ -51,10 +51,47 @@ const CLUSTER_COLORS = [
     "#16A085", "#C0392B", "#34495E", "#7F8C8D",
 ];
 
+// MGA technology categories, as _mga_category (results_charts.py) names
+// them: Solar / Wind / Other RE / Storage / Thermal / Other, and "All"
+// for the treemap root. The ids stay in the data; only the shown text
+// is translated.
+function mgaCatSlug(cat) {
+    return String(cat).toLowerCase().replace(/\s+/g, "_");
+}
+function mgaCategoryLabel(cat) {
+    const names = {
+        solar: _t("web.charts.helpers.mga_cat_solar"), wind: _t("web.charts.helpers.mga_cat_wind"),
+        other_re: _t("web.charts.helpers.mga_cat_other_re"), storage: _t("web.charts.helpers.mga_cat_storage"),
+        thermal: _t("web.charts.helpers.mga_cat_thermal"), other: _t("web.charts.helpers.mga_cat_other"),
+        all: _t("web.charts.helpers.mga_cat_all"),
+    };
+    return names[mgaCatSlug(cat)] || cat;
+}
+
+// MGA / SPORES objective ids (results_charts._MGA_OBJECTIVE_LABELS);
+// another id falls back to the label Python sends.
+function objectiveLabel(obj, fallback) {
+    const names = {
+        cost_optimal: _t("web.charts.mga_annotated_dendrogram.obj_cost_optimal"),
+        hsj_diversity: _t("web.charts.mga_annotated_dendrogram.obj_hsj_diversity"),
+        min_total_build: _t("web.charts.mga_annotated_dendrogram.obj_min_total_build"),
+        max_tech_equity: _t("web.charts.mga_annotated_dendrogram.obj_max_tech_equity"),
+        max_regional_equity: _t("web.charts.mga_annotated_dendrogram.obj_max_regional_equity"),
+        evolutionary_dist: _t("web.charts.mga_annotated_dendrogram.obj_evolutionary_dist"),
+    };
+    return names[obj] || fallback || obj;
+}
+
+// Leaf labels come as "Alt <id>" from Python.
+function altLeafText(text) {
+    const m = /^Alt (\S+)$/.exec(String(text));
+    return m ? _t("web.charts.mga_annotated_dendrogram.alt_label", { id: m[1] }) : text;
+}
+
 function render(data) {
     const d = data.annotated_dendrogram;
     if (!d || !d.tree_links || d.tree_links.length === 0) {
-        showStatus("Need at least two alternatives for a dendrogram.", false);
+        showStatus(_t("web.charts.mga_annotated_dendrogram.no_data"), false);
         return;
     }
     const traces = [];
@@ -98,7 +135,7 @@ function render(data) {
         traces.push({
             type: "scatter", mode: "text",
             x: [lab.x], y: [lab.y],
-            text: [(lab.is_optimal ? "★ " : "") + lab.text],
+            text: [(lab.is_optimal ? "★ " : "") + altLeafText(lab.text)],
             textposition: textPos,
             textangle: ang,
             textfont: {
@@ -121,7 +158,7 @@ function render(data) {
             x: [null], y: [null],
             marker: { size: 12, color: d.category_colors[cat],
                       symbol: "square" },
-            name: cat,
+            name: mgaCategoryLabel(cat),
             showlegend: true, hoverinfo: "skip",
         });
     }
@@ -141,7 +178,7 @@ function render(data) {
                 x: [null], y: [null],
                 marker: { size: 12, color: colorMap[obj] || "#7f8c8d",
                           symbol: "square" },
-                name: (labelMap[obj] || obj) + " (ring 2)",
+                name: _t("web.charts.mga_annotated_dendrogram.legend_objective", { objective: objectiveLabel(obj, labelMap[obj]) }),
                 showlegend: true, hoverinfo: "skip",
             });
         }
@@ -150,14 +187,14 @@ function render(data) {
             type: "scatter", mode: "markers",
             x: [null], y: [null],
             marker: { size: 12, color: "rgba(39,174,96,0.85)", symbol: "square" },
-            name: "Peak RE share (ring 2)", showlegend: true, hoverinfo: "skip",
+            name: _t("web.charts.mga_annotated_dendrogram.legend_peak_re"), showlegend: true, hoverinfo: "skip",
         });
     }
     traces.push({
         type: "scatter", mode: "markers",
         x: [null], y: [null],
         marker: { size: 12, color: "rgba(192,57,43,0.85)", symbol: "square" },
-        name: "Cost premium (ring 3)", showlegend: true, hoverinfo: "skip",
+        name: _t("web.charts.mga_annotated_dendrogram.legend_cost_premium"), showlegend: true, hoverinfo: "skip",
     });
 
     // Track guide rings (very faint) so the user perceives the three
@@ -187,7 +224,7 @@ function render(data) {
     const lim = (R[R.length - 1] || 1.8) + 0.2;
     const layout = {
         margin: { l: 8, r: 8, t: 50, b: 24 },
-        title: { text: "<span style='font-size:11px;color:#7f8c8d'>tree = average-linkage clustering · rings = composition · peak RE · cost premium</span>",
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>" + _t("web.charts.mga_annotated_dendrogram.subtitle") + "</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top",
                  font: { size: 13 } },
         xaxis: {

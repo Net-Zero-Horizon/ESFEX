@@ -30,16 +30,16 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No price data", false);
+            showStatus(data && data.error ? data.error : _t("web.charts.price_duration.no_data"), false);
             return;
         }
         try {
             renderPrice(data);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error("[price_duration.js] render threw:", e);
         }
     });
@@ -70,7 +70,7 @@ function renderPrice(data) {
             line: { color: dc.color, width: 1.5 },
             xaxis: "x", yaxis: "y",
             hovertemplate:
-                "Top %{x:.1f}%<br>Price: %{y:,.1f} $/MWh<extra>" +
+                _t("web.charts.price_duration.hover_duration") + "<extra>" +
                 dc.year + "</extra>",
         });
     }
@@ -84,24 +84,24 @@ function renderPrice(data) {
             traces.push({
                 type: "scatter", mode: "lines",
                 x: m.labels, y: m.energy,
-                name: "Energy component",
+                name: _t("web.charts.price_duration.energy_component"),
                 line: { width: 0, color: "#3498DB" },
                 fillcolor: "rgba(52,152,219,0.55)",
                 stackgroup: "comp",
                 xaxis: "x2", yaxis: "y2",
-                hovertemplate: "%{x}: %{y:,.2f} $/MWh<extra>Energy</extra>",
+                hovertemplate: "%{x}: %{y:,.2f} $/MWh<extra>" + _t("web.charts.price_duration.extra_energy") + "</extra>",
             });
         }
         if (m.congestion && m.congestion.length) {
             traces.push({
                 type: "scatter", mode: "lines",
                 x: m.labels, y: m.congestion,
-                name: "Congestion premium",
+                name: _t("web.charts.price_duration.congestion_premium"),
                 line: { width: 0, color: "#E67E22" },
                 fillcolor: "rgba(230,126,34,0.55)",
                 stackgroup: "comp",
                 xaxis: "x2", yaxis: "y2",
-                hovertemplate: "%{x}: %{y:,.2f} $/MWh<extra>Congestion</extra>",
+                hovertemplate: "%{x}: %{y:,.2f} $/MWh<extra>" + _t("web.charts.price_duration.extra_congestion") + "</extra>",
             });
         }
     }
@@ -110,11 +110,11 @@ function renderPrice(data) {
         margin: { t: 70, r: 8, b: 90, l: 70 },
         showlegend: true,
         annotations: [
-            { text: "<b>a) Price Duration Curve</b>",
+            { text: "<b>" + _t("web.charts.price_duration.title_a") + "</b>",
               x: 0.435, xref: "paper", xanchor: "center",
               y: 1.00, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
-            { text: "<b>b) Energy vs Congestion (monthly avg)</b>",
+            { text: "<b>" + _t("web.charts.price_duration.title_b") + "</b>",
               x: 0.435, xref: "paper", xanchor: "center",
               y: 0.46, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
@@ -131,25 +131,25 @@ function renderPrice(data) {
         },
         xaxis: {
             domain: [0, 0.87], anchor: "y",
-            title: "<b>Cumulative % of hours</b>",
+            title: "<b>" + _t("web.charts.price_duration.axis_cum_hours") + "</b>",
             ticksuffix: "%",
             range: [0, 100],
             gridcolor: "rgba(0,0,0,0.08)",
         },
         yaxis: {
             domain: [0.54, 0.98], anchor: "x",
-            title: "<b>Price ($/MWh)</b>",
+            title: "<b>" + _t("web.charts.price_duration.axis_price") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
         xaxis2: {
             domain: [0, 0.87], anchor: "y2",
             type: "category", tickangle: -45,
-            title: "<b>Month</b>",
+            title: "<b>" + _t("web.charts.price_duration.axis_month") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
         yaxis2: {
             domain: [0.0, 0.44], anchor: "x2",
-            title: "<b>Price ($/MWh)</b>",
+            title: "<b>" + _t("web.charts.price_duration.axis_price") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
             rangemode: "tozero",
         },

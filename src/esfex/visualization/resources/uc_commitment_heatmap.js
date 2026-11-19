@@ -39,17 +39,17 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { _ucClearPlot(); showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { _ucClearPlot(); showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            _ucClearPlot(); showStatus(data && data.error ? data.error : "No data", false);
+            _ucClearPlot(); showStatus(data && data.error ? data.error : _t("web.common.no_data"), false);
             return;
         }
         if (!data.units || data.units.length === 0) {
-            _ucClearPlot(); showStatus("No committable units (renewables aren't shown here)", false);
+            _ucClearPlot(); showStatus(_t("web.charts.uc_commitment_heatmap.no_data"), false);
             return;
         }
         try { renderHeatmap(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 
@@ -88,7 +88,7 @@ function renderHeatmap(data) {
         colorscale: colorscale,
         zmin: 0, zmax: 1,
         showscale: false,
-        hovertemplate: "Unit: %{y}<br>Hour: %{x}<br>Units online: %{text}<extra></extra>",
+        hovertemplate: _t("web.charts.uc_commitment_heatmap.hover_cell") + "<extra></extra>",
         xgap: 1, ygap: 1,
     };
 
@@ -100,12 +100,13 @@ function renderHeatmap(data) {
     const layout = {
         margin: { t: MARGIN_T, r: 30, b: MARGIN_B, l: 10 },
         annotations: [
-            { text: "<span style='color:#27AE60'>■</span> On  &nbsp; <span style='color:#ECEFF1'>■</span> Off",
+            { text: "<span style='color:#27AE60'>■</span> " + _t("web.charts.uc_commitment_heatmap.state_on")
+                  + "  &nbsp; <span style='color:#ECEFF1'>■</span> " + _t("web.charts.uc_commitment_heatmap.state_off"),
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1, yref: "paper", yanchor: "bottom", yshift: 6,
               showarrow: false, font: { size: 11 } },
         ],
-        xaxis: { title: "<b>Hour</b>", side: "bottom" },
+        xaxis: { title: "<b>" + _t("web.charts.uc_commitment_heatmap.axis_hour") + "</b>", side: "bottom" },
         // Full unit names stay as the category values (hover shows
         // them); the tick text is shortened and the left margin grows
         // to fit it instead of clipping long names.

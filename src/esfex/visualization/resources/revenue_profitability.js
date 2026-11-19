@@ -28,20 +28,20 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No revenue data", false);
+            showStatus(data && data.error ? data.error : _t("web.charts.revenue_profitability.no_data"), false);
             return;
         }
         if (!data.years || data.years.length === 0) {
-            showStatus("No revenue data", false);
+            showStatus(_t("web.charts.revenue_profitability.no_data"), false);
             return;
         }
         try {
             renderRevenue(data);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error("[revenue_profitability.js] render threw:", e);
         }
     });
@@ -84,12 +84,12 @@ function renderRevenue(data) {
         traces.push({
             type: "scatter", mode: "lines+markers",
             x: years, y: data.totals_musd,
-            name: "Total Revenue",
+            name: _t("web.charts.revenue_profitability.total_revenue"),
             line: { color: "#2C3E50", width: 2.5 },
             marker: { color: "#2C3E50", size: 7,
                       line: { color: "#FFFFFF", width: 1 } },
             xaxis: "x", yaxis: "y",
-            hovertemplate: "%{x}: %{y:,.1f} M$<extra>Total</extra>",
+            hovertemplate: "%{x}: %{y:,.1f} M$<extra>" + _t("web.charts.revenue_profitability.extra_total") + "</extra>",
         });
     }
 
@@ -104,12 +104,12 @@ function renderRevenue(data) {
         traces.push({
             type: "bar",
             x: techLabels, y: prices,
-            name: "Avg Selling Price",
+            name: _t("web.charts.revenue_profitability.avg_selling_price"),
             marker: { color: "#3498DB",
                       line: { color: "#FFFFFF", width: 0.5 } },
             xaxis: "x2", yaxis: "y2",
             offsetgroup: "price",
-            hovertemplate: "%{x}: %{y:,.2f} $/MWh<extra>Selling Price</extra>",
+            hovertemplate: "%{x}: %{y:,.2f} $/MWh<extra>" + _t("web.charts.revenue_profitability.extra_selling_price") + "</extra>",
         });
         traces.push({
             type: "bar",
@@ -127,11 +127,11 @@ function renderRevenue(data) {
     // red if negative — signals which techs cover their costs at the
     // current market price).
     const annotations = [
-        { text: "<b>a) Revenue by Technology</b>",
+        { text: "<b>" + _t("web.charts.revenue_profitability.title_a") + "</b>",
           x: 0.435, xref: "paper", xanchor: "center",
           y: 1.00, yref: "paper", yanchor: "bottom",
           showarrow: false, font: { size: 13 } },
-        { text: "<b>b) Selling Price vs LCOE (Profit Margin %)</b>",
+        { text: "<b>" + _t("web.charts.revenue_profitability.title_b") + "</b>",
           x: 0.435, xref: "paper", xanchor: "center",
           y: 0.46, yref: "paper", yanchor: "bottom",
           showarrow: false, font: { size: 13 } },
@@ -179,19 +179,19 @@ function renderRevenue(data) {
             domain: [0, 0.87], anchor: "y",
             type: "category",
             tickangle: -45,
-            title: "<b>Year</b>",
+            title: "<b>" + _t("web.charts.revenue_profitability.axis_year") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
         yaxis: {
             domain: [0.54, 0.98], anchor: "x",
-            title: "<b>Revenue (M$)</b>",
+            title: "<b>" + _t("web.charts.revenue_profitability.axis_revenue") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
         xaxis2: {
             domain: [0, 0.87], anchor: "y2",
             type: "category",
             tickangle: -45,
-            title: "<b>Technology</b>",
+            title: "<b>" + _t("web.charts.revenue_profitability.axis_technology") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
         },
         yaxis2: {

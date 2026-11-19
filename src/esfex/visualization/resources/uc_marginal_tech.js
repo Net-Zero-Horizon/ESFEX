@@ -50,17 +50,17 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { _ucClearPlot(); showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { _ucClearPlot(); showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            _ucClearPlot(); showStatus(data && data.error ? data.error : "No data", false);
+            _ucClearPlot(); showStatus(data && data.error ? data.error : _t("web.common.no_data"), false);
             return;
         }
         if (!data.hours || data.hours.length === 0) {
-            _ucClearPlot(); showStatus("No marginal-tech data", false);
+            _ucClearPlot(); showStatus(_t("web.charts.uc_marginal_tech.no_data"), false);
             return;
         }
         try { renderMarginal(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 
@@ -96,16 +96,13 @@ function renderMarginal(data) {
         (data.hour_lmp && data.hour_lmp[h] != null) ? data.hour_lmp[h] : null,
     ])];
     const heatmap = {
-        z: z, x: x, y: ["Marginal tech"],
+        z: z, x: x, y: [_t("web.charts.uc_marginal_tech.row_label")],
         type: "heatmap",
         colorscale: colorscale,
         zmin: -0.5, zmax: N - 0.5,
         showscale: false,
         customdata: customdata,
-        hovertemplate:
-            "Hour: %{x}<br>" +
-            "Tech: %{customdata[0]}<br>" +
-            "LMP: %{customdata[1]:,.1f} USD/MWh<extra></extra>",
+        hovertemplate: _t("web.charts.uc_marginal_tech.hover_cell") + "<extra></extra>",
         xaxis: "x", yaxis: "y",
     };
 
@@ -130,18 +127,18 @@ function renderMarginal(data) {
         margin: { t: 80, r: 30, b: 20, l: 80 },
         grid: { rows: 2, columns: 1, pattern: "independent", roworder: "top to bottom" },
         annotations: [
-            { text: "Which technology sets the system price each hour",
+            { text: _t("web.charts.uc_marginal_tech.subtitle"),
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.08, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 11, color: "#5D6D7E" } },
         ],
-        xaxis:  { domain: [0, 1], anchor: "y", title: "<b>Hour</b>" },
+        xaxis:  { domain: [0, 1], anchor: "y", title: "<b>" + _t("web.charts.uc_marginal_tech.axis_hour") + "</b>" },
         yaxis:  { domain: [0.65, 0.95], showticklabels: false },
         xaxis2: Object.assign({ domain: [0, 1], anchor: "y2",
-                  title: "<b>Technology</b>" },
+                  title: "<b>" + _t("web.charts.uc_marginal_tech.axis_technology") + "</b>" },
             labelAxis({ axis: "xaxis2", labels: barX, fontSize: 11,
                         fraction: 0.25, maxChars: 24, angle: -25 })),
-        yaxis2: { domain: [0.0, 0.55], title: "<b>Hours marginal</b>",
+        yaxis2: { domain: [0.0, 0.55], title: "<b>" + _t("web.charts.uc_marginal_tech.axis_hours_marginal") + "</b>",
                   rangemode: "tozero" },
     };
     Plotly.purge("plot");

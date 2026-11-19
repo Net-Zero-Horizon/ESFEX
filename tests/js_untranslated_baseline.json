@@ -14,21 +14,10 @@
   "Turbo",
   "Viridis"
  ],
- "battery_operation.html": [
-  "Loading…"
- ],
  "battery_operation.js": [
-  "%{x}: %{customdata:,.2f} GWh<extra>Discharge</extra>",
-  "%{x}: %{customdata:,.2f} GWh<extra>Losses</extra>",
-  "%{x}: %{y:,.2f} GWh<extra>Charge</extra>",
-  "<b>Energy (GWh)</b>",
-  "Bad payload: ",
-  "Charge",
-  "Discharge",
-  "Losses (Spillage)",
-  "No battery data",
-  "No data",
-  "Render error: ",
+  "%{x}: %{customdata:,.2f} GWh<extra>",
+  "%{x}: %{customdata:,.2f} GWh<extra>",
+  "%{x}: %{y:,.2f} GWh<extra>",
   "x domain"
  ],
  "cash_flow.js": [
@@ -36,15 +25,6 @@
   "x2 domain",
   "y2 domain",
   "y2 domain"
- ],
- "custom_chart.html": [
-  "Loading…"
- ],
- "custom_chart.js": [
-  "Add at least one variable",
-  "Bad payload: ",
-  "No data",
-  "Render error: "
  ],
  "dashboard.html": [
   "Breakdown of the total system cost",
@@ -155,44 +135,13 @@
  "flex_reliability.js": [
   "top to bottom"
  ],
- "fuel_supply.html": [
-  "Loading…"
- ],
  "fuel_supply.js": [
-  "%{x}: %{y:,.1f} GWh<extra>%{fullData.name}</extra>",
-  "%{x}: %{y:,.1f} GWh<extra>Total</extra>",
-  "%{x}: %{y:,.2f} M$<extra>Total</extra>",
-  "<b>Fuel Cost (M$)</b>",
-  "<b>Generation (GWh)</b>",
-  "<b>Year</b>",
-  "<b>a) Generation by Fuel Type</b>",
-  "<b>b) Fuel Cost by Type</b>",
-  "Bad payload: ",
-  "No data",
-  "No data",
-  "Render error: ",
-  "Total Fuel Cost",
-  "Total Generation"
- ],
- "inter_node_flows.html": [
-  "Loading…"
+  "%{x}: %{y:,.1f} GWh<extra>",
+  "%{x}: %{y:,.1f} GWh<extra>%{fullData.name}</extra>"
  ],
  "inter_node_flows.js": [
-  " · exports</extra>",
-  " · imports</extra>",
   "%{x}: %{customdata:,.1f} GWh<extra>",
   "%{x}: %{y:,.1f} GWh<extra>",
-  "<b>Energy (GWh)</b>",
-  "<b>Hour</b>",
-  "<b>Net flow (MW)</b>",
-  "<b>Year</b>",
-  "Bad payload: ",
-  "Hour %{x}: %{y:,.1f} MW<extra>",
-  "No power flow data",
-  "No power flow data",
-  "No power flow data",
-  "Positive = net importing &nbsp;|&nbsp; Negative = net exporting",
-  "Render error: ",
   "x domain",
   "x domain"
  ],
@@ -426,72 +375,17 @@
   "background:white;padding:8px 12px;border-radius:4px;box-shadow:0 1px 5px rgba(0,0,0,0.3);font-size:12px",
   "border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,.3)\">"
  ],
- "mga_annotated_dendrogram.html": [
-  "Loading…"
- ],
  "mga_annotated_dendrogram.js": [
-  " (ring 2)",
-  "<span style='font-size:11px;color:#7f8c8d'>tree = average-linkage clustering · rings = composition · peak RE · cost premium</span>",
-  "Bad payload: ",
-  "Cost premium (ring 3)",
-  "Need at least two alternatives for a dendrogram.",
-  "No data",
-  "Peak RE share (ring 2)",
   "middle left",
   "middle right",
   "system-ui, sans-serif"
  ],
- "mga_composition.html": [
-  "Loading…"
- ],
- "mga_composition.js": [
-  "<b>Alt ${a.id} ★</b>",
-  "<span style='font-size:11px;color:#7f8c8d'>tile area = MW added · grouped by category then technology</span>",
-  "Alt ${a.id}",
-  "Bad payload: ",
-  "No composition data.",
-  "No data",
-  "Other",
-  "Other RE",
-  "Solar",
-  "Storage",
-  "Thermal",
-  "Wind"
- ],
- "mga_decision_factors.html": [
-  "Loading…"
- ],
  "mga_decision_factors.js": [
-  "<span style='font-size:11px;color:#7f8c8d'>rows clustered by Euclidean distance · columns clustered by co-investment correlation · cell colour = MW invested · ",
-  "Bad payload: ",
-  "No data",
-  "No decision factors to display.",
-  "This view has no factor columns above the 1 MW threshold.",
   "Viridis",
-  "Viridis",
-  "technology (aggregated across nodes)",
-  "technology × node placement"
- ],
- "mga_parcoords.html": [
-  "Loading…"
- ],
- "mga_parcoords.js": [
-  "<span style='font-size:11px;color:#7f8c8d'>each line = one alternative · red = optimal · drag axes to brush</span>",
-  "Bad payload: ",
-  "No data",
-  "No parallel-coordinates data."
- ],
- "mga_pathway.html": [
-  "Loading…"
+  "Viridis"
  ],
  "mga_pathway.js": [
-  "%{x}: %{y:,.0f} MW<extra>${cat}</extra>",
-  "<b>Alt ${a.id} ★</b>",
-  "<span style='font-size:11px;color:#7f8c8d'>cumulative installed MW per alternative · stacked by category</span>",
-  "Alt ${a.id}",
-  "Bad payload: ",
-  "No data",
-  "No pathway data."
+  "%{x}: %{y:,.0f} MW<extra>"
  ],
  "mga_projection.js": [
   "Viridis",
@@ -505,19 +399,9 @@
   "x domain",
   "x domain"
  ],
- "mga_similarity.html": [
-  "Loading…"
- ],
  "mga_similarity.js": [
-  "<span style='font-size:11px;color:#7f8c8d'>Euclidean distance in decision space · rows / columns reordered by the dendrogram above</span>",
-  "Alt ",
-  "Bad payload: ",
-  "Distance",
-  "Need at least two alternatives to compute similarity.",
-  "No data",
   "Viridis",
-  "Viridis",
-  "distance = %{z:,.1f}<extra></extra>"
+  "Viridis"
  ],
  "mga_spatial.js": [
   "Bluered",
@@ -555,51 +439,13 @@
   "RdBu",
   "Viridis"
  ],
- "price_duration.html": [
-  "Loading…"
- ],
  "price_duration.js": [
-  "%{x}: %{y:,.2f} $/MWh<extra>Congestion</extra>",
-  "%{x}: %{y:,.2f} $/MWh<extra>Energy</extra>",
-  "<b>Cumulative % of hours</b>",
-  "<b>Month</b>",
-  "<b>Price ($/MWh)</b>",
-  "<b>Price ($/MWh)</b>",
-  "<b>a) Price Duration Curve</b>",
-  "<b>b) Energy vs Congestion (monthly avg)</b>",
-  "Bad payload: ",
-  "Congestion premium",
-  "Energy component",
-  "No price data",
-  "Render error: ",
-  "Top %{x:.1f}%<br>Price: %{y:,.1f} $/MWh<extra>"
- ],
- "revenue_profitability.html": [
-  "Loading…"
+  "%{x}: %{y:,.2f} $/MWh<extra>",
+  "%{x}: %{y:,.2f} $/MWh<extra>"
  ],
  "revenue_profitability.js": [
-  "%{x}: %{y:,.1f} M$<extra>Total</extra>",
-  "%{x}: %{y:,.2f} $/MWh<extra>LCOE</extra>",
-  "%{x}: %{y:,.2f} $/MWh<extra>Selling Price</extra>",
-  "<b>Revenue (M$)</b>",
-  "<b>Technology</b>",
-  "<b>Year</b>",
-  "<b>a) Revenue by Technology</b>",
-  "<b>b) Selling Price vs LCOE (Profit Margin %)</b>",
-  "Avg Selling Price",
-  "Bad payload: ",
-  "No revenue data",
-  "No revenue data",
-  "Render error: ",
-  "Total Revenue"
- ],
- "sankey.html": [
-  "Loading…"
- ],
- "sankey.js": [
-  "Bad payload: ",
-  "No data",
-  "Render error: "
+  "%{x}: %{y:,.2f} $/MWh<extra>",
+  "%{x}: %{y:,.2f} $/MWh<extra>LCOE</extra>"
  ],
  "sld.html": [
   "Add nodes and equipment in the Geographic View.",
@@ -724,176 +570,30 @@
   "drop-shadow(0 0 6px ",
   "edge edge-"
  ],
- "system_metrics.html": [
-  "Loading…"
- ],
  "system_metrics.js": [
-  "<b>Max</b>",
-  "<b>Normalized Metric Range (individual scaling)</b>",
-  "Bad payload: ",
-  "No data",
-  "No metrics available",
-  "RdBu",
-  "Render error: ",
-  "Value: %{customdata}<extra></extra>",
-  "Year",
-  "Year %{marker.color}<br>"
+  "RdBu"
  ],
  "tech_performance.js": [
   "RdBu",
   "y2 domain"
  ],
- "uc_commitment_heatmap.html": [
-  "Loading…"
- ],
- "uc_commitment_heatmap.js": [
-  "<b>Hour</b>",
-  "<span style='color:#27AE60'>■</span> On  &nbsp; <span style='color:#ECEFF1'>■</span> Off",
-  "Bad payload: ",
-  "No committable units (renewables aren't shown here)",
-  "No data",
-  "Unit: %{y}<br>Hour: %{x}<br>Units online: %{text}<extra></extra>"
- ],
- "uc_dispatch_stack.html": [
-  "Loading…"
- ],
  "uc_dispatch_stack.js": [
-  "<b>Hour</b>",
-  "<b>Power (MW)</b>",
-  "Bad payload: ",
-  "Battery (charge)",
-  "Battery (discharge)",
-  "Curtailment",
-  "Demand",
-  "Hour %{x}: %{customdata:,.1f} MW<extra>Battery (charge)</extra>",
-  "Hour %{x}: %{customdata:,.1f} MW<extra>Curtailment</extra>",
-  "Hour %{x}: %{y:,.1f} MW<extra>",
-  "Hour %{x}: %{y:,.1f} MW<extra>Battery (discharge)</extra>",
-  "Hour %{x}: %{y:,.1f} MW<extra>Demand</extra>",
-  "Hour %{x}: %{y:,.1f} MW<extra>Load shed</extra>",
-  "Load shed",
-  "No data",
-  "No dispatch data",
   "x domain"
  ],
- "uc_hourly_price.html": [
-  "Loading…"
- ],
- "uc_hourly_price.js": [
-  "<b>Hour</b>",
-  "<b>LMP (USD/MWh)</b>",
-  "Bad payload: ",
-  "Hour %{x}: %{y:,.2f} USD/MWh<extra></extra>",
-  "Hour %{x}: max %{y:,.1f} USD/MWh<extra></extra>",
-  "No data",
-  "No price data",
-  "Nodal min",
-  "Nodal range",
-  "System average"
- ],
- "uc_lmp_by_node.html": [
-  "Loading…"
- ],
  "uc_lmp_by_node.js": [
-  " — transmission constraints active",
-  " — uniform pricing",
-  "%{x}: mean %{y:,.1f} USD/MWh<extra></extra>",
-  "<b>Hour</b>",
-  "<b>Mean LMP</b>",
-  "<b>Node</b>",
-  "<b>System avg</b>",
-  "Bad payload: ",
-  "Hour %{x}: %{y:,.1f} USD/MWh<extra>System avg</extra>",
-  "No data",
-  "No nodal data",
-  "Node %{y}<br>Hour %{x}<br>LMP: %{z:,.1f} USD/MWh<extra></extra>",
-  "Per-node spread (mean max − min): ${spread.toFixed(1)} USD/MWh",
   "Plasma",
   "top to bottom"
  ],
  "uc_loadshed_curtailment.js": [
   "top to bottom"
  ],
- "uc_marginal_tech.html": [
-  "Loading…"
- ],
  "uc_marginal_tech.js": [
-  "<b>Hour</b>",
-  "<b>Hours marginal</b>",
-  "<b>Technology</b>",
-  "Bad payload: ",
-  "Hour: %{x}<br>",
-  "LMP: %{customdata[1]:,.1f} USD/MWh<extra></extra>",
-  "No data",
-  "No marginal-tech data",
-  "Tech: %{customdata[0]}<br>",
-  "Which technology sets the system price each hour",
   "top to bottom"
  ],
- "uc_netload_duration.html": [
-  "Loading…"
- ],
  "uc_netload_duration.js": [
-  "${(100 * data.hours_negative_netload / x.length).toFixed(1)}% of hours have surplus RE (net load &lt; 0)",
-  "<b>Power (MW)</b>",
-  "<b>Top X% of hours</b>",
-  "Bad payload: ",
-  "Gross demand",
-  "Min net ${data.min_netload_mw.toFixed(0)} MW &nbsp;|&nbsp; ",
-  "Net load (demand − RE)",
-  "Net load stays positive — system never has RE surplus",
-  "No data",
-  "No demand",
-  "Peak gross ${data.peak_demand_mw.toFixed(0)} MW &nbsp;|&nbsp; ",
-  "Peak net ${data.peak_netload_mw.toFixed(0)} MW &nbsp;|&nbsp; ",
-  "Top %{x:.1f}% of hours: %{y:,.0f} MW<extra>Gross</extra>",
-  "Top %{x:.1f}% of hours: %{y:,.0f} MW<extra>Net</extra>",
   "x domain"
  ],
- "uc_price_duration.html": [
-  "Loading…"
- ],
- "uc_price_duration.js": [
-  "${data.scarcity_hours} h above ${data.scarcity_threshold.toFixed(0)} (scarcity)",
-  "<b>Baseload</b>",
-  "<b>LMP (USD/MWh)</b>",
-  "<b>Mid-merit</b>",
-  "<b>Peak</b>",
-  "<b>Top X% of hours</b>",
-  "Bad payload: ",
-  "Mean ${data.mean.toFixed(1)} &nbsp;|&nbsp; ",
-  "Median ${data.median.toFixed(1)} &nbsp;|&nbsp; ",
-  "No data",
-  "No prices",
-  "P95 ${data.p95.toFixed(1)} USD/MWh &nbsp;|&nbsp; ",
-  "Top %{x:.1f}% of hours: %{y:,.1f} USD/MWh<extra></extra>"
- ],
- "uc_ramp_distribution.html": [
-  "Loading…"
- ],
- "uc_ramp_distribution.js": [
-  "%{x} P95: %{y:,.1f} MW<extra></extra>",
-  "<b>Technology</b>",
-  "<b>|ΔP| per hour (MW)</b>",
-  "Bad payload: ",
-  "Hour-to-hour |ΔP|, MW &nbsp;|&nbsp; red diamond = P95",
-  "No data",
-  "No ramp data"
- ],
- "uc_storage_soc.html": [
-  "Loading…"
- ],
  "uc_storage_soc.js": [
-  "${bname}: ${ratio} eq. full cycles total",
-  "<b>Day</b>",
-  "<b>Eq. full cycles / day</b>",
-  "<b>Hour</b>",
-  "<b>SOC (%)</b>",
-  "Bad payload: ",
-  "Day %{x}: %{y:.2f} cycles<extra>",
-  "Hour %{x}: %{y:.1f}% SOC<extra>",
-  "No batteries in this run",
-  "No data",
   "top to bottom"
  ]
 }

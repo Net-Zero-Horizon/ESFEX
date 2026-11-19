@@ -4237,6 +4237,225 @@
         "axis_cumulative": "累積 (MWh)",
         "axis_hour": "時間",
         "axis_curtailment": "出力抑制 (MW)"
+      },
+      "helpers": {
+        "mga_cat_solar": "太陽光",
+        "mga_cat_wind": "風力",
+        "mga_cat_other_re": "その他再エネ",
+        "mga_cat_storage": "蓄電",
+        "mga_cat_thermal": "火力",
+        "mga_cat_other": "その他",
+        "mga_cat_all": "すべて"
+      },
+      "inter_node_flows": {
+        "no_data": "潮流データがありません",
+        "hover_hour": "時刻 %{x}: %{y:,.1f} MW",
+        "note_positive": "正 = 正味流入",
+        "note_negative": "負 = 正味流出",
+        "axis_hour": "時刻",
+        "axis_net_flow": "正味潮流 (MW)",
+        "extra_imports": "{node} · 流入",
+        "extra_exports": "{node} · 流出",
+        "axis_year": "年",
+        "axis_energy": "エネルギー (GWh)"
+      },
+      "uc_dispatch_stack": {
+        "no_data": "ディスパッチデータがありません",
+        "hover_hour": "時刻 %{x}: %{y:,.1f} MW",
+        "hover_hour_abs": "時刻 %{x}: %{customdata:,.1f} MW",
+        "battery_discharge": "蓄電池 (放電)",
+        "battery_charge": "蓄電池 (充電)",
+        "load_shed": "負荷遮断",
+        "curtailment": "出力抑制",
+        "demand": "需要",
+        "axis_hour": "時刻",
+        "axis_power": "電力 (MW)"
+      },
+      "uc_lmp_by_node": {
+        "no_data": "ノード別データがありません",
+        "hover_cell": "ノード %{y}<br>時刻 %{x}<br>LMP: %{z:,.1f} USD/MWh",
+        "hover_mean": "%{x}: 平均 %{y:,.1f} USD/MWh",
+        "hover_hour": "時刻 %{x}: %{y:,.1f} USD/MWh",
+        "system_avg": "系統平均",
+        "spread_constrained": "ノード間の差 (平均の最大 − 最小): {spread} USD/MWh — 送電制約あり",
+        "spread_uniform": "ノード間の差 (平均の最大 − 最小): {spread} USD/MWh — 一様価格",
+        "axis_node": "ノード",
+        "axis_mean_lmp": "平均 LMP",
+        "axis_hour": "時刻"
+      },
+      "uc_netload_duration": {
+        "no_data": "需要がありません",
+        "hover_top": "上位 %{x:.1f}% の時間: %{y:,.0f} MW",
+        "gross_demand": "総需要",
+        "extra_gross": "総需要",
+        "net_load": "正味負荷 (需要 − 再エネ)",
+        "extra_net": "正味",
+        "surplus_share": "{pct}% の時間で再エネ余剰 (正味負荷 &lt; 0)",
+        "no_surplus": "正味負荷は常に正 — 再エネ余剰は発生しません",
+        "peak_gross": "総需要ピーク {mw} MW",
+        "peak_net": "正味ピーク {mw} MW",
+        "min_net": "正味最小 {mw} MW",
+        "axis_top_hours": "上位 X% の時間",
+        "axis_power": "電力 (MW)"
+      },
+      "fuel_supply": {
+        "total_generation": "総発電量",
+        "extra_total": "合計",
+        "total_fuel_cost": "燃料コスト合計",
+        "title_a": "a) 燃料種別の発電量",
+        "title_b": "b) 燃料種別のコスト",
+        "axis_generation": "発電量 (GWh)",
+        "axis_year": "年",
+        "axis_fuel_cost": "燃料コスト (M$)"
+      },
+      "price_duration": {
+        "no_data": "価格データがありません",
+        "hover_duration": "上位 %{x:.1f}%<br>価格: %{y:,.1f} $/MWh",
+        "energy_component": "エネルギー成分",
+        "extra_energy": "エネルギー",
+        "congestion_premium": "混雑プレミアム",
+        "extra_congestion": "混雑",
+        "title_a": "a) 価格持続曲線",
+        "title_b": "b) エネルギーと混雑 (月平均)",
+        "axis_cum_hours": "時間の累積 %",
+        "axis_price": "価格 ($/MWh)",
+        "axis_month": "月"
+      },
+      "revenue_profitability": {
+        "no_data": "収益データがありません",
+        "total_revenue": "総収益",
+        "extra_total": "合計",
+        "avg_selling_price": "平均販売価格",
+        "extra_selling_price": "販売価格",
+        "title_a": "a) 技術別の収益",
+        "title_b": "b) 販売価格と LCOE (利益率 %)",
+        "axis_year": "年",
+        "axis_revenue": "収益 (M$)",
+        "axis_technology": "技術"
+      },
+      "uc_price_duration": {
+        "no_data": "価格がありません",
+        "hover_top": "上位 %{x:.1f}% の時間: %{y:,.1f} USD/MWh",
+        "stat_mean": "平均 {value}",
+        "stat_median": "中央値 {value}",
+        "stat_p95": "P95 {value} USD/MWh",
+        "stat_scarcity": "{threshold} 超が {hours} 時間 (供給逼迫)",
+        "zone_peak": "ピーク",
+        "zone_mid": "ミドル",
+        "zone_base": "ベースロード",
+        "axis_top_hours": "上位 X% の時間",
+        "axis_lmp": "LMP (USD/MWh)"
+      },
+      "battery_operation": {
+        "no_data": "蓄電池データがありません",
+        "charge": "充電",
+        "discharge": "放電",
+        "losses_spillage": "損失 (溢流)",
+        "extra_losses": "損失",
+        "res_hourly": "時間別",
+        "res_daily": "日別",
+        "res_monthly": "月別",
+        "res_yearly": "年別",
+        "axis_energy": "エネルギー (GWh)"
+      },
+      "mga_composition": {
+        "no_data": "構成データがありません。",
+        "alt_label": "代替案 {id}",
+        "subtitle": "タイル面積 = 追加 MW · カテゴリ別、次に技術別にグループ化"
+      },
+      "uc_marginal_tech": {
+        "no_data": "限界技術データがありません",
+        "row_label": "限界技術",
+        "hover_cell": "時刻: %{x}<br>技術: %{customdata[0]}<br>LMP: %{customdata[1]:,.1f} USD/MWh",
+        "subtitle": "各時刻に系統価格を決める技術",
+        "axis_hour": "時刻",
+        "axis_technology": "技術",
+        "axis_hours_marginal": "限界となった時間数"
+      },
+      "uc_storage_soc": {
+        "no_data": "この実行には蓄電池がありません",
+        "hover_soc": "時刻 %{x}: SOC %{y:.1f}%",
+        "cycles_name": "{battery} (サイクル)",
+        "hover_cycles": "%{x} 日目: %{y:.2f} サイクル",
+        "cycles_total": "{battery}: 等価フルサイクル計 {ratio}",
+        "axis_hour": "時刻",
+        "axis_soc": "SOC (%)",
+        "axis_day": "日",
+        "axis_cycles": "等価フルサイクル / 日"
+      },
+      "mga_annotated_dendrogram": {
+        "no_data": "樹形図には少なくとも 2 つの代替案が必要です。",
+        "alt_label": "代替案 {id}",
+        "legend_objective": "{objective} (リング 2)",
+        "legend_peak_re": "再エネ比率ピーク (リング 2)",
+        "legend_cost_premium": "コスト上乗せ (リング 3)",
+        "subtitle": "樹形 = 平均連結法クラスタリング · リング = 構成 · 再エネピーク · コスト上乗せ",
+        "obj_cost_optimal": "コスト最適",
+        "obj_hsj_diversity": "HSJ 多様性",
+        "obj_min_total_build": "総建設量最小",
+        "obj_max_tech_equity": "技術間の公平性",
+        "obj_max_regional_equity": "地域間の公平性",
+        "obj_evolutionary_dist": "進化的距離"
+      },
+      "system_metrics": {
+        "no_data": "利用できる指標がありません",
+        "colorbar_year": "年",
+        "hover_point": "%{marker.color} 年<br>値: %{customdata}",
+        "tick_min": "最小",
+        "tick_max": "最大",
+        "axis_range": "正規化した指標の範囲 (指標ごとのスケール)"
+      },
+      "uc_hourly_price": {
+        "no_data": "価格データがありません",
+        "nodal_min": "ノード最小",
+        "nodal_range": "ノード間の幅",
+        "hover_max": "時刻 %{x}: 最大 %{y:,.1f} USD/MWh",
+        "system_average": "系統平均",
+        "hover_avg": "時刻 %{x}: %{y:,.2f} USD/MWh",
+        "axis_hour": "時刻",
+        "axis_lmp": "LMP (USD/MWh)"
+      },
+      "mga_decision_factors": {
+        "no_data": "表示する決定要因がありません。",
+        "no_columns": "このビューには 1 MW の閾値を超える要因列がありません。",
+        "alt_label": "代替案 {id}",
+        "hover_category": "カテゴリ: %{customdata[2]}",
+        "subtitle_tech": "行 = ユークリッド距離でクラスタリング · 列 = 共同投資の相関でクラスタリング · セルの色 = 投資 MW · 技術 (ノード合算)",
+        "subtitle_tech_node": "行 = ユークリッド距離でクラスタリング · 列 = 共同投資の相関でクラスタリング · セルの色 = 投資 MW · 技術 × ノード配置"
+      },
+      "mga_similarity": {
+        "no_data": "類似度の計算には少なくとも 2 つの代替案が必要です。",
+        "alt_label": "代替案 {id}",
+        "colorbar_distance": "距離",
+        "hover_distance": "距離 = %{z:,.1f}",
+        "subtitle": "決定空間におけるユークリッド距離 · 行 / 列は上の樹形図の順に並べ替え"
+      },
+      "mga_pathway": {
+        "no_data": "経路データがありません。",
+        "alt_label": "代替案 {id}",
+        "subtitle": "代替案ごとの累積導入 MW · カテゴリ別に積み上げ"
+      },
+      "uc_ramp_distribution": {
+        "no_data": "ランプデータがありません",
+        "hover_p95": "%{x} P95: %{y:,.1f} MW",
+        "note_metric": "時刻間の |ΔP|、MW",
+        "note_p95": "赤いひし形 = P95",
+        "axis_technology": "技術",
+        "axis_ramp": "1 時間あたりの |ΔP| (MW)"
+      },
+      "uc_commitment_heatmap": {
+        "no_data": "起動停止対象のユニットがありません (再エネはここに表示されません)",
+        "hover_cell": "ユニット: %{y}<br>時刻: %{x}<br>運転中ユニット: %{text}",
+        "state_on": "運転",
+        "state_off": "停止",
+        "axis_hour": "時刻"
+      },
+      "mga_parcoords": {
+        "no_data": "平行座標データがありません。",
+        "subtitle": "各線 = 1 つの代替案 · 赤 = 最適 · 軸上をドラッグして絞り込み"
+      },
+      "custom_chart": {
+        "no_series": "変数を 1 つ以上追加してください"
       }
     }
   }
