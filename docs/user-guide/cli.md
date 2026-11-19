@@ -37,7 +37,7 @@ esfex run -c CONFIG [OPTIONS]
 | `--config` | `-c` | Path | *required* | Path to the YAML configuration file |
 | `--mode` | `-m` | String | value in config | Overrides `simulation_mode`: `development`, `unit_commitment` or `economic_dispatch`. The schema default is `development`. |
 | `--solver` | `-s` | String | value in config | Overrides `solver.name`: `highs`, `cbc`, `glpk`, `gurobi`, `cplex`, `scip`, `xpress`, `clarabel`, `scs`, `ipopt`. The schema default is `highs`. |
-| `--output` | `-o` | Path | `./results` | Output directory (created if missing) |
+| `--output` | `-o` | Path | `./results` | Output directory (created if missing). Relative to the current directory; a run started from the Studio passes the project's own `results` folder instead |
 | `--years` | `-y` | Integer | `25` | Number of years to simulate. `unit_commitment` mode always runs a single year. |
 | `--start-year` | | Integer | year of `date_start` | Label of the first simulated year. The date labels then start on `date_start`'s day and time in this year. Demand is still read from the first row, and the Feb 29 rows dropped from leap-year data are those of `date_start`'s calendar |
 | `--verbose` | `-v` | Flag | off | Debug-level console logging, solver output on, and the configuration summary table |

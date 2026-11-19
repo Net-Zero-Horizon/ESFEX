@@ -9,9 +9,11 @@ and reservoir inflow (``reservoir_inflow_file``), plus optional external
 ``export_project`` serializes the GUI state, copies every referenced file into a
 staging tree (``demand/`` / ``availability/`` / ``inflow/`` / ``systems/``),
 rewrites the config paths to those relative locations, adds a ``manifest.json``
-and zips it into a single ``.esfexp`` file. ``import_project`` extracts it (with
-a Zip-Slip guard) into a project folder and returns the config path. The runner
-and GUI resolve the now-relative paths under the config directory.
+and zips it into a single ``.esfexp`` file. On request the project's remembered
+results file goes into ``results/`` and the config's ``_last_results`` key
+points at it. ``import_project`` extracts it (with a Zip-Slip guard) into a
+project folder and returns the config path. The runner and GUI resolve the
+now-relative paths under the config directory.
 
 Pure (no Qt) so it is unit-testable.
 """
@@ -41,6 +43,7 @@ class ExportReport:
     dest: str
     bundled: list[str] = field(default_factory=list)   # relative paths inside the zip
     missing: list[str] = field(default_factory=list)   # referenced paths not found on disk
+    results: str | None = None   # bundle-relative results file, if included
 
 
 class _Bundler:
@@ -158,14 +161,20 @@ def export_project(
     project_name: str = "",
     src_base=None,
     geo_assets=None,
+    results_file=None,
 ) -> ExportReport:
     """Export the current GUI state + all referenced files to a ``.esfexp``.
 
     ``src_base`` is the directory relative source paths are resolved against
     (typically the loaded config's directory); absolute paths are used as-is.
+    ``results_file`` (absolute path of the project's results file) is bundled
+    as ``results/<name>`` and remembered by the config; ``None`` (the default)
+    exports no results and the config remembers none. Results are stored
+    uncompressed: they can be GBs and HDF5 compresses its own datasets.
     """
     import yaml
 
+    from esfex.visualization.data.project_results import RESULTS_DIRNAME, RESULTS_KEY
     from esfex.visualization.data.serializer import gui_state_to_yaml
 
     dest_path = Path(dest_path)
@@ -187,6 +196,15 @@ def export_project(
         bundler = _Bundler(staging, src_base)
         _rewrite_refs(cfg, bundler)
 
+        results_src = Path(results_file) if results_file else None
+        results_rel = None
+        if results_src is not None:
+            if results_src.is_file():
+                results_rel = f"{RESULTS_DIRNAME}/{results_src.name}"
+                cfg[RESULTS_KEY] = results_rel
+            else:
+                bundler.missing.append(str(results_src))
+
         with open(cfg_yaml, "w", encoding="utf-8") as f:
             yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 
@@ -196,6 +214,7 @@ def export_project(
             "created_at": created_at,
             "files": bundler.bundled,
             "missing": bundler.missing,
+            "results": results_rel,
         }
         (staging / MANIFEST_NAME).write_text(
             json.dumps(manifest, indent=2), encoding="utf-8")
@@ -205,12 +224,16 @@ def export_project(
             for fp in sorted(staging.rglob("*")):
                 if fp.is_file():
                     zf.write(fp, fp.relative_to(staging).as_posix())
+            if results_rel is not None:
+                # Streamed from the source: no staging copy of a GB-sized file.
+                zf.write(results_src, results_rel, compress_type=zipfile.ZIP_STORED)
 
     if bundler.missing:
         logger.warning("export_project: %d referenced file(s) not found: %s",
                         len(bundler.missing), bundler.missing)
     return ExportReport(
-        dest=str(dest_path), bundled=bundler.bundled, missing=bundler.missing)
+        dest=str(dest_path), bundled=bundler.bundled, missing=bundler.missing,
+        results=results_rel)
 
 
 def _validate_zip_paths(zf: zipfile.ZipFile, target_root: Path) -> None:
