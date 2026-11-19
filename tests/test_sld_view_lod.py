@@ -101,6 +101,18 @@ _SCRIPT = textwrap.dedent(r'''
     steps += [lambda: (zoom(0.3), QTimer.singleShot(400, probe("mid")))]
     steps += [lambda: (zoom(1.0), QTimer.singleShot(400, probe("near")))]
     steps += [lambda: (zoom(2.0, 0.05, 0.05), QTimer.singleShot(400, probe("corner")))]
+    def click_bus():
+        js("""(function(){var got=[];
+            sldBridge = {on_element_selected: function(t, i) { got.push([t, i]); },
+                         on_element_hovered: function() {},
+                         on_element_deselected: function() {}};
+            document.querySelector('.bus-bar')
+                .dispatchEvent(new MouseEvent('click', {bubbles: true}));
+            highlightElement('bus', 'h3_2');
+            return JSON.stringify({got: got, highlighted: selectedKey});})()""",
+           lambda r: (out.__setitem__("click", json.loads(r)), nxt()))
+
+    steps += [click_bus]
     steps += [export]
 
     def nxt():
@@ -160,3 +172,12 @@ def test_export_is_the_full_diagram(result):
     exp = result["export"]
     assert exp["len"] > 0
     assert exp["hidden"] == 0 and not exp["lod"] and not exp["names"]
+
+
+def test_bus_click_and_highlight_use_the_model_bus_id(result):
+    # The bus form is looked up by this id; the layout key "bus_<id>" opened
+    # it empty, and a tree selection never highlighted the bar.
+    click = result["click"]
+    assert [t for t, _ in click["got"]] == ["bus"]
+    assert click["got"][0][1][0] in "hl" and not click["got"][0][1].startswith("bus_")
+    assert click["highlighted"] == "bus:h3_2"

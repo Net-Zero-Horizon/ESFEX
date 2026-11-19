@@ -1554,6 +1554,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **Clicking a bus in the single-line diagram opens its form.** The SLD
+  sent its layout key (`bus_<id>`) instead of the bus id, so the bus form
+  opened empty (no system, bus ID, name or parent node), and selecting a bus
+  in the element tree never highlighted its bar in the SLD.
+
 - **Grid Builder voltages come from the data, not fixed numbers.** The OSM
   reader filled a missing `voltage` tag from the substation role
   (`transmission` 220 kV, `sub_transmission` 110 kV, `distribution` 33 kV),

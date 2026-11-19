@@ -354,6 +354,20 @@ def test_site_mode_groups_are_substations_not_nodes():
     assert by_id["bus_tee"]["properties"].get("junction") is True
 
 
+def test_bus_click_names_the_model_bus():
+    # A click on a bar sends its elementId to the properties panel: it must
+    # be the model's bus id, not the layout key "bus_<id>", or the bus form
+    # opens empty (no system, id, name or parent node).
+    st = _geo_state()
+    out = gb.build_elk_graph(st)
+    buses = [c for c in out["elkGraph"]["children"]
+             if c["properties"].get("elementType") == "bus"]
+    assert buses
+    for c in buses:
+        assert c["id"] == "bus_" + c["properties"]["elementId"]
+        assert c["properties"]["elementId"] in st.buses
+
+
 def test_site_mode_draws_transformers_inside_their_block():
     out = gb.build_elk_graph(_geo_state())
     by_id = {c["id"]: c for c in out["elkGraph"]["children"]}
