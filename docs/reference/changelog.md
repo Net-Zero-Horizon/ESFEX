@@ -1564,6 +1564,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **MGA charts show their empty-state messages.** Nine MGA result pages
+  (composition, pathway, parallel coordinates, dendrogram, decision factors,
+  similarity, projection, spatial, robustness frontier) wrote "no data"-type
+  messages from their drawing code and then hid the status line as soon as
+  drawing returned, so an empty chart showed nothing. The status line is now
+  hidden before drawing.
+
 - **Texts built in Python are translated too.** Labels the Studio's Python
   code builds stayed English in every language. They are now translated
   (about 660 new keys):
