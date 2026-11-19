@@ -29,8 +29,38 @@ _TECH_BEFORE = re.compile(
     r"""===|!==|==|!=|\btypeof|\[)\s*\(?\s*$""")
 
 
+# Plotly values that look like words: colorscales, axis references, positions.
+_PLOTLY_COLORSCALES = {
+    "Blackbody", "Bluered", "Blues", "Cividis", "Earth", "Electric", "Greens",
+    "Greys", "Hot", "Jet", "Picnic", "Portland", "Rainbow", "RdBu", "Reds",
+    "Viridis", "YlGnBu", "YlOrRd", "Turbo", "Plasma", "Inferno", "Magma",
+}
+# Units and acronyms written the same in every language.
+_UNITS = {"MW", "MWh", "GW", "GWh", "TWh", "kW", "kWh", "kV", "Hz", "USD",
+          "LCOE", "LMP", "tCO", "Mt", "kt"}
+_PLOTLY_ENUM = re.compile(
+    r"^([xy]\d* (domain|paper)|top to bottom|bottom to top|"
+    r"(top|middle|bottom)( (left|center|right))?|(left|center|right))$")
+
+
 def _visible(s: str) -> bool:
-    text = re.sub(r"<[^>]*>|&\w+;|\$\{[^}]*\}|%\{[^}]*\}", " ", s).strip()
+    if s.strip() in _PLOTLY_COLORSCALES or _PLOTLY_ENUM.match(s.strip()):
+        return False
+    st = s.strip()
+    if st.startswith("&copy;"):           # map tile attributions, as published
+        return False
+    if (re.fullmatch(r"([\w-]+\s*:[^;]*;\s*)+([\w-]+\s*:[^;]*)?", st)
+            or re.match(r"^[a-z-]+\s*:\s*[a-z-]+\(", st)):
+        return False                        # inline CSS declarations
+    # SVG/HTML markup built in pieces: drop attributes, complete or cut off.
+    s = re.sub(r"""[\w:-]+=("[^"]*"?|'[^']*'?)""", " ", s)
+    s = re.sub(r"""^[^<"]*"|"[^>"]*$""", " ", s)
+    text = re.sub(r"<[^>]*>?|&\w+;|\$\{[^}]*\}|%\{[^}]*\}", " ", s).strip()
+    if re.fullmatch(r"[\w-]+(,\s*[\w-]+)+", text):   # font-family lists
+        return False
+    words = re.findall(r"[A-Za-z]{2,}", text)
+    if words and all(w in _UNITS for w in words):     # "%{x}: %{y} GWh"
+        return False
     if not re.search(r"[A-Za-z]{2,}", text) or text == "use strict":
         return False
     one_word = " " not in text
