@@ -1554,6 +1554,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **The whole Studio is translated.** About 760 texts outside the Grid
+  Builder were written in English in the code, so they stayed English in
+  every language: the main window (console, SLD bar, dialogs, status bar),
+  the risk workbench, the financial wizard, the OTEC Studio, the wind, solar,
+  EV and demand wizards, and the element forms, panels and dialogs (around
+  1,340 new keys in each of the five languages). Combo boxes that showed
+  internal values (`straight_line`, `onshore`, `circle`, `ac`, `cvar`, ...)
+  now show translated names; the model still receives the same values.
+  Spanish now says costo, VPN and usted throughout, and Portuguese VAL.
+  Charts draw Japanese text: a CJK font installed on the system backs up
+  matplotlib's default font (`esfex.visualization.plot_fonts`). A test opens
+  the main windows and forms in Spanish and Japanese and fails on any raw
+  translation key on screen.
+
 - **The Grid Builder is translated.** About 60 of its texts were written in
   English in the code (the step tabs, the Back/Next/Cancel buttons, the
   filter labels, every table header, the warnings and the status messages),
