@@ -555,7 +555,8 @@ class TestMasterProblemSolve:
                 use_tsam=True,
                 tsam_period_start_hours=jl.seval("[[1, 25]]"),
                 tsam_period_weights=jl.seval("[[1.0, 1.0]]"),
-                tsam_chronological_order=jl.seval("[[1, 2]]"),
+                tsam_day_period=jl.seval("[[1, 2]]"),
+                hours_per_year=jl.seval("[48]"),
                 tsam_inter_period_linking=linking,
             )
             model, mvars, _ = ESFEX.create_master_problem(

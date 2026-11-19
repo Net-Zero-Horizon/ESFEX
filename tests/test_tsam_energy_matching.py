@@ -229,7 +229,7 @@ def test_warning_text_per_mode(tmp_path, caplog):
     orch._availability_cache = {SOLAR: np.column_stack([year, year]),
                                 WIND_NEW: np.column_stack([wind, wind])}
     tsam = TSAMResult(period_start_hours=starts, period_weights=[float(N_DAYS)],
-                      chronological_order=[0], num_periods=1)
+                      day_period=[0] * N_DAYS, num_periods=1)
     with caplog.at_level(logging.INFO, logger="esfex.runner"):
         orch._log_tsam_rescaling(demand, 1, tsam, 1)
     text = "\n".join(r.getMessage() for r in caplog.records)
@@ -262,6 +262,10 @@ def test_the_master_reads_the_rescaled_profiles(tmp_path):
     assert captured["tsam_critical_periods"] == [6]
     master = MasterProblemAdapter(**captured)
     jl_input = master._create_input()
+    # The day map reaches Julia, the critical day in its own period
+    jl_map = [[int(k) for k in m] for m in jl_input.tsam_day_period]
+    assert jl_map == captured["tsam_day_period"] and len(jl_map) == 2
+    assert jl_map[0].count(7) == 1 and jl_map[0][captured["tsam_period_start_hours"][0][6] // DAY] == 7
     names = [str(g.name) for g in jl_input.generators]
     solar = np.asarray(jl_input.generators[names.index("test_sys/Solar")].availability)
     gas = np.asarray(jl_input.generators[names.index("test_sys/Gas")].availability)

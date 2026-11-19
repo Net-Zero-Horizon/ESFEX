@@ -1213,7 +1213,7 @@ reservoir_capacity_built(vars::MasterProblemVariables, g::Int, b::Int, year_idx:
 In-service reservoir capacity (MWh) of generator `gen` (index `g`) at bus `b`
 in year `year_idx`: the existing capacity plus, when the reservoir can be
 enlarged, the capacity built so far. Every master constraint that scales with
-the reservoir size (level bounds, TSAM boundary levels, head fraction,
+the reservoir size (level bounds, TSAM inter-day levels, head fraction,
 initial/end level) uses this one.
 """
 function reservoir_in_service(vars::MasterProblemVariables, gen, g::Int, b::Int, year_idx::Int)
@@ -3935,8 +3935,8 @@ function add_day_operational_constraints!(
         final_soc_targets=final_soc_targets)
     # Reservoir water balance / cyclic level — gives hydro an energy budget in
     # the master (previously omitted, so hydro was over-credited as firm MW).
-    # When TSAM seasonal linking is active the cyclic closure is replaced by a
-    # chronological chain across periods (overrides below). No-op with no reservoir.
+    # When TSAM seasonal linking is active the cyclic closure is replaced by the
+    # period's free start and end (overrides below). No-op with no reservoir.
     # The reservoirs' level bounds include the capacity built so far
     res_cap = Dict{Tuple{Int,Int}, Any}()
     for (g, gen) in enumerate(input.generators), b in 1:n_buses
@@ -4878,13 +4878,99 @@ function calculate_day_operational_cost_tsam(
 end
 
 """
+    tsam_day_map(input, y_idx) -> Vector{Int}
+
+The TSAM period (1..K) of each day of year `y_idx` (`input.tsam_day_period`),
+checked: one entry per day of the year (`hours_per_year` steps at the
+temporal resolution, in periods of a day), every entry a period, and each
+period's count of days equal to its weight (the days its cost, energy
+balance, RE target and curtailment stand for). Without a map, a single
+period stands for every day of the year. Anything else raises: the seasonal
+storage would run through a different year than the one the costs and
+balances count, which gives the master free energy.
+"""
+function tsam_day_map(input::MasterProblemInput, y_idx::Int)::Vector{Int}
+    weights = input.tsam_period_weights[y_idx]
+    K = length(weights)
+    year = input.years[y_idx]
+    tres = max(1, input.temporal_resolution_hours)
+    tpd = max(1, 24 ÷ tres)
+    hpy = y_idx <= length(input.hours_per_year) ? input.hours_per_year[y_idx] : HOURS_STD_YEAR
+    D = (hpy ÷ tres) ÷ tpd
+    map = y_idx <= length(input.tsam_day_period) ? input.tsam_day_period[y_idx] : Int[]
+    if isempty(map)
+        K == 1 || error("TSAM inter-period linking in $year needs tsam_day_period, the " *
+                        "period of each of the year's $D days ($K periods)")
+        map = fill(1, D)
+    end
+    length(map) == D || error("tsam_day_period for $year has $(length(map)) days; " *
+                              "the year has $D")
+    bad = findfirst(k -> !(1 <= k <= K), map)
+    bad === nothing || error("tsam_day_period for $year: day $bad is in period " *
+                             "$(map[bad]), not one of the $K periods")
+    counts = zeros(Int, K)
+    for k in map
+        counts[k] += 1
+    end
+    for k in 1:K
+        abs(counts[k] - weights[k]) <= 1e-6 * max(1.0, abs(weights[k])) ||
+            error("TSAM period $k of $year stands for $(weights[k]) days (its weight) " *
+                  "but tsam_day_period gives it $(counts[k]): the seasonal storage would " *
+                  "run through a different year than the costs and energy balance count")
+    end
+    return map
+end
+
+"""
+    add_inter_day_state!(model, day_period, Δ, u, l, ρ, lo, hi, name)
+        -> Vector{VariableRef}
+
+The inter-day state of one storage over the year (Kotzur et al. 2018,
+superposition of inter- and intra-period states): `S[d]`, the level at the
+start of day `d` (1..D, year-cyclic), moves by the intra-period change of
+the day's period `k = day_period[d]`,
+
+    S[d+1] = ρ[k]·S[d] + Δ[k]
+
+and the level within the day, `S[d]` plus the period's level relative to its
+start, stays in `[lo, hi]`: `S[d] + u[k] ≤ hi` and `ρ[k]·S[d] + l[k] ≥ lo`,
+with `u[k]` (`l[k]`) the period's highest (lowest) level relative to its
+start and `ρ[k]` the decay of a level over the period (1 without losses;
+with losses both rows are sufficient, as the decay of `S[d]` within the day
+lies between 1 and `ρ[k]`). `lo` and `hi` may hold capacity built by the
+master. Three rows per day, whatever the number of periods.
+"""
+function add_inter_day_state!(model::Model, day_period::Vector{Int}, Δ, u, l, ρ, lo, hi,
+                              name::String)::Vector{VariableRef}
+    D = length(day_period)
+    S = [@variable(model, lower_bound = 0, base_name = "$(name)_d$(d - 1)") for d in 1:D]
+    for d in 1:D
+        k = day_period[d]
+        @constraint(model, S[mod1(d + 1, D)] == ρ[k] * S[d] + Δ[k],
+                    base_name = "$(name)_chain_d$(d - 1)")
+        @constraint(model, S[d] + u[k] <= hi, base_name = "$(name)_max_d$(d - 1)")
+        @constraint(model, ρ[k] * S[d] + l[k] >= lo, base_name = "$(name)_min_d$(d - 1)")
+    end
+    return S
+end
+
+"""
     add_tsam_periods_validation!(model, vars, input, targets)
 
-Add operational validation using TSAM representative periods with inter-period
-SOC linking. Replaces add_representative_days_validation! when use_tsam=true.
+Add operational validation using TSAM representative periods with seasonal
+storage. Replaces add_representative_days_validation! when use_tsam=true.
 
-Creates inter-period SOC boundary variables that form a chronological chain
-across representative periods, enabling seasonal storage representation.
+Each period's costs, energy balance, CO2, RE target and curtailment count
+× its weight (the days it stands for). With `tsam_inter_period_linking`,
+batteries and reservoirs carry energy across the year by the superposition
+of Kotzur et al. (2018, Applied Energy 213:123-135): each period keeps its
+own storage trajectory from a free start level (the intra-period state: its
+change Δ and its highest and lowest level relative to the start), and an
+inter-day state runs through every day of the year on the period of that
+day (`tsam_day_map`, `add_inter_day_state!`), stored in
+`vars.inter_period_soc` / `vars.inter_period_reservoir`. Each period thus
+counts in the storage exactly as often as in the costs and balances. The
+master's candidate battery technologies stay cyclic within each period.
 """
 function add_tsam_periods_validation!(
     model::Model,
@@ -4897,12 +4983,11 @@ function add_tsam_periods_validation!(
     num_years = length(base_input.years)
     n_bat = length(base_input.batteries)
     n_buses = base_input.network.num_buses
-    b2n = base_input.network.bus_to_node
     timesteps_per_day = 24 ÷ base_input.temporal_resolution_hours
-    # Seasonal hydro: any reservoir unit makes the inter-period reservoir chain
+    # Seasonal hydro: any reservoir unit makes the inter-period reservoir state
     # relevant (gated on the same tsam_inter_period_linking flag as batteries).
     has_reservoir = any(any(g.reservoir_capacity .> 0) for g in base_input.generators)
-    # Distinct names per stochastic scenario (each has its own periods and chains)
+    # Distinct names per stochastic scenario (each has its own periods and states)
     day_offset = 1000 * scenario_idx
     stag = scenario_idx > 0 ? "_s$(scenario_idx)" : ""
     prev_floor = nothing   # re_cap_exemption
@@ -4913,7 +4998,6 @@ function add_tsam_periods_validation!(
             (input = scenario_master_input(input, scenario.multipliers, y_idx))
         period_starts = input.tsam_period_start_hours[y_idx]
         period_weights = input.tsam_period_weights[y_idx]
-        chrono_order = input.tsam_chronological_order[y_idx]
         K = length(period_starts)
 
         if K < 1
@@ -4933,83 +5017,38 @@ function add_tsam_periods_validation!(
         re_demand = zeros(length(re_energy))
         curt_year = CurtailmentYear()
 
-        # --- Create inter-period SOC boundary variables ---
-        if input.tsam_inter_period_linking && n_bat > 0
-            vars.inter_period_soc[y_idx] = Dict{Tuple{Int,Int,Int}, VariableRef}()
-
-            for b in 1:n_bat
+        # --- Seasonal storage: what is linked this year ---
+        # Batteries with energy in service this year (the capacity the
+        # period's SOC bounds use) at the buses the day model has them;
+        # reservoirs at the buses of their generator
+        day_period = Int[]
+        bat_caps = Dict{Tuple{Int,Int}, AffExpr}()
+        res_keys = Tuple{Int,Int}[]
+        if input.tsam_inter_period_linking && (n_bat > 0 || has_reservoir)
+            for b in 1:n_bat, n in 1:n_buses
                 bat = input.batteries[b]
-                for n in 1:n_buses
-                    # The energy capacity the period's SOC bounds use: a
-                    # battery the master keeps past its lifetime carries
-                    # its life-extended energy across periods too
-                    total_cap = battery_energy_in_service(vars, bat, b, n, y_idx)
-
-                    # Create K+1 boundary variables (0=year start, 1..K=after each period)
-                    for p in 0:K
-                        v = @variable(model,
-                            lower_bound = 0,
-                            base_name = "soc_bnd$(stag)_y$(y_idx)_b$(b)_n$(n)_p$(p)"
-                        )
-                        @constraint(model, v <= total_cap,
-                            base_name = "soc_bnd_cap$(stag)_y$(y_idx)_b$(b)_n$(n)_p$(p)")
-                        vars.inter_period_soc[y_idx][(b, n, p)] = v
-                    end
-
-                    # Year-cyclic: SOC at year end == SOC at year start
-                    @constraint(model,
-                        vars.inter_period_soc[y_idx][(b, n, K)] ==
-                        vars.inter_period_soc[y_idx][(b, n, 0)],
-                        base_name = "soc_year_cyclic$(stag)_y$(y_idx)_b$(b)_n$(n)"
-                    )
-                end
+                (bat.max_discharge_power[n] > 0 ||
+                 (length(bat.invest_max_power) >= n && bat.invest_max_power[n] > 0)) || continue
+                cap = battery_energy_in_service(vars, bat, b, n, y_idx)
+                iszero(cap) || (bat_caps[(b, n)] = cap)
             end
-        end
-
-        # --- Create inter-period reservoir-level boundary variables ---
-        # One chronological chain of energy levels per reservoir gen-node, so
-        # water can be moved across seasons. Bounded by the in-service
-        # reservoir capacity (existing + built so far), as the period's levels.
-        if input.tsam_inter_period_linking && has_reservoir
-            vars.inter_period_reservoir[y_idx] = Dict{Tuple{Int,Int,Int}, VariableRef}()
-
-            for g in 1:length(input.generators)
-                gen = input.generators[g]
-                for n in 1:n_buses
-                    gen.reservoir_capacity[n] > 0 || continue
-                    res_cap = reservoir_in_service(vars, gen, g, n, y_idx)
-                    lo = gen.reservoir_min_level[n] * res_cap
-                    hi = gen.reservoir_max_level[n] * res_cap
-
-                    for p in 0:K
-                        if res_cap isa Real
-                            v = @variable(model,
-                                lower_bound = lo, upper_bound = hi,
-                                base_name = "reslvl_bnd$(stag)_y$(y_idx)_g$(g)_n$(n)_p$(p)")
-                        else
-                            v = @variable(model, lower_bound = 0,
-                                base_name = "reslvl_bnd$(stag)_y$(y_idx)_g$(g)_n$(n)_p$(p)")
-                            @constraint(model, v >= lo,
-                                base_name = "reslvl_bnd_min$(stag)_y$(y_idx)_g$(g)_n$(n)_p$(p)")
-                            @constraint(model, v <= hi,
-                                base_name = "reslvl_bnd_max$(stag)_y$(y_idx)_g$(g)_n$(n)_p$(p)")
-                        end
-                        vars.inter_period_reservoir[y_idx][(g, n, p)] = v
-                    end
-
-                    # Year-cyclic: reservoir level at year end == year start
-                    @constraint(model,
-                        vars.inter_period_reservoir[y_idx][(g, n, K)] ==
-                        vars.inter_period_reservoir[y_idx][(g, n, 0)],
-                        base_name = "reslvl_year_cyclic$(stag)_y$(y_idx)_g$(g)_n$(n)")
-                end
+            for (g, gen) in enumerate(input.generators), n in 1:n_buses
+                gen.reservoir_capacity[n] > 0 && gen.rated_power[n] > 0 && push!(res_keys, (g, n))
             end
+            isempty(bat_caps) && isempty(res_keys) || (day_period = tsam_day_map(input, y_idx))
         end
+        bat_keys = sort!(collect(keys(bat_caps)))
+        # Per linked storage and period: start level, intra-period change Δ,
+        # highest (u) and lowest (l) level relative to the start, decay ρ
+        intra() = (s0 = Any[nothing for _ in 1:K], Δ = [AffExpr(0.0) for _ in 1:K],
+                   u = [AffExpr(0.0) for _ in 1:K], l = [AffExpr(0.0) for _ in 1:K],
+                   ρ = ones(K))
+        bat_intra = Dict(key => intra() for key in bat_keys)
+        res_intra = Dict(key => intra() for key in res_keys)
 
-        # --- Process each period in chronological order ---
-        for (chrono_idx, period_idx) in enumerate(chrono_order)
-            start_hour = period_starts[period_idx]
-            weight = period_weights[period_idx]
+        # --- Each period ---
+        for (k, start_hour) in enumerate(period_starts)
+            weight = period_weights[k]
             end_hour = min(start_hour + timesteps_per_day - 1, size(input.base_demand, 1))
             hours = end_hour - start_hour + 1
             if hours < 1
@@ -5019,43 +5058,36 @@ function add_tsam_periods_validation!(
             day_demand = input.base_demand[start_hour:end_hour, :]
 
             # Create PowerSystemVariables for this period
-            ps_vars = create_day_ps_vars!(model, input, y_idx, chrono_idx + day_offset, hours)
+            ps_vars = create_day_ps_vars!(model, input, y_idx, k + day_offset, hours)
 
-            # Build inter-period override dicts when seasonal linking is active.
-            # Batteries chain SOC, reservoirs chain water level; both attach the
-            # period start to the previous boundary and its end to the next.
+            # A linked storage starts the period at a free level s0 and ends
+            # it at s0 + Δ (a reservoir: its start level after the period's
+            # evaporation, ρ·s0, + Δ) instead of being cyclic
             tech_output = nothing
-
-            soc_initial = nothing
-            soc_final = nothing
-            if input.tsam_inter_period_linking && n_bat > 0
-                soc_initial = Dict{Tuple{Int,Int}, Any}()
-                soc_final = Dict{Tuple{Int,Int}, Any}()
-                for b in 1:n_bat
-                    for n in 1:n_buses
-                        soc_initial[(b, n)] = vars.inter_period_soc[y_idx][(b, n, chrono_idx - 1)]
-                        soc_final[(b, n)] = vars.inter_period_soc[y_idx][(b, n, chrono_idx)]
-                    end
-                end
+            soc_initial = isempty(bat_keys) ? nothing : Dict{Tuple{Int,Int}, Any}()
+            soc_final = isempty(bat_keys) ? nothing : Dict{Tuple{Int,Int}, Any}()
+            for (b, n) in bat_keys
+                st = bat_intra[(b, n)]
+                tag = "$(stag)_y$(y_idx)_b$(b)_n$(n)_p$(k)"
+                st.s0[k] = @variable(model, lower_bound = 0, base_name = "soc_start$(tag)")
+                st.Δ[k] = 1.0 * @variable(model, base_name = "soc_delta$(tag)")
+                soc_initial[(b, n)] = st.s0[k]
+                soc_final[(b, n)] = st.s0[k] + st.Δ[k]
             end
-
-            res_initial = nothing
-            res_final = nothing
-            if input.tsam_inter_period_linking && has_reservoir
-                res_initial = Dict{Tuple{Int,Int}, Any}()
-                res_final = Dict{Tuple{Int,Int}, Any}()
-                for g in 1:length(input.generators)
-                    gen = input.generators[g]
-                    for n in 1:n_buses
-                        gen.reservoir_capacity[n] > 0 || continue
-                        res_initial[(g, n)] = vars.inter_period_reservoir[y_idx][(g, n, chrono_idx - 1)]
-                        res_final[(g, n)] = vars.inter_period_reservoir[y_idx][(g, n, chrono_idx)]
-                    end
-                end
+            res_initial = isempty(res_keys) ? nothing : Dict{Tuple{Int,Int}, Any}()
+            res_final = isempty(res_keys) ? nothing : Dict{Tuple{Int,Int}, Any}()
+            for (g, n) in res_keys
+                st = res_intra[(g, n)]
+                tag = "$(stag)_y$(y_idx)_g$(g)_n$(n)_p$(k)"
+                st.ρ[k] = (1.0 - input.generators[g].reservoir_evaporation_rate[n])^hours
+                st.s0[k] = @variable(model, lower_bound = 0, base_name = "reslvl_start$(tag)")
+                st.Δ[k] = 1.0 * @variable(model, base_name = "reslvl_delta$(tag)")
+                res_initial[(g, n)] = st.s0[k]
+                res_final[(g, n)] = st.ρ[k] * st.s0[k] + st.Δ[k]
             end
 
             tech_output, tech_day_cost, tech_spend = add_day_operational_constraints!(
-                model, ps_vars, vars, input, y_idx, chrono_idx + day_offset,
+                model, ps_vars, vars, input, y_idx, k + day_offset,
                 day_demand, start_hour;
                 initial_soc_overrides=soc_initial,
                 final_soc_targets=soc_final,
@@ -5066,6 +5098,37 @@ function add_tsam_periods_validation!(
                 period_scale=max(1.0, input.temporal_resolution_hours) * weight
             )
 
+            # The period's highest and lowest level relative to its start
+            # (a reservoir: relative to its start level decayed by the
+            # evaporation so far, i.e. the trajectory of a reservoir started
+            # empty)
+            for (b, n) in bat_keys
+                st = bat_intra[(b, n)]
+                tag = "$(stag)_y$(y_idx)_b$(b)_n$(n)_p$(k)"
+                u = @variable(model, lower_bound = 0, base_name = "soc_intra_max$(tag)")
+                l = @variable(model, upper_bound = 0, base_name = "soc_intra_min$(tag)")
+                for t in 2:(hours + 1)
+                    @constraint(model, ps_vars.bat_soc[b, n, t] - st.s0[k] <= u)
+                    @constraint(model, ps_vars.bat_soc[b, n, t] - st.s0[k] >= l)
+                end
+                st.u[k] = 1.0 * u
+                st.l[k] = 1.0 * l
+            end
+            for (g, n) in res_keys
+                st = res_intra[(g, n)]
+                tag = "$(stag)_y$(y_idx)_g$(g)_n$(n)_p$(k)"
+                keep = 1.0 - input.generators[g].reservoir_evaporation_rate[n]
+                u = @variable(model, lower_bound = 0, base_name = "reslvl_intra_max$(tag)")
+                l = @variable(model, upper_bound = 0, base_name = "reslvl_intra_min$(tag)")
+                for t in 2:(hours + 1)
+                    rel = ps_vars.reservoir_level[g, n, t] - keep^(t - 1) * st.s0[k]
+                    @constraint(model, rel <= u)
+                    @constraint(model, rel >= l)
+                end
+                st.u[k] = 1.0 * u
+                st.l[k] = 1.0 * l
+            end
+
             # Weighted operational cost (candidate technologies' too)
             day_cost = calculate_day_operational_cost_tsam(
                 ps_vars, input, y_idx, hours, weight;
@@ -5075,7 +5138,7 @@ function add_tsam_periods_validation!(
             # (cyclic tanks per period; the day's cost is in $, × weight)
             fuel_day = add_master_fuel_day!(model, ps_vars, input, y_idx,
                 start_hour, hours, tech_output;
-                extra = k -> master_fuel_capacity(vars, input, y_idx, k))
+                extra = key -> master_fuel_capacity(vars, input, y_idx, key))
             add_to_expression!(day_cost, fuel_day, weight)
             push!(vars.operational_costs[y_idx], day_cost)
             input.budget_total && push!(day_spends,
@@ -5088,11 +5151,54 @@ function add_tsam_periods_validation!(
             # The period's CO2, renewable output and demand, weighted to
             # the year like its cost
             tres = max(1.0, input.temporal_resolution_hours)
-            for (k, e) in enumerate(day_co2_by_group(ps_vars, tech_output, input, hours))
-                add_to_expression!(annual_co2[k], e, tres * weight)
+            for (i, e) in enumerate(day_co2_by_group(ps_vars, tech_output, input, hours))
+                add_to_expression!(annual_co2[i], e, tres * weight)
             end
             add_day_re!(re_energy, re_generation, re_demand, ps_vars, tech_output, input, y_idx,
                         start_hour, hours, tres * weight)
+        end
+
+        # --- The inter-day state of each linked storage over the year ---
+        if !isempty(bat_keys)
+            vars.inter_period_soc[y_idx] = Dict{Tuple{Int,Int,Int}, VariableRef}()
+            for (b, n) in bat_keys
+                st = bat_intra[(b, n)]
+                S = add_inter_day_state!(model, day_period, st.Δ, st.u, st.l, st.ρ,
+                    0.0, bat_caps[(b, n)], "soc_inter$(stag)_y$(y_idx)_b$(b)_n$(n)")
+                for (d, v) in enumerate(S)
+                    vars.inter_period_soc[y_idx][(b, n, d - 1)] = v
+                end
+            end
+        end
+        if !isempty(res_keys)
+            vars.inter_period_reservoir[y_idx] = Dict{Tuple{Int,Int,Int}, VariableRef}()
+            for (g, n) in res_keys
+                gen = input.generators[g]
+                st = res_intra[(g, n)]
+                # The in-service capacity (existing + built so far), as the
+                # period's level bounds
+                res_cap = reservoir_in_service(vars, gen, g, n, y_idx)
+                name = "reslvl_inter$(stag)_y$(y_idx)_g$(g)_n$(n)"
+                S = add_inter_day_state!(model, day_period, st.Δ, st.u, st.l, st.ρ,
+                    gen.reservoir_min_level[n] * res_cap, gen.reservoir_max_level[n] * res_cap,
+                    name)
+                for (d, v) in enumerate(S)
+                    vars.inter_period_reservoir[y_idx][(g, n, d - 1)] = v
+                end
+                # Head-dependent power reads the period's own level: the
+                # period starts no higher than the reservoir on any of its
+                # days, so it never sees more head than the year gives it
+                hmf = n <= length(gen.reservoir_head_min_factor) ?
+                    gen.reservoir_head_min_factor[n] : 1.0
+                span = (gen.reservoir_max_level[n] - gen.reservoir_min_level[n]) *
+                       gen.reservoir_capacity[n]
+                if hmf < 1.0 && span > 0
+                    for (d, k) in enumerate(day_period)
+                        st.s0[k] === nothing && continue
+                        @constraint(model, st.s0[k] <= S[d], base_name = "$(name)_head_d$(d - 1)")
+                    end
+                end
+            end
         end
 
         input.budget_total && record_year_operating_cost!(model, scenario_idx, y_idx, day_spends)

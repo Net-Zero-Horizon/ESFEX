@@ -4014,7 +4014,7 @@ class Orchestrator:
                 # 4. TSAM periods: the ones chosen once for the horizon
                 tsam_starts_y = [[st + 1 for st in tsam.period_start_hours]] if tsam else []
                 tsam_weights_y = [list(tsam.period_weights)] if tsam else []
-                tsam_order_y = [[i + 1 for i in tsam.chronological_order]] if tsam else []
+                tsam_day_period_y = [[k + 1 for k in tsam.day_period]] if tsam else []
 
                 # 5. Stochastic scenarios
                 use_stochastic = master_cfg.stochastic if master_cfg else False
@@ -4076,7 +4076,7 @@ class Orchestrator:
                     use_tsam=use_tsam,
                     tsam_period_start_hours=tsam_starts_y,
                     tsam_period_weights=tsam_weights_y,
-                    tsam_chronological_order=tsam_order_y,
+                    tsam_day_period=tsam_day_period_y,
                     tsam_inter_period_linking=(
                         master_cfg.tsam_inter_period_linking if master_cfg else True
                     ),
@@ -4416,24 +4416,28 @@ class Orchestrator:
         critical days, the days of the horizon with the largest net load
         (``master_critical_days``: horizon-mean demand against the renewable
         profiles weighted by the capacity behind each). Each critical day
-        stands for one day of the year; the representative days (TSAM
-        periods) share the rest, reweighted so the year keeps their demand
-        and renewable energy (``master_day_weights``). Also the storage firm
-        hours of the adequacy constraint: ``master_problem.storage_firm_hours``
-        or the longest stretch without solar on the critical days. Logged
-        with their dates."""
+        stands for one day of the year. The representative days share the
+        rest, reweighted so the year keeps their demand and renewable energy
+        (``master_day_weights``); a critical day leaves its TSAM cluster
+        instead (``with_critical_days``), so every TSAM weight stays the
+        period's count of days in the year, the days the master's seasonal
+        storage runs through (the renewable profiles are then rescaled to
+        the year's energy). Also the storage firm hours of the adequacy
+        constraint: ``master_problem.storage_firm_hours`` or the longest
+        stretch without solar on the critical days. Logged with their
+        dates."""
         from esfex.bridge.adapters import master_critical_days, master_day_weights
-        from esfex.models.tsam import TSAMResult
+        from esfex.models.tsam import with_critical_days
 
         master_cfg = getattr(self.config, 'master_problem', None)
         use_tsam = master_cfg.use_tsam if master_cfg else False
         tsam = rep_offsets = None
         if use_tsam:
             tsam = self._master_tsam_periods(demand_agg, num_years, resolution_hours)
-            base, prior = list(tsam.period_start_hours), list(tsam.period_weights)
+            base = list(tsam.period_start_hours)
         else:
             rep_offsets = self._master_rep_day_offsets(demand_agg, num_years, resolution_hours)
-            base, prior = rep_offsets, None
+            base = rep_offsets
 
         profiles = self._master_re_profiles_with_capacity(resolution_hours)
         series = [s for _, _, s, _ in profiles]
@@ -4442,9 +4446,13 @@ class Orchestrator:
             master_cfg.min_day_separation if master_cfg else 5, resolution_hours,
             series, [c for _, _, _, c in profiles], exclude=base)
         weights: list[float] = []
-        if critical:
+        if critical and tsam is not None:
+            tsam = with_critical_days(tsam, critical, 24 // max(1, resolution_hours))
+            weights = list(tsam.period_weights)
+        elif critical:
             weights = master_day_weights(demand_agg, num_years, base, critical,
-                                         resolution_hours, series, prior)
+                                         resolution_hours, series)
+        if critical:
             logger.info("Critical days (lowest renewable supply against demand), the same "
                         "for every planning year, one day of the year each: %s",
                         self._rep_day_dates(critical, resolution_hours))
@@ -4461,16 +4469,8 @@ class Orchestrator:
                     "configured" if configured else "longest stretch without solar on "
                     "the critical days", firm_hours)
 
-        if tsam is not None and critical:
-            starts = base + critical
-            tsam = TSAMResult(
-                period_start_hours=starts,
-                period_weights=weights,
-                chronological_order=sorted(range(len(starts)), key=lambda i: starts[i]),
-                num_periods=len(starts),
-                critical_periods=list(range(len(base), len(starts))))
-            weights = []
         if tsam is not None:
+            weights = []
             # The masters rescale the renewable profiles on the TSAM periods
             # to each year's energy (MasterProblemAdapter._tsam_energy_matched)
             self._log_tsam_rescaling(demand_agg, num_years, tsam, resolution_hours)
@@ -4909,7 +4909,7 @@ class Orchestrator:
             use_tsam = master_cfg.use_tsam if master_cfg else False
             tsam_starts = []
             tsam_weights = []
-            tsam_order = []
+            tsam_day_period = []
 
             # The representative days (or TSAM periods) and the critical
             # days: the same for every year (chosen once)
@@ -4924,7 +4924,8 @@ class Orchestrator:
                     tsam_starts.append([s + y_idx * hours_per_year + 1
                                         for s in tsam.period_start_hours])
                     tsam_weights.append(list(tsam.period_weights))
-                    tsam_order.append([i + 1 for i in tsam.chronological_order])
+                    # The period of each day of the year (1-indexed)
+                    tsam_day_period.append([k + 1 for k in tsam.day_period])
 
             # --- Stochastic scenarios (if enabled) ---
             use_stochastic = master_cfg.stochastic if master_cfg else False
@@ -5000,7 +5001,7 @@ class Orchestrator:
                 use_tsam=use_tsam,
                 tsam_period_start_hours=tsam_starts,
                 tsam_period_weights=tsam_weights,
-                tsam_chronological_order=tsam_order,
+                tsam_day_period=tsam_day_period,
                 tsam_inter_period_linking=(
                     master_cfg.tsam_inter_period_linking if master_cfg else True
                 ),
