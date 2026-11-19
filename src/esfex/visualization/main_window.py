@@ -1586,12 +1586,28 @@ class MainWindow(QMainWindow):
         snapshot = loader.get_timestep(year, hour)
         self._populate_contingency_combo_from_snapshot(snapshot)
 
+    @staticmethod
+    def _contingency_ratings(analyzer) -> dict:
+        """Line (MW) and transformer (MVA) ratings by element id, for the
+        translated contingency texts. The AC analyzer keeps the branches
+        on its DC fallback."""
+        if not hasattr(analyzer, "lines"):
+            analyzer = getattr(analyzer, "_dc_fallback", None)
+        ratings = {str(ln.line_id): ln.capacity_mw
+                   for ln in getattr(analyzer, "lines", [])}
+        ratings.update({str(t.name): t.rated_power_mva
+                        for t in getattr(analyzer, "transformers", [])})
+        return ratings
+
     def _populate_contingency_combo_from_snapshot(self, snapshot: dict):
         """Populate the contingency combo from a snapshot dict."""
         analyzer = getattr(self, "_sld_contingency_analyzer", None)
         if analyzer is None:
             return
+        from esfex.visualization.sld.graph_builder import contingency_option_label
+
         contingencies = analyzer.get_contingency_list(snapshot)
+        ratings = self._contingency_ratings(analyzer)
 
         # Preserve current selection if possible
         current_text = self._sld_contingency_combo.currentText()
@@ -1601,11 +1617,9 @@ class MainWindow(QMainWindow):
         self._sld_contingency_combo.addItem(tr("messages.sld_no_contingency"), None)
         restore_idx = 0
         for i, ctg in enumerate(contingencies):
-            self._sld_contingency_combo.addItem(
-                ctg["description"],
-                ctg,
-            )
-            if ctg["description"] == current_text:
+            label = contingency_option_label(ctg, ratings)
+            self._sld_contingency_combo.addItem(label, ctg)
+            if label == current_text:
                 restore_idx = i + 1
         self._sld_contingency_combo.setCurrentIndex(restore_idx)
         self._sld_contingency_combo.blockSignals(False)
@@ -1645,8 +1659,11 @@ class MainWindow(QMainWindow):
         if analyzer is None:
             return
 
+        from esfex.visualization.sld.graph_builder import contingency_description
+
         ctg_type = ctg_data["type"]
         eid = ctg_data["element_id"]
+        ratings = self._contingency_ratings(analyzer)
 
         # Use integrated N-1 analyzer if available (adds frequency + voltage)
         integrated = getattr(self, "_integrated_n1", None)
@@ -1665,6 +1682,8 @@ class MainWindow(QMainWindow):
                     result_dict["has_frequency_violation"] = assessment.has_frequency_violation
                 if assessment.voltage_violations:
                     result_dict["voltage_violations"] = assessment.voltage_violations
+                result_dict["element_description"] = contingency_description(
+                    result_dict, snapshot, ctg_type, ratings)
                 self.sld_widget.update_contingency_data(json.dumps(result_dict))
                 return
             except Exception:
@@ -1680,6 +1699,8 @@ class MainWindow(QMainWindow):
 
         import dataclasses
         result_dict = dataclasses.asdict(result)
+        result_dict["element_description"] = contingency_description(
+            result_dict, snapshot, ctg_type, ratings)
         self.sld_widget.update_contingency_data(json.dumps(result_dict))
 
     def _nk_contingency_types(self) -> set[str]:

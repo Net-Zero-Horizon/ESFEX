@@ -518,6 +518,9 @@ class ResultsPanel(QWidget):
         self._year_label.setText(tr("results_panel.year"))
         self._alt_label.setText(tr("results_panel.alternative"))
         self._var_label.setText(tr("results_panel.variable"))
+        # The map's legends and tooltips are text sent from here: redraw
+        # them in the new language (no-op while the panel is hidden).
+        self._schedule_render()
 
     # ------------------------------------------------------------------
     # Public API
@@ -562,6 +565,8 @@ class ResultsPanel(QWidget):
 
         import math
 
+        from esfex.visualization.workflows.risk_charts import hazard_label
+
         circles = []
         for d in self._risk_data:
             lat, lng = d.get("lat", 0), d.get("lng", 0)
@@ -575,7 +580,7 @@ class ResultsPanel(QWidget):
             elif metric == "eal":
                 value = d.get("eal", 0)
                 risk_idx = min(1.0, math.log10(max(value, 1)) / 6)  # 0-1M range
-                label_val = f"EAL = ${value:,.0f}/yr"
+                label_val = tr("map_legends.eal_value", value=f"{value:,.0f}")
             else:  # composite_risk
                 value = d.get("composite_risk", 0)
                 risk_idx = min(1.0, value * 3)
@@ -585,7 +590,7 @@ class ResultsPanel(QWidget):
 
             tooltip = tr(
                 "results_panel.risk_tooltip", value=label_val,
-                hazard=d.get('dominant_hazard', '').replace('_', ' ').title(),
+                hazard=hazard_label(d.get('dominant_hazard', '')),
                 elements=d.get('elements', ''),
             )
             circles.append({
@@ -598,8 +603,10 @@ class ResultsPanel(QWidget):
 
         if circles:
             self._map_widget.add_risk_circles(circles)
+            display = next((v[0] for v in _RISK_VARIABLES if v[2] == metric),
+                           metric.replace("_", " ").title())
             self._map_widget.add_risk_legend(
-                metric.replace("_", " ").title(),
+                _variable_label(display),
                 [
                     {"label": tr("results_panel.risk_low"), "color": "#27ae60"},
                     {"label": tr("results_panel.risk_medium"), "color": "#f1c40f"},
@@ -1801,10 +1808,12 @@ class ResultsPanel(QWidget):
             segs = []
             if re_total[ni] > 0.01:
                 segs.append({"value": round(float(re_total[ni]), 2),
-                             "color": re_color, "label": "Renewable"})
+                             "color": re_color,
+                             "label": tr("map_legends.renewable")})
             if nonre_total[ni] > 0.01:
                 segs.append({"value": round(float(nonre_total[ni]), 2),
-                             "color": nonre_color, "label": "Non-Renewable"})
+                             "color": nonre_color,
+                             "label": tr("map_legends.non_renewable")})
             if segs:
                 node_data[ni] = segs
 
@@ -2020,7 +2029,8 @@ class ResultsPanel(QWidget):
             weight = 2 + 8 * mag / max_flow
             color = _color_interp(mag, 0, max_flow, fl_min, fl_max)
             meta = route_meta[r_idx] if r_idx < len(route_meta) else {}
-            lbl = f"Route {meta.get('from', '?')}\u2192{meta.get('to', '?')}"
+            lbl = tr("map_legends.fuel_route",
+                     src=meta.get('from', '?'), dst=meta.get('to', '?'))
             lines.append({
                 "coords": route_geoms[r_idx],
                 "weight": round(weight, 1),

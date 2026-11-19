@@ -34,10 +34,91 @@ import math
 from typing import Any
 
 from esfex.visualization.data.gui_model import GuiSystemState
+from esfex.visualization.i18n import tr
 from esfex.visualization.sld.router import GridRouter, Obstacles
 from esfex.visualization.sld.voltage_colors import get_voltage_color
 
 log = logging.getLogger(__name__)
+
+
+def _node_fallback_name(index: int) -> str:
+    """Display name of a node that has none."""
+    return tr("sld_graph.node_fallback", index=index)
+
+
+_CTG_KINDS = ("generator", "battery", "line", "transformer")
+
+
+def contingency_option_label(ctg: dict, ratings: dict | None = None) -> str:
+    """Label of an entry of the analysis' contingency list
+    (``{type, element_id, description, impact_mw}``) in the current
+    language: the MW lost for a generator or battery (``impact_mw``), the
+    rating for a line (MW) or transformer (MVA) from ``ratings`` (element
+    id → rating). Entries it cannot build keep the analysis' text."""
+    kind = ctg.get("type")
+    eid = str(ctg.get("element_id", ""))
+    if kind in ("generator", "battery"):
+        value = ctg.get("impact_mw")
+    elif kind in ("line", "transformer"):
+        value = (ratings or {}).get(eid)
+    else:
+        value = None
+    if value is None:
+        return str(ctg.get("description") or eid)
+    return tr(f"sld_graph.ctg_option_{kind}", element=eid, mw=f"{float(value):.0f}")
+
+
+def contingency_description(result: dict, snapshot: dict | None = None,
+                            kind: str | None = None,
+                            ratings: dict | None = None) -> str:
+    """Description of an N-1 contingency result for the SLD, in the
+    current language.
+
+    The analysis' ``element_description`` is English text the CLI and
+    agents also read, so the GUI builds its own from the structured
+    fields: the element type (``kind``, else ``contingency_type``), its
+    id, the MW lost / the branch rating read from ``snapshot`` (the same
+    figures the analysis uses; a branch missing there from ``ratings``,
+    element id → MW or MVA), whether the analysis tripped anything
+    (it records the pre-contingency state only when it did) and the AC
+    convergence flag. Types it does not know keep the analysis' text.
+    """
+    kind = kind or result.get("contingency_type") or ""
+    if kind not in _CTG_KINDS:
+        return str(result.get("element_description") or "")
+    eid = str(result.get("element_id", ""))
+    tripped = bool(result.get("pre_gen_mw") or result.get("pre_flow_mw"))
+    ac_failed = result.get("ac_converged") is False
+    if not tripped and not ac_failed:
+        return tr(f"sld_graph.ctg_idle_{kind}", element=eid)
+
+    snap = snapshot or {}
+    mw = None
+    if kind == "generator":
+        mw = (snap.get("generators") or {}).get(eid, {}).get("output_mw")
+    elif kind == "battery":
+        b = (snap.get("batteries") or {}).get(eid, {})
+        if b:
+            mw = float(b.get("discharge_mw", 0.0) or 0.0) - float(b.get("charge_mw", 0.0) or 0.0)
+    else:
+        lines = snap.get("lines") or {}
+        mw = (lines.get(f"edge_{eid}") or lines.get(eid) or {}).get("capacity_mw")
+        if mw is None:
+            mw = (ratings or {}).get(eid)
+    try:
+        mw = float(mw) if mw is not None else None
+    except (TypeError, ValueError):
+        mw = None
+    if mw is not None and mw > 0 and tripped:
+        text = tr(f"sld_graph.ctg_loss_{kind}_mw", element=eid,
+                  mw=f"{mw:.1f}" if kind in ("generator", "battery") else f"{mw:.0f}")
+    else:
+        text = tr(f"sld_graph.ctg_loss_{kind}", element=eid)
+    if ac_failed:
+        key = "sld_graph.ctg_dc_fallback" if tripped else "sld_graph.ctg_ac_diverged"
+        text = tr(key, description=text)
+    return text
+
 
 # ── Sizing constants ──
 # Bus bars are drawn HORIZONTAL (with merge-by-substation collapsing
@@ -210,7 +291,7 @@ def build_elk_graph(
         bus_equipment[target_gid].append({
             "elementType": "load",
             "elementId": f"load_node_{node.index}",
-            "label": f"Load {node.name}",
+            "label": tr("sld_graph.load_label", node=node.name),
             "sublabel": f"{node.demand.peak_mw:.0f} MW",
             "symbolType": "load",
             "color": colors.get("load", "#E67E22"),
@@ -278,12 +359,12 @@ def build_elk_graph(
 
     # Transformers: bridge the two buses wired to it via its stub lines; fall
     # back to from_bus/to_bus when the geographic stubs aren't both available.
-    for i, tr in enumerate(state.transformers):
+    for i, xf in enumerate(state.transformers):
         seen: list[str] = []
         for b in tr_terminals.get(str(i), []):
             if b not in seen:
                 seen.append(b)
-        fb, tb = (seen[0], seen[1]) if len(seen) >= 2 else (tr.from_bus, tr.to_bus)
+        fb, tb = (seen[0], seen[1]) if len(seen) >= 2 else (xf.from_bus, xf.to_bus)
         if (fb not in valid_bus_ids or tb not in valid_bus_ids or fb == tb):
             continue
         sg = bus_to_group.get(fb)
@@ -292,7 +373,7 @@ def build_elk_graph(
             continue
         if group_meta[sg]["parent_node"] != group_meta[tg]["parent_node"]:
             continue
-        _add_edge(sg, tg, "transformer", 0.0, tr.rated_power_mva or 0, i)
+        _add_edge(sg, tg, "transformer", 0.0, xf.rated_power_mva or 0, i)
     for i, conv in enumerate(state.acdc_converters):
         if (conv.from_bus not in valid_bus_ids
                 or conv.to_bus not in valid_bus_ids
@@ -411,7 +492,7 @@ def build_elk_graph(
         if bus_ids:
             groups.append({
                 "nodeId": node.index,
-                "name": node.name or f"Node {node.index}",
+                "name": node.name or _node_fallback_name(node.index),
                 "busIds": bus_ids,
             })
 
@@ -425,7 +506,7 @@ def build_elk_graph(
     if positions is not None and elk_children:
         groups = _apply_site_layout(
             elk_children, elk_edges, bus_equipment, group_meta, positions,
-            {n.index: (n.name or f"Node {n.index}") for n in state.nodes},
+            {n.index: (n.name or _node_fallback_name(n.index)) for n in state.nodes},
         )
     else:
         _apply_grid_layout(elk_children, elk_edges, state, bus_equipment)
