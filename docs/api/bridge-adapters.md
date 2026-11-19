@@ -158,6 +158,14 @@ def conflict(self, limit: int = 20) -> list[str]
 
 After an infeasible solve, the constraints and bounds that cannot hold together (the solver's irreducible infeasible subsystem), at most `limit` of them. Empty when the solver cannot compute one (HiGHS and Gurobi can) or under Benders. The myopic runner logs them when a year's master is infeasible.
 
+### diagnostics
+
+```python
+def diagnostics(self, top_n: int = 20) -> dict[str, dict] | None
+```
+
+`MasterProblemAdapter` only. After an optimal solve, the binding constraint families, top duals and paid slacks of the master (Julia `master_diagnostics`), as groups keyed `year_{YYYY}` (`all`: rows without a year in a master of several years), each `{"year", "attrs", "binding", "top", "slacks"}` with lists of plain dicts (`esfex.io.master_diagnostics.from_julia`). `None` under Benders, without a solved model, or when the extraction fails (logged as a warning; it never fails the run). The runner logs a digest of it after each master solve and writes it to [`/diagnostics/master`](../reference/hdf5-output-schema.md#diagnosticsmaster).
+
 ### get_solution_values
 
 ```python
