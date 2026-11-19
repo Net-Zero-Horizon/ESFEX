@@ -38,7 +38,7 @@ from esfex.config.schema import (
 
 # Top-level keys only the Studio reads, from the raw YAML (they are not part
 # of the schema and the solver ignores them).
-_GUI_TOP_LEVEL_KEYS = frozenset({"visual_scaling", "_geo_assets"})
+_GUI_TOP_LEVEL_KEYS = frozenset({"visual_scaling", "_geo_assets", "_last_results"})
 
 
 def find_unknown_keys(raw: dict[str, Any]) -> list[str]:

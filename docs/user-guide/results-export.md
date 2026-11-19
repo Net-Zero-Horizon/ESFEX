@@ -2,7 +2,7 @@
 
 ## HDF5 Output Structure
 
-One HDF5 file is written per run, in the output directory, named `<config_stem>_<ddmmyyyy>_<HHMM>.h5` (for example `results/isla_juventud_15012026_1030.h5`; the system name replaces the stem when there is no config file). The layout is organised by *kind* of data — static configuration, summary scalars, full time series, multi-system aggregates, and the MGA / SPORES sweep:
+One HDF5 file is written per run, in the output directory (`esfex run`: `-o`, default `./results`; a Studio run: the `results` folder next to the saved configuration, see [Projects and their results](../gui/overview.md#projects-and-their-results)), named `<config_stem>_<ddmmyyyy>_<HHMM>.h5` (for example `results/isla_juventud_15012026_1030.h5`; the system name replaces the stem when there is no config file). The layout is organised by *kind* of data — static configuration, summary scalars, full time series, multi-system aggregates, and the MGA / SPORES sweep:
 
 ```
 <config_stem>_<ddmmyyyy>_<HHMM>.h5

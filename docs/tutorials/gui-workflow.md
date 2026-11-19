@@ -321,9 +321,9 @@ Validation covers the systems in Systems to Simulate. Fix all errors; warnings d
 ## Step 14: Run the Simulation from the GUI
 
 1. Click **Run** in the toolbar. It is enabled only after a validation with no errors.
-2. The Studio writes the project to a temporary YAML file and runs `esfex run` in the **Run Output** tab, where the solver log appears.
+2. The Studio writes the project to a temporary YAML file and runs `esfex run` in the **Run Output** tab, where the solver log appears. Results go to the `results` folder next to your saved configuration (an unsaved project writes to `~/.cache/esfex/studio_results`; the status bar says where).
 3. To stop the run, click **■ Stop** in the tab corner or press `Ctrl+C` in the Run Output tab. A second Stop force-kills the process.
-4. When the run finishes successfully, **Results** and **Sensitivity** are enabled. By default the results viewer opens automatically.
+4. When the run finishes successfully, **Results** and **Sensitivity** are enabled. By default the results viewer opens automatically. The project remembers the results file: save the project, and the next time you open it the Studio offers to open those results.
 
 Alternatively, save the configuration and run it from the command line:
 
@@ -339,11 +339,11 @@ esfex run -c my_system.yaml --years 25 -v
 2. Use the **Map Results** panel on the map to choose the System, Year, and Variable to draw: capacity and generation mix pies, node values such as RE Penetration, Nodal Prices (LMP), and Load Shedding, and Power Flow lines.
 3. Click **Sensitivity** in the toolbar to open the sensitivity analysis dialog.
 
-**File > Load Results…** (`Ctrl+R`) opens a results file from an earlier run.
+**File > Load Results…** (`Ctrl+R`) opens a results file from an earlier run; the project then remembers that file.
 
 ### Accessing Results Programmatically
 
-Results are written to HDF5 in the `results` folder. A file is named `<config name>_<ddmmyyyy>_<HHMM>.h5`; runs started from the Studio use a temporary config, so their files are named `esfex_run_<random>_<ddmmyyyy>_<HHMM>.h5`. In the Python REPL:
+Results are written to HDF5 in the `results` folder (for a Studio run, the one next to the saved configuration). A file is named `<config name>_<ddmmyyyy>_<HHMM>.h5`; runs started from the Studio use a temporary config, so their files are named `esfex_run_<random>_<ddmmyyyy>_<HHMM>.h5`. In the Python REPL:
 
 ```python
 import glob
@@ -364,7 +364,7 @@ with h5py.File(path, "r") as f:
 |--------|----------|----------------|
 | **Save** | `Ctrl+S` | The configuration YAML at the current path (asks for a path the first time) |
 | **Export As…** | `Ctrl+Shift+S` | The same YAML at a new path, which becomes the current file |
-| **Export Project…** | -- | A `.esfexp` bundle with the YAML and copies of all referenced data files |
+| **Export Project…** | -- | A `.esfexp` bundle with the YAML and copies of all referenced data files; optionally the results file (**Include results**, off by default) |
 
 Save and Export As write the same file, including map positions, line waypoints, and marker styles. `esfex run` reads it directly. If the automatic pre-save validation finds errors, you are asked whether to save anyway.
 

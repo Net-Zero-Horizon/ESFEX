@@ -2505,6 +2505,7 @@ def gui_state_to_yaml(
     stochastic_scenarios: list[GuiStochasticScenario] | None = None,
     geo_assets: dict | None = None,
     data_base_dir: str | Path | None = None,
+    last_results_file: str | Path | None = None,
 ) -> None:
     """Export GUI state to YAML, preserving non-GUI config fields.
 
@@ -2516,7 +2517,11 @@ def gui_state_to_yaml(
     resolve against (the folder the project was loaded from). When the output
     file lives elsewhere, each relative demand / availability / inflow path is
     rebased onto the output folder (or made absolute when the file is not
-    under it) so the written config still finds its data."""
+    under it) so the written config still finds its data.
+
+    ``last_results_file`` (the project's remembered results file) is written as
+    the top-level GUI-only ``_last_results`` key, relative to the output folder
+    when the file lies under it, absolute otherwise."""
     config_dict = base_config.model_dump(mode="python", by_alias=True)
 
     # Update meta_network.systems — use selected systems if available,
@@ -2606,6 +2611,12 @@ def gui_state_to_yaml(
             }
             for aid, info in geo_assets.items()
         }
+    if last_results_file:
+        from esfex.visualization.data.project_results import (
+            RESULTS_KEY, results_ref_for,
+        )
+        config_dict[RESULTS_KEY] = results_ref_for(
+            last_results_file, output_path.parent)
 
     with open(output_path, "w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
