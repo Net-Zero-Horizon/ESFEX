@@ -993,7 +993,7 @@ function build_master_variables!(
                 if age_at_year >= lifetime && base_power > 0
                     bat_life_extension[y_idx][bi][n] = @variable(model,
                         lower_bound = 0,
-                        upper_bound = base_power,
+                        upper_bound = base_power * battery_degradation_factor(bat, n, y_idx),
                         base_name = "bat_life_ext_y$(y_idx)_b$(bi)_n$(n)"
                     )
                 end
@@ -1224,16 +1224,31 @@ function reservoir_in_service(vars::MasterProblemVariables, gen, g::Int, b::Int,
 end
 
 """
+    battery_degradation_factor(bat, b, year_idx) -> Float64
+
+Share of existing battery `bat`'s rated power and energy at bus `b` left in
+year `year_idx`: `(1 − degradation_rate)^age` with
+`age = initial_age + year_idx − 1`, as the dispatch's `battery_power_limits`
+ages it (year 1 is the dispatch's base year).
+"""
+function battery_degradation_factor(bat, b::Int, year_idx::Int)::Float64
+    d = length(bat.degradation_rate) >= b ? bat.degradation_rate[b] : 0.0
+    d > 0 || return 1.0
+    return (1.0 - d)^(bat.initial_age[b] + (year_idx - 1))
+end
+
+"""
     battery_power_in_service(vars, bat, bi, b, year_idx) -> AffExpr
     battery_energy_in_service(vars, bat, bi, b, year_idx) -> AffExpr
 
 Discharge power (MW) and energy capacity (MWh) of existing battery `bat`
-(index `bi`) at bus `b` in service in year `year_idx`: its rated values while
+(index `bi`) at bus `b` in service in year `year_idx`: its rated values
+degraded by its age (`battery_degradation_factor`, as the dispatch) while
 younger than its `life_time`; afterwards the MW the master extends its life
-by (`bat_life_extension`), the energy at the battery's own energy-to-power
-ratio; 0 if not extended. The master does not degrade batteries. Every
-master constraint on an existing battery's size (the day's power and SOC
-bounds, the TSAM boundary SOC, the reported capacity) uses these.
+by (`bat_life_extension`, at most the degraded power), the energy at the
+battery's own energy-to-power ratio; 0 if not extended. Every master
+constraint on an existing battery's size (the day's power and SOC bounds,
+the TSAM boundary SOC, the firm capacity, the reported capacity) uses these.
 """
 function battery_power_in_service(vars::MasterProblemVariables, bat, bi::Int, b::Int,
                                   year_idx::Int)
@@ -1241,7 +1256,7 @@ function battery_power_in_service(vars::MasterProblemVariables, bat, bi::Int, b:
     base_power = bat.max_discharge_power[b]
     base_power > 0 || return cap
     if bat.initial_age[b] + (year_idx - 1) < bat.life_time[b]
-        add_to_expression!(cap, base_power)
+        add_to_expression!(cap, base_power * battery_degradation_factor(bat, b, year_idx))
     else
         ext = vars.bat_life_extension[year_idx][bi][b]
         ext === nothing || add_to_expression!(cap, ext)
@@ -1256,7 +1271,7 @@ function battery_energy_in_service(vars::MasterProblemVariables, bat, bi::Int, b
     base_cap > 0 || return cap
     base_power = bat.max_discharge_power[b]
     if bat.initial_age[b] + (year_idx - 1) < bat.life_time[b]
-        add_to_expression!(cap, base_cap)
+        add_to_expression!(cap, base_cap * battery_degradation_factor(bat, b, year_idx))
     elseif base_power > 0
         ext = vars.bat_life_extension[year_idx][bi][b]
         ext === nothing || add_to_expression!(cap, ext, base_cap / base_power)
@@ -2574,32 +2589,21 @@ function add_capacity_adequacy_constraints!(
 
                 end
 
-                # Battery power capacity: unified retirement (existing only),
-                # firm up to its usable energy over the firm hours
+                # Battery power in service (degraded, life-extended; existing
+                # only), firm up to its usable energy over the firm hours
                 for b in 1:n_bat
                     bat = input.batteries[b]
                     base_power = bat.max_discharge_power[n]
-                    lifetime = bat.life_time[n]
-                    initial_age = bat.initial_age[n]
-                    age_at_year = initial_age + y_idx - 1
 
                     bat_risk = n <= length(bat.risk_coefficient) ? bat.risk_coefficient[n] : 1.0
                     bat_risk *= firm_capacity_credit(bat.availability, n, peak; variable = false,
                         outage = t -> master_outage_factor(input.bat_outage_factors, b, 0, t))
                     # Firm share of its power: min(1, usable energy / H / power);
-                    # a life-extended battery keeps its energy-to-power ratio
+                    # degradation and life extension keep its energy-to-power ratio
                     firm_share = base_power > 0 ? min(1.0,
                         usable_energy_ratio(bat, n) * bat.capacity[n] / base_power / firm_h) : 0.0
-
-                    # Existing: active if age < lifetime
-                    if age_at_year < lifetime && base_power > 0
-                        add_to_expression!(total_capacity, base_power * firm_share * bat_risk)
-                    elseif base_power > 0
-                        life_ext_var = vars.bat_life_extension[y_idx][b][n]
-                        if life_ext_var !== nothing
-                            add_to_expression!(total_capacity, life_ext_var, firm_share * bat_risk)
-                        end
-                    end
+                    base_power > 0 && add_to_expression!(total_capacity,
+                        battery_power_in_service(vars, bat, b, n, y_idx), firm_share * bat_risk)
                 end
 
                 # Technology investments: cumulative capacity with degradation
@@ -3138,7 +3142,9 @@ function build_annual_asset_cost(
             retirement_y = max(1, ceil(Int, lifetime - initial_age + 1))
 
             if y_idx == retirement_y
-                charge!((:bat, b, n), base_power * decomm_cost)
+                # Its degraded power then (the most life extension keeps)
+                charge!((:bat, b, n),
+                        base_power * battery_degradation_factor(bat, n, y_idx) * decomm_cost)
                 lev = vars.bat_life_extension[y_idx][b][n]
                 if lev !== nothing
                     charge!((:bat, b, n), lev, -decomm_cost)
@@ -5293,11 +5299,12 @@ function extract_master_solution(
             for n in 1:n_buses
                 age_at_year = bat.initial_age[n] + (y_idx - 1)
                 if age_at_year < bat.life_time[n]
+                    deg = battery_degradation_factor(bat, n, y_idx)
                     if bat.capacity[n] > 0
-                        cumul_bat[y_idx][b][n] = bat.capacity[n]
+                        cumul_bat[y_idx][b][n] = bat.capacity[n] * deg
                     end
                     if bat.max_discharge_power[n] > 0
-                        cumul_bat_power[y_idx][b][n] = bat.max_discharge_power[n]
+                        cumul_bat_power[y_idx][b][n] = bat.max_discharge_power[n] * deg
                     end
                 elseif bat.max_discharge_power[n] > 0
                     life_ext_var = vars.bat_life_extension[y_idx][b][n]
@@ -5311,16 +5318,19 @@ function extract_master_solution(
                     end
                 end
             end
+            # Share in service, as for generators: past the lifetime, the
+            # share of the degraded power the master keeps
             bat_life[y_idx][b] = zeros(n_buses)
             for n in 1:n_buses
                 age_at_year = bat.initial_age[n] + (y_idx - 1)
                 ext = vars.bat_life_extension[y_idx][b][n]
+                ub = bat.max_discharge_power[n] * battery_degradation_factor(bat, n, y_idx)
                 bat_life[y_idx][b][n] = if age_at_year < bat.life_time[n]
                     1.0
-                elseif ext === nothing || bat.max_discharge_power[n] <= 0
+                elseif ext === nothing || ub <= 0
                     0.0
                 else
-                    clamp(capacity_value(ext) / bat.max_discharge_power[n], 0.0, 1.0)
+                    clamp(capacity_value(ext) / ub, 0.0, 1.0)
                 end
             end
         end
@@ -5950,7 +5960,8 @@ the NPV also covers the next `extra_years` years while the unit is still in
 service: the last modelled year's operation held at its level, scaled by
 the unit's capacity degradation, its fuel part also by the fuel's yearly
 growth (`UnitOperation.fuel_growth`); fixed O&M on the degraded capacity
-(battery: on its power, with the same yearly revenue); no life extension, so
+(battery: on its rated power, as the master charges it, and the revenue on
+its degraded power); no life extension, so
 it retires at the end of its `life_time` and pays its decommissioning then;
 discounted on from the last modelled year (`extra_unit_npv`). An
 approximation: the later years' dispatch is not modelled.
@@ -6005,7 +6016,8 @@ The NPV (discounted like the master, from its first year) of existing unit
 and how many of them it is in service, for `calculate_unit_npv`. The last
 modelled year's operation (`op`) is held at its level and scaled by the
 capacity degradation (and its fuel part by `op.fuel_growth` per year); fixed
-O&M on the capacity in service; no life extension: in its first year past
+O&M on the capacity in service (a battery: on its rated power, as the
+master charges it); no life extension: in its first year past
 `life_time` (or the first extra year, for a unit the master life-extended)
 it retires and pays its decommissioning on the capacity it had.
 `cap_last` is its capacity in service in the last modelled year.
@@ -6019,7 +6031,7 @@ function extra_unit_npv(op::UnitOperation, input::MasterProblemInput, kind::Symb
     df(y) = 1.0 / (1.0 + op.discount_rate)^(y - 1)
     key = (kind, i, n, Y)
     unit = kind === :gen ? input.generators[i] : input.batteries[i]
-    deg = kind === :gen ? unit.degradation_rate[n] : 0.0
+    deg = unit.degradation_rate[n]
     age_last = unit.initial_age[n] + (Y - 1)
     within = age_last < unit.life_time[n]
     E = get(op.energy, key, 0.0)
@@ -6032,22 +6044,23 @@ function extra_unit_npv(op::UnitOperation, input::MasterProblemInput, kind::Symb
         if within && age < unit.life_time[n]
             ratio = (1.0 - deg)^k
             if kind === :gen
-                cap = unit.rated_power[n] * (1.0 - deg)^age
+                cap = om_cap = unit.rated_power[n] * (1.0 - deg)^age
                 revenue = E * ratio * input.base_lcoe
                 cost = (C - F) * ratio + F * ratio * growth^k
             else
-                cap = cap_last
+                # Fixed O&M on its rated power, as the master charges it
+                cap, om_cap = cap_last * ratio, unit.max_discharge_power[n]
                 revenue = input.npv_annual_return_rate * unit.invest_cost_power[n] * cap
-                cost = C
+                cost = C * ratio
             end
-            v += (revenue - cost - unit.fixed_cost[n] * m_fixed * cap) * df(Y + k)
+            v += (revenue - cost - unit.fixed_cost[n] * m_fixed * om_cap) * df(Y + k)
             years += 1
         else
             # End of life: decommissioned on the capacity it had
             m_dec = mult === nothing ? 1.0 :
                 (kind === :gen ? mult.gen_decommissioning_cost : mult.bat_decommissioning_cost)
             cap = !within ? cap_last :
-                kind === :gen ? unit.rated_power[n] * (1.0 - deg)^age : cap_last
+                kind === :gen ? unit.rated_power[n] * (1.0 - deg)^age : cap_last * (1.0 - deg)^k
             v -= unit.decommissioning_cost[n] * m_dec * cap * df(Y + k)
             break
         end
@@ -6170,7 +6183,7 @@ function retire_units(input::MasterProblemInput, units::AbstractVector{UnitNPV};
                 reservoir_invest_max = _zero_at(gen.reservoir_invest_max, n))
         elseif u.unit_type == "battery"
             bat = bats[u.unit_idx]
-            mw = bat.max_discharge_power[n]
+            mw = bat.max_discharge_power[n] * battery_degradation_factor(bat, n, 1)
             bats[u.unit_idx] = with_fields(bat;
                 max_discharge_power = _zero_at(bat.max_discharge_power, n),
                 max_charge_power = _zero_at(bat.max_charge_power, n),

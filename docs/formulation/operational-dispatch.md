@@ -1004,7 +1004,7 @@ where \(d_g\) is the annual degradation rate (`degradation_rate[n]`) and:
 | Existing unit | \(\text{age} = \text{initial\_age} + (\text{year\_idx} - 1)\) |
 | New investment | \(\text{age} = \text{year\_idx} - \text{investment\_year}\) |
 
-If the remaining lifetime (\(\text{lifetime} - \text{age}\)) is zero or negative, the effective capacity is zero: the unit is retired at the end of its `life_time`, with or without degradation, as in the master problem (`generator_power_in_service`, `battery_power_limits`). The reserves, curtailment (CUR-1) and N-1 terms use the same power in service. In a `development` run the dispatch receives the master's capacity instead (retirements and life extension already applied), with no degradation and no end of life; a battery within its lifetime keeps the dispatch's own degradation, and past it gets the power and energy the master keeps.
+If the remaining lifetime (\(\text{lifetime} - \text{age}\)) is zero or negative, the effective capacity is zero: the unit is retired at the end of its `life_time`, with or without degradation, as in the master problem (`generator_power_in_service`, `battery_power_limits`). The reserves, curtailment (CUR-1) and N-1 terms use the same power in service. In a `development` run the dispatch receives the master's capacity instead (retirements and life extension already applied), with no degradation and no end of life; a battery within its lifetime keeps the dispatch's own degradation (the master degrades it the same way, so both see the same MW and MWh), and past it gets the power and energy the master keeps.
 
 The same degradation logic applies to batteries, where capacity, maximum charge power, and maximum discharge power are all degraded by the same factor:
 
