@@ -1280,7 +1280,7 @@ younger than its `life_time`; afterwards the MW the master extends its life
 by (`bat_life_extension`, at most the degraded power), the energy at the
 battery's own energy-to-power ratio; 0 if not extended. Every master
 constraint on an existing battery's size (the day's power and SOC bounds,
-the TSAM boundary SOC, the firm capacity, the reported capacity) uses these.
+the TSAM inter-day SOC, the firm capacity, the reported capacity) uses these.
 """
 function battery_power_in_service(vars::MasterProblemVariables, bat, bi::Int, b::Int,
                                   year_idx::Int)
