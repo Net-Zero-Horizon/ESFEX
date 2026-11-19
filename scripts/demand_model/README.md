@@ -5,7 +5,8 @@ The density model in `src/esfex/assets/models/demand_density_v2.*` is the final 
 to warming learned from observed hourly load* (Nature Communications, revision R1). It
 was trained by the article's own pipeline, outside this repository; ESFEX ships its
 output unchanged. `docs/contributing/demand-density-model.md` describes the model and
-how ESFEX builds its predictors.
+how ESFEX builds its predictors. The licences, attributions and citations of the
+third-party data in the shipped grids are in `DATA_SOURCES.md` at the top of the repository.
 
 ## Files here
 

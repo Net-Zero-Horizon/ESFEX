@@ -120,6 +120,11 @@ Homepage = "https://github.com/Net-Zero-Horizon/ESFEX"
 Documentation = "https://github.com/Net-Zero-Horizon/ESFEX#readme"
 Repository = "https://github.com/Net-Zero-Horizon/ESFEX"
 
+[tool.setuptools]
+# Shipped in the sdist and in the wheel's metadata next to LICENSE: the
+# third-party licence texts (LICENSES/) and the data attributions.
+license-files = ["LICENSE", "LICENSES/*.txt", "DATA_SOURCES.md"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
