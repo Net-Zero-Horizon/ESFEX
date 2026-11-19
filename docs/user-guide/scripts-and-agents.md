@@ -32,7 +32,7 @@ Each returns a dataclass with `to_dict()`, the dict the `--json` command prints 
 
 | Field | Meaning |
 |-------|---------|
-| `code` | Stable machine-readable name: a pydantic error type (`missing`, `list_type`, `less_than_equal`, ...), or `missing_file`, `path_outside_case`, `yaml`, `file_not_found`, `not_hdf5`, `not_a_results_file`, `aborted`, `failed_windows`, `run_error` |
+| `code` | Stable machine-readable name: a pydantic error type (`missing`, `list_type`, `less_than_equal`, ...), or `missing_file`, `path_outside_case`, `yaml`, `file_not_found`, `not_hdf5`, `not_a_results_file`, `aborted`, `failed_windows`, `run_error`, or one of the [resume refusals](cli.md#resuming-an-interrupted-run) (`results_not_found`, `checkpoint_missing`, `not_resumable`, `run_complete`, `config_changed`, `data_changed`, ...) |
 | `key` | Where: the dotted YAML path (`systems.island.generators.diesel.min_power`), the HDF5 file, or `""` |
 | `message` | What is wrong, for a human |
 | `fix` | What to change (`""` when there is no hint) |
@@ -96,11 +96,26 @@ esfex run -c cases/island.yaml -y 10 --json > run.json 2> run.log
   "years": [2025, 2026, 2027],
   "warnings": {"total": 9, "kinds": 7, "errors": 0, "groups": [...]},
   "last_year": {"year": 2027, "costs": {...}, "re": {...}, "shedding": {...}, ...},
-  "case": {...}
+  "case": {...},
+  "resumed_from": null,
+  "resume": null
 }
 ```
 
-`status` is `complete`, `failed_windows` (some operational windows did not solve: partial results), `aborted` (the master problem found no plan), `failed` (another error), `invalid_config` or `dry_run` (with `--dry-run`: the case loaded and its data files exist; nothing was run). `last_year` is the [summary](#esfex-summary-json) of the last year written, all sections. `output_file` is `null` when the run stopped before creating it.
+`status` is `complete`, `failed_windows` (some operational windows did not solve: partial results), `aborted` (the master problem found no plan), `failed` (another error), `invalid_config`, `resume_refused` (`--resume` was refused: `errors` says why) or `dry_run` (with `--dry-run`: the case loaded and its data files exist; nothing was run). `last_year` is the [summary](#esfex-summary-json) of the last year written, all sections. `output_file` is `null` when the run stopped before creating it.
+
+With [`--resume`](cli.md#resuming-an-interrupted-run), `resumed_from` is the first year the resumed run solved (`null` when only the file's finishing was left) and `resume` says where it started:
+
+```json
+"resumed_from": 2031,
+"resume": {"results_file": ".../island_19112026_1030.h5",
+           "checkpoint": ".../island_19112026_1030.checkpoint.json",
+           "phase": "dispatch", "resumed_from": 2031,
+           "master_years_completed": [2025, ..., 2049],
+           "dispatch_years_completed": [2025, ..., 2030], "forced": []}
+```
+
+`phase` is `master` when the run stopped while planning the years, `dispatch` when every year was planned; `forced` lists the differences `--force-resume` let through. `years` lists every year in the file, those of the interrupted run included. With `--dry-run` the two fields say where the run would resume, and nothing is run.
 
 ## `esfex summary --json`
 
@@ -169,3 +184,12 @@ esfex summary "$(jq -r .output_file run.json)" --section costs,re,shedding,warni
 ```
 
 Read `checks` and `warnings` before trusting the numbers, and `binding` to see what constrained the plan (an RE target, a budget, a build limit).
+
+A myopic run that stopped before the end (killed, a crash, a lost licence, a time limit: `status` other than `complete` and `output_file` set) need not start over:
+
+```bash
+esfex run -c case.yaml --resume "$(jq -r .output_file run.json)" --dry-run --json   # resumable? from which year?
+esfex run -c case.yaml --resume "$(jq -r .output_file run.json)" --json > run2.json
+```
+
+A refusal is exit code 1 with `status` `resume_refused` and the reason in `errors[].code`: `run_complete` (nothing to do), `not_resumable` (not a myopic `development` run: run it again), `config_changed` / `data_changed` (the case was edited since the run started: start a new run, or `--force-resume` when the change does not matter). The checkpoint (`*.checkpoint.json` next to the results file) is plain JSON; `esfex.io.checkpoint.checkpoint_info(results)` returns it without the state.
