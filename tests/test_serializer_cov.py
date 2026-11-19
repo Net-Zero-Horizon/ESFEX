@@ -631,17 +631,50 @@ def test_system_settings_edits_survive_save_and_reload(tmp_path):
     states = S.config_to_gui_states(cfg)
     st = states["Sys"]
     st.settings.target_re_penetration = 0.8
-    st.settings.max_annual_system_cost = 1.5e9
+    st.settings.max_annual_investment = 1.5e9
     st.settings.max_annual_increment = 0.07
     st.settings.inertia_limit_threshold = 0.3
     st.settings.sim_rooftop = True
     out = tmp_path / "p.yaml"
     S.gui_state_to_yaml(states, cfg, out)
     s2 = load_config(out).systems["Sys"]
-    assert (s2.target_re_penetration, s2.max_annual_system_cost, s2.max_annual_increment,
+    assert (s2.target_re_penetration, s2.max_annual_investment, s2.max_annual_increment,
             s2.inertia_limit_threshold, s2.sim_rooftop) == (0.8, 1.5e9, 0.07, 0.3, True)
     written = yaml.safe_load(out.read_text())["systems"]["Sys"]
     assert "TARGET_RE_PENETRATION" not in written
+
+
+def test_budget_keys_saved_under_new_names(tmp_path):
+    """A project with the old max_annual_system_cost key opens with it as
+    the investment budget and is saved under max_annual_investment, with the
+    operating budget and the budget scope."""
+    from esfex.config.loader import load_config
+    cfg = _minimal_config()
+    out = tmp_path / "p.yaml"
+    S.gui_state_to_yaml(S.config_to_gui_states(cfg), cfg, out)
+    raw = yaml.safe_load(out.read_text())
+    raw["systems"]["Sys"].pop("max_annual_investment")
+    raw["systems"]["Sys"]["MAX_ANNUAL_SYSTEM_COST"] = 7e8
+    out.write_text(yaml.safe_dump(raw))
+    cfg = load_config(out)
+    states = S.config_to_gui_states(cfg)
+    st = states["Sys"].settings
+    assert st.max_annual_investment == 7e8
+    assert st.max_annual_operating_cost is None and st.budget_scope == "investment"
+    st.max_annual_operating_cost = 3e8
+    st.budget_scope = "total"
+    S.gui_state_to_yaml(states, cfg, out)
+    written = yaml.safe_load(out.read_text())["systems"]["Sys"]
+    assert "MAX_ANNUAL_SYSTEM_COST" not in written and "max_annual_system_cost" not in written
+    assert (written["max_annual_investment"], written["max_annual_operating_cost"],
+            written["budget_scope"]) == (7e8, 3e8, "total")
+    s2 = load_config(out).systems["Sys"]
+    assert (s2.max_annual_investment, s2.max_annual_operating_cost, s2.budget_scope) == \
+        (7e8, 3e8, "total")
+    # Off again: the key is left out
+    st.max_annual_operating_cost = None
+    S.gui_state_to_yaml(states, cfg, out)
+    assert "max_annual_operating_cost" not in yaml.safe_load(out.read_text())["systems"]["Sys"]
 
 
 def test_risk_settings_survive_load_and_save():

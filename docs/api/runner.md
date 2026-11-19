@@ -331,7 +331,7 @@ Formulas: [Results Export § Derived Metrics](../user-guide/results-export.md#de
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `cost_breakdown` | `Optional[dict]` | `None` | Per-component decomposition of the annual system cost (fuel, O&M, CO2, investment, penalties, etc.). Contains 35 cost component keys plus `total`. See [HDF5 Output Schema — cost_breakdown](../reference/hdf5-output-schema.md#cost_breakdown) for the full list of fields. `None` when cost decomposition is not available. |
+| `cost_breakdown` | `Optional[dict]` | `None` | Per-component decomposition of the annual system cost (fuel, O&M, CO2, investment, penalties, etc.). Contains the cost components plus `total` (their sum; `pe_electrolyzer_cost`, `v2g_compensation` and `operating_budget_excess` are reporting entries outside it). See [HDF5 Output Schema — cost_breakdown](../reference/hdf5-output-schema.md#cost_breakdown) for the full list of fields. `None` when cost decomposition is not available. |
 
 ### Reservoir Hydroelectric
 

@@ -22,6 +22,23 @@ from esfex.utils.temporal import HOURS_STD_YEAR
 COST_SCALE = 1e-6    # $ → M$  (multiply when sending to Julia)
 COST_UNSCALE = 1e6   # M$ → $  (multiply when extracting from Julia)
 
+# Dispatch cost-breakdown entries a window spends against the operating
+# budget (max_annual_operating_cost; the Julia OPERATING_BUDGET_COSTS): the
+# money paid, no modelling penalty, no battery degradation, no CO2 price.
+OPERATING_BUDGET_COSTS = ("fuel_cost", "maintenance_cost", "startup_cost",
+                          "battery_maintenance_cost", "fixed_om_cost",
+                          "electrolyzer_cost", "converter_cost", "line_flow_cost",
+                          "pe_supply_cost", "pe_transport_cost")
+
+# Cost-breakdown entries that are not costs of their own: the total, the
+# electrolyzers' cost when their hydrogen fills the primary-energy tank (a
+# view of electrolyzer_cost), the V2G payment to EV owners (a transfer,
+# never in the objective) and the money spent above the operating budget
+# (already in fuel, maintenance and fixed O&M; its penalty is a cost). The
+# other entries add up to the total.
+COST_BREAKDOWN_NON_COMPONENTS = ("total", "pe_electrolyzer_cost", "v2g_compensation",
+                                 "operating_budget_excess")
+
 
 def scale_cost(val: float) -> float:
     """Scale a single monetary value from $ to M$."""
@@ -2033,6 +2050,9 @@ def convert_power_system_result(jl_result: Any) -> dict:
             # N-1 SCOPF reliability shortfall.
             "n1_security_shortfall_cost": float(cb.n1_security_shortfall_cost) * COST_UNSCALE,
             "line_flow_cost": float(cb.line_flow_cost) * COST_UNSCALE,
+            # Operating budget: the money above it and its penalty
+            "operating_budget_excess": float(cb.operating_budget_excess) * COST_UNSCALE,
+            "operating_budget_penalty": float(cb.operating_budget_penalty) * COST_UNSCALE,
             "total": float(cb.total) * COST_UNSCALE,
         }
 

@@ -43,6 +43,7 @@ from esfex.bridge.adapters import (
     reset_run_warnings,
 )
 from esfex.bridge.converters import (
+    OPERATING_BUDGET_COSTS,
     battery_availability_key,
     battery_technology_availability_key,
 )
@@ -208,6 +209,60 @@ def _fuel_link_routes(links, offsets: dict[str, int]) -> list[dict]:
                     "fuel_params": {f: dict(p) for f, p in params.items()},
                 })
     return routes
+
+
+def _merged_operating_budget(systems) -> Optional[float]:
+    """The operating budget of systems merged into one dispatch: the sum of
+    theirs when every system sets ``max_annual_operating_cost``. The merged
+    dispatch has one budget over all their spending, so when only some set
+    one, none is applied (with a warning)."""
+    budgets = [s.max_annual_operating_cost for s in systems]
+    if all(b is None for b in budgets):
+        return None
+    if any(b is None for b in budgets):
+        logger.warning(
+            "max_annual_operating_cost is set for %s but not for %s; the merged "
+            "dispatch has one operating budget over every system, so none is "
+            "applied. Set it for every system (or none).",
+            ", ".join(s.name for s, b in zip(systems, budgets) if b is not None),
+            ", ".join(s.name for s, b in zip(systems, budgets) if b is None))
+        return None
+    return float(sum(budgets))
+
+
+def _merged_budget_scope(systems) -> str:
+    """The merged master's ``budget_scope``: the first system's (a warning
+    when the systems differ; the merged master has one budget)."""
+    scopes = [s.budget_scope for s in systems]
+    if len(set(scopes)) > 1:
+        logger.warning(
+            "The systems set different budget_scope values (%s); the merged "
+            "master has one budget and uses %r.",
+            ", ".join(f"{s.name}: {s.budget_scope}" for s in systems), scopes[0])
+    return scopes[0]
+
+
+def operating_spend(breakdown: Optional[dict]) -> float:
+    """What a dispatch window spent for the operating budget
+    (``max_annual_operating_cost``), from its cost breakdown: the money it
+    paid (fuel, maintenance, start-ups, fixed O&M, electrolyzer, converter
+    and line-flow costs, primary-energy fuel bought and transported; the
+    Julia ``OPERATING_BUDGET_COSTS``), no modelling penalty."""
+    if not breakdown:
+        return 0.0
+    return float(sum(breakdown.get(k, 0.0) for k in OPERATING_BUDGET_COSTS))
+
+
+def window_operating_budget(budget_left: float, window_demand: float,
+                            remaining_demand: float) -> float:
+    """A rolling window's share of the year's operating budget: what is left
+    of it × the demand of the window's committed steps over the demand of the
+    rest of the year (from the window's start), so a window that spends less
+    leaves more to the next ones. Never negative."""
+    left = max(budget_left, 0.0)
+    if remaining_demand <= 0:
+        return left
+    return left * min(1.0, max(window_demand, 0.0) / remaining_demand)
 
 
 def _concat_window_series(windows) -> dict:
@@ -1784,7 +1839,9 @@ class Orchestrator:
             target_re_penetration=min(s.target_re_penetration for s in systems),
             min_annual_increment=min(s.min_annual_increment for s in systems),
             max_annual_increment=max(s.max_annual_increment for s in systems),
-            max_annual_system_cost=sum(s.max_annual_system_cost for s in systems),
+            max_annual_investment=sum(s.max_annual_investment for s in systems),
+            max_annual_operating_cost=_merged_operating_budget(systems),
+            budget_scope=_merged_budget_scope(systems),
             discount_rate=base.discount_rate,
             base_lcoe=base.base_lcoe,
             inertia_limit_threshold=base.inertia_limit_threshold,
@@ -3994,7 +4051,8 @@ class Orchestrator:
                     demand=year_demand_agg,
                     demand_growth=0.0,  # No growth within single year
                     discount_rate=getattr(primary, 'discount_rate', 0.05),
-                    max_annual_investment=getattr(primary, 'max_annual_system_cost', 1e9),
+                    max_annual_investment=getattr(primary, 'max_annual_investment', 1e9),
+                    budget_scope=getattr(primary, 'budget_scope', 'investment'),
                     target_re_penetration=year_target_re,
                     initial_re_penetration=year_anchor,
                     min_re_increment=min_inc,
@@ -4918,7 +4976,8 @@ class Orchestrator:
                 # master plan for more demand than the dispatch serves.
                 demand_growth=0.0,
                 discount_rate=getattr(primary, 'discount_rate', 0.05),
-                max_annual_investment=getattr(primary, 'max_annual_system_cost', 1e9),
+                max_annual_investment=getattr(primary, 'max_annual_investment', 1e9),
+                budget_scope=getattr(primary, 'budget_scope', 'investment'),
                 target_re_penetration=getattr(primary, 'target_re_penetration', 0.5),
                 initial_re_penetration=initial_re,
                 min_re_increment=getattr(primary, 'min_annual_increment', 0.0),
@@ -5924,6 +5983,22 @@ class Orchestrator:
             "for a peak just beyond it; set temporal.overlap_hours to 24 or more."
         )
 
+    @staticmethod
+    def _warn_operating_budget_excess(year: int, budget: float, breakdown: dict,
+                                      load_shed_mwh: float) -> None:
+        """One warning when the year's dispatch spent more than its operating
+        budget (``max_annual_operating_cost``): the excess, its penalty and
+        the year's unserved energy."""
+        excess = breakdown.get("operating_budget_excess", 0.0)
+        if excess <= 1e-6 * max(budget, 1.0):
+            return
+        logger.warning(
+            f"Year {year}: the dispatch spent {excess / 1e6:,.3f} M$ above "
+            f"max_annual_operating_cost ({budget / 1e6:,.3f} M$), penalised "
+            f"{breakdown.get('operating_budget_penalty', 0.0) / 1e6:,.3f} M$; "
+            f"unserved energy {load_shed_mwh:,.1f} MWh. The budget does not cover "
+            "the fuel, maintenance and fixed O&M the year needs.")
+
     def _run_operational_dispatch(
         self,
         year: int,
@@ -6037,6 +6112,15 @@ class Orchestrator:
         accumulated_cost_breakdown: dict[str, float] = {}
         feasible = True
         num_solved = 0
+
+        # Annual operating budget (max_annual_operating_cost, $/yr): each
+        # window gets what is left of it in proportion to its committed
+        # steps' demand, and what those steps spent is carried
+        op_budget = getattr(self.primary_system, 'max_annual_operating_cost', None)
+        op_budget_left = op_budget
+        # Demand of the year from each step on (MW, summed over nodes)
+        step_demand = np.asarray(demand, dtype=float).reshape(len(demand), -1).sum(axis=1)
+        demand_from = np.concatenate([np.cumsum(step_demand[::-1])[::-1], [0.0]])
 
         boundary_conditions = self.state.boundary_conditions.copy()
         # Battery / generator / reservoir rosters can change between years
@@ -6180,6 +6264,13 @@ class Orchestrator:
                 elif window == 0:
                     window_bc['battery_soc_end_cyclic'] = True
 
+            window_budget = None
+            if op_budget is not None:
+                kept_end = min(start_hour + keep_hours, hours)
+                window_budget = window_operating_budget(
+                    op_budget_left, demand_from[start_hour] - demand_from[kept_end],
+                    demand_from[start_hour])
+
             # Solve window
             # Pass start_hour in hourly units for adapter's availability cache slicing
             start_hour_hourly = start_hour * resolution_hours
@@ -6197,6 +6288,7 @@ class Orchestrator:
                 rooftop_generation=None,  # Behind-the-meter: already in net demand
                 re_penetration_target=re_penetration_target,
                 keep_hours=keep_hours,
+                operating_budget=window_budget,
             )
 
             if window_result is None:
@@ -6261,6 +6353,11 @@ class Orchestrator:
             if wbd:
                 for k, v in wbd.items():
                     accumulated_cost_breakdown[k] = accumulated_cost_breakdown.get(k, 0.0) + v
+            if op_budget_left is not None:
+                # What the window spent within its budget: the excess is
+                # already penalised and leaves the later windows' share alone
+                op_budget_left -= (operating_spend(wbd)
+                                   - (wbd or {}).get("operating_budget_excess", 0.0))
 
             # Collect array results (trimmed to remove overlap hours)
             if window_result.get("gen_output") is not None:
@@ -6362,6 +6459,10 @@ class Orchestrator:
 
         # Update state boundary conditions for next year
         self.state.boundary_conditions = boundary_conditions
+
+        if op_budget is not None:
+            self._warn_operating_budget_excess(year, op_budget, accumulated_cost_breakdown,
+                                               total_load_shed)
 
         # Concatenate arrays along time axis (last axis = hours)
         gen_output = np.concatenate(all_gen_output, axis=-1) if all_gen_output else None
@@ -7045,6 +7146,7 @@ class Orchestrator:
         rooftop_generation: Optional[np.ndarray] = None,
         re_penetration_target: Optional[float] = None,
         keep_hours: Optional[int] = None,
+        operating_budget: Optional[float] = None,
     ) -> Optional[dict]:
         """
         Solve a single rolling horizon window.
@@ -7060,6 +7162,8 @@ class Orchestrator:
             keep_hours: Steps of this window that are committed (the next
                 window starts after them); the boundary state handed to the
                 next window is taken there. Defaults to the whole window.
+            operating_budget: The window's operating budget ($) for its
+                committed steps (``window_operating_budget``); None: no budget.
             units_config: Current units configuration (with investments applied)
             sectoral_demand: Sectoral demand arrays for this window
             ev_config_data: EV configuration data for this window
@@ -7182,6 +7286,13 @@ class Orchestrator:
                 except Exception as e:
                     logger.warning(f"Window {window}: Primary energy integration failed: {e}")
                     pe = None
+
+            # The window's share of the year's operating budget, over its
+            # committed steps (the objective is complete now, PE included)
+            if operating_budget is not None:
+                ps.add_operating_budget(
+                    operating_budget, keep_steps=min(keep_hours, hours) if keep_hours else hours,
+                    primary_energy=pe)
 
             # Solve the (possibly coupled) model
             status = ps.solve()

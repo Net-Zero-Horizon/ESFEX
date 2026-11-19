@@ -937,6 +937,7 @@ class DashboardLoader:
         ("transfer_margin_cost",     "Transfer margin"),
         ("fre_penetration_cost",     "RE-penetration penalty"),
         ("demand_shift_cost",        "Demand shift"),
+        ("operating_budget_penalty", "Operating budget excess"),
     ]
 
     def _read_cost_breakdown(self, f: h5py.File, bp: str,

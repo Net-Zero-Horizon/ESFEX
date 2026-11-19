@@ -1598,22 +1598,25 @@ function add_transmission_symmetry_constraints!(
 end
 
 """
-    add_budget_constraints!(model, vars, input)
+    add_budget_constraints!(model, vars, input; operating=nothing)
 
-Annual investment budget, at each investment-period start: the overnight
-cost of the technologies, battery technologies (power and energy),
-transmission corridors and reservoirs built that year
-(`master_investment_terms`, base costs) stays within
-`max_annual_investment` plus the slack `slack_budget`. The budget limits the
-capital committed in the build year, not the annuities the objective
-charges. The slack is priced at `BUDGET_SLACK_PENALTY` per unit over the
-budget (`master_slack_cost`), so the budget binds unless keeping it would
-cost more than that, and never makes the master infeasible.
+Annual budget, at each investment-period start: the overnight cost of the
+technologies, battery technologies (power and energy), transmission
+corridors and reservoirs built that year (`master_investment_terms`, base
+costs) stays within `max_annual_investment` plus the slack `slack_budget`.
+The budget limits the capital committed in the build year, not the
+annuities the objective charges. With `operating` (year index =>
+expression, `budget_operating_cost`; `budget_scope: total`) the year's
+operating cost counts against the same budget. The slack is priced at
+`BUDGET_SLACK_PENALTY` per unit over the budget (`master_slack_cost`), so
+the budget binds unless keeping it would cost more than that, and never
+makes the master infeasible.
 """
 function add_budget_constraints!(
     model::Model,
     vars::MasterProblemVariables,
-    input::MasterProblemInput
+    input::MasterProblemInput;
+    operating::Union{Nothing, AbstractDict} = nothing
 )
     annual_cost = Dict{Int, AffExpr}(y => AffExpr(0.0)
         for y in 1:vars.years_per_inv_period:length(input.years))
@@ -1621,12 +1624,84 @@ function add_budget_constraints!(
         t.kind in BUDGET_KINDS || continue
         add_to_expression!(annual_cost[t.year], t.var, t.cost)
     end
+    if operating !== nothing
+        for (y_idx, cost) in annual_cost
+            op = get(operating, y_idx, nothing)
+            op === nothing || add_to_expression!(cost, op)
+        end
+    end
     for (y_idx, cost) in sort(collect(annual_cost); by = first)
         @constraint(model,
             cost <= input.max_annual_investment + vars.slack_budget[y_idx],
             base_name = "budget_y$(y_idx)"
         )
     end
+end
+
+"""
+    year_day_spend(model, ps_vars, input, hours, scale, weight, tech_output,
+                   tech_spend, fuel_day) -> AffExpr
+
+A representative day's (or TSAM period's) money scaled to the year: its
+`day_operating_spend` × `scale` (step length × the days it stands for) and
+its fuel block's `master_fuel_day_spend` × `weight` (already per day).
+"""
+function year_day_spend(model::Model, ps_vars::PowerSystemVariables,
+                        input::MasterProblemInput, hours::Int, scale::Float64,
+                        weight::Float64, tech_output, tech_spend, fuel_day::AffExpr)
+    spend = AffExpr(0.0)
+    add_to_expression!(spend,
+        day_operating_spend(ps_vars, input, hours; tech_output, tech_spend), scale)
+    add_to_expression!(spend, master_fuel_day_spend(model, input, fuel_day), weight)
+    return spend
+end
+
+"""
+    record_year_operating_cost!(model, scenario_idx, y_idx, day_spends)
+
+Keep the year's representative-day (or TSAM-period) operating money, each
+day's `year_day_spend`, on the model (`model.ext[:year_operating_cost]`, by
+(scenario, year)) for the `budget_scope: total` budget
+(`budget_operating_cost`).
+"""
+function record_year_operating_cost!(model::Model, scenario_idx::Int, y_idx::Int,
+                                     day_costs::AbstractVector)
+    total = AffExpr(0.0)
+    foreach(c -> add_to_expression!(total, c), day_costs)
+    get!(() -> Dict{Tuple{Int,Int}, AffExpr}(), model.ext,
+         :year_operating_cost)[(scenario_idx, y_idx)] = total
+    return nothing
+end
+
+"""
+    budget_operating_cost(model, vars, input; scenarios=nothing) -> Dict{Int, AffExpr}
+
+Each year's operating money, for the `budget_scope: total` budget
+(`add_budget_constraints!`): what the representative days (or TSAM periods)
+spend, scaled to the year (`year_day_spend`: fuel, maintenance, start-ups,
+converter and line-flow costs, the fuel block's fuel bought and transported
+and electrolyzer costs), plus the year's asset costs (`build_annual_asset_cost`:
+fixed O&M, life extension, decommissioning). Modelling penalties (unserved
+energy, reserve, inertia and N-1 shortfalls, curtailment, RE shortfall, SOC
+and spillage, fuel shortfall, slacks), battery degradation and the CO2 price
+and CO2-budget violations (a carbon price is a transfer to the state) are
+not in it. With stochastic `scenarios`, each scenario's money (its own
+multipliers) weighted by its probability.
+"""
+function budget_operating_cost(model::Model, vars::MasterProblemVariables,
+                               input::MasterProblemInput;
+                               scenarios = nothing)
+    recorded = get(model.ext, :year_operating_cost, Dict{Tuple{Int,Int}, AffExpr}())
+    out = Dict{Int, AffExpr}()
+    cases = scenarios === nothing ? [(0, 1.0, nothing)] :
+        [(k, sc.probability, sc.multipliers) for (k, sc) in enumerate(scenarios)]
+    for y_idx in eachindex(input.years), (k, prob, mult) in cases
+        cost = get!(out, y_idx, AffExpr(0.0))
+        add_to_expression!(cost, build_annual_asset_cost(vars, input, y_idx; mult = mult), prob)
+        day = get(recorded, (k, y_idx), nothing)
+        day === nothing || add_to_expression!(cost, day, prob)
+    end
+    return out
 end
 
 """
@@ -3660,12 +3735,14 @@ Add operational constraints for a representative day by delegating to power_syst
 and transmission_dc.jl functions. Only master-specific logic (capacity precomputation,
 technology dispatch, RE enforcement, sectoral LoL) remains here.
 
-Returns `(tech_output, tech_day_cost)`: the candidate technologies' dispatch
-and their operating cost that `day_operational_cost` does not see (the
-offer-curve fuel cost of technologies with a `fuel_cost_curve`, the
-curtailment penalty of candidate renewables and the battery technologies'
-maintenance and throughput degradation), unscaled like `day_operational_cost`;
-the callers scale both to the year the same way. With `curtailment`, the
+Returns `(tech_output, tech_day_cost, tech_spend)`: the candidate
+technologies' dispatch and their operating cost that `day_operational_cost`
+does not see (the offer-curve fuel cost of technologies with a
+`fuel_cost_curve`, the curtailment penalty of candidate renewables, the
+battery technologies' maintenance and throughput degradation, converter,
+line-flow and start-up costs), unscaled like `day_operational_cost`; the
+callers scale both to the year the same way. `tech_spend` is the money part
+of `tech_day_cost` (no penalty, no degradation), for `day_operating_spend`. With `curtailment`, the
 day's per-system curtailment, renewable output and RE-3c exemption are
 added to the year's with `period_scale` for its annual curtailment limit,
 which the caller adds (`add_curtailment_limit!`).
@@ -4007,13 +4084,23 @@ function add_day_operational_constraints!(
         battery_tech_operating_cost(input, bat_tech_charge, bat_tech_discharge, hours))
     # Converter variable cost, flow cost of lines with a per-MW·km cost and
     # (LP-relaxed) start-ups, as the dispatch charges them
-    add_to_expression!(tech_day_cost, add_converter_objective_terms(ps_vars, day_input))
+    converter_cost = add_converter_objective_terms(ps_vars, day_input)
+    startup_cost = add_day_commitment!(model, ps_vars, input, total_cap_gen, year_idx, hours)
+    add_to_expression!(tech_day_cost, converter_cost)
     add_to_expression!(tech_day_cost, line_flow_cost)
-    add_to_expression!(tech_day_cost,
-        add_day_commitment!(model, ps_vars, input, total_cap_gen, year_idx, hours))
+    add_to_expression!(tech_day_cost, startup_cost)
+
+    # The money of those (day_operating_spend): no curtailment penalty, no
+    # sectoral shed premium, no battery degradation
+    tech_spend = AffExpr(0.0)
+    for c in (tech_curve_cost, converter_cost, line_flow_cost, startup_cost,
+              battery_tech_operating_cost(input, bat_tech_charge, bat_tech_discharge, hours;
+                                          degradation = false))
+        add_to_expression!(tech_spend, c)
+    end
 
     # The caller scales tech_day_cost with the day cost (calculate_day_operational_cost)
-    return tech_output, tech_day_cost
+    return tech_output, tech_day_cost, tech_spend
 end
 
 """
@@ -4123,20 +4210,22 @@ function add_day_commitment!(model::Model, ps_vars::PowerSystemVariables,
 end
 
 """
-    battery_tech_operating_cost(input, charge, discharge, hours) -> AffExpr
+    battery_tech_operating_cost(input, charge, discharge, hours; degradation=true) -> AffExpr
 
 Unscaled operating cost of the candidate battery technologies over `hours`
 steps, as the dispatch charges the batteries they become: `maintenance_cost`
-on charge and discharge, `throughput_degradation_cost` on discharge.
+on charge and discharge, `throughput_degradation_cost` on discharge (left
+out with `degradation = false`).
 `charge`/`discharge` are indexed [technology, bus, step]; `nothing` when the
 system has no battery technology.
 """
-function battery_tech_operating_cost(input::MasterProblemInput, charge, discharge, hours::Int)
+function battery_tech_operating_cost(input::MasterProblemInput, charge, discharge, hours::Int;
+                                     degradation::Bool = true)
     cost = AffExpr(0.0)
     (charge === nothing || discharge === nothing) && return cost
     for (bt, btech) in enumerate(input.battery_technologies), b in 1:input.network.num_buses
         mc = btech.maintenance_cost[b]
-        dc = btech.throughput_degradation_cost[b]
+        dc = degradation ? btech.throughput_degradation_cost[b] : 0.0
         (mc != 0 || dc != 0) || continue
         for ts in 1:hours
             add_to_expression!(cost, mc, charge[bt, b, ts])
@@ -4388,13 +4477,15 @@ end
 
 Add existing generator `g`'s operating cost at bus `n` in step `t` (per
 step, not × Δt) to `cost`: its fuel (`fuel_cost`, or its offer curve's
-segments), maintenance and CO2 price per MWh. `day_operational_cost` and the
+segments), maintenance and CO2 price per MWh (no CO2 price with
+`co2_price = false`). `day_operational_cost` and the
 unit's NPV (`add_unit_day_operation!`) both use it.
 """
 function add_gen_step_cost!(cost::AffExpr, ps_vars::PowerSystemVariables,
-                            input::MasterProblemInput, g::Int, n::Int, t::Int)
+                            input::MasterProblemInput, g::Int, n::Int, t::Int;
+                            co2_price::Bool = true)
     gen = input.generators[g]
-    co2 = co2_cost_per_mwh(input, gen, n)
+    co2 = co2_price ? co2_cost_per_mwh(input, gen, n) : 0.0
     maint_cost = gen.maintenance_cost[n]
     if haskey(ps_vars.gen_seg_output, (g, n))
         # PWL fuel cost via segments
@@ -4439,6 +4530,66 @@ function add_bat_step_cost!(cost::AffExpr, ps_vars::PowerSystemVariables,
                           bat.throughput_degradation_cost[n])
     end
     return cost
+end
+
+"""
+    day_operating_spend(ps_vars, input, hours; tech_output=nothing, tech_spend=nothing) -> AffExpr
+
+The money a representative day (or TSAM period) spends, unscaled like
+`day_operational_cost`, for the `budget_scope: total` budget: the existing
+generators' fuel (or offer-curve segments) and maintenance, the candidate
+technologies' fuel and maintenance, the existing batteries' maintenance, and
+`tech_spend` (`add_day_operational_constraints!`: offer curves of
+technologies, battery-technology maintenance, converter, line-flow and
+start-up costs), the categories of the dispatch's operating budget
+(`OPERATING_BUDGET_COSTS`). No modelling penalty (unserved energy, reserve,
+inertia, curtailment, RE shortfall), no battery degradation and no CO2 price
+(a transfer to the state, not a cost of operation).
+"""
+function day_operating_spend(ps_vars::PowerSystemVariables, input::MasterProblemInput,
+                             hours::Int; tech_output = nothing, tech_spend = nothing)
+    spend = AffExpr(0.0)
+    n_buses = input.network.num_buses
+    for t in 1:hours
+        for g in eachindex(input.generators), n in ps_vars.buses_of_gen[g]
+            add_gen_step_cost!(spend, ps_vars, input, g, n, t; co2_price = false)
+        end
+        if tech_output !== nothing
+            for (tc, tech) in enumerate(input.technologies), b in 1:n_buses
+                fuel = tech_curve_segments(input, tc, b) === nothing ? tech.fuel_cost[b] : 0.0
+                c = fuel + tech.maintenance_cost[b]
+                c != 0 && add_to_expression!(spend, c, tech_output[tc, b, t])
+            end
+        end
+        for b in eachindex(input.batteries), n in ps_vars.buses_of_bat[b]
+            mc = input.batteries[b].maintenance_cost[n]
+            mc != 0 || continue
+            add_to_expression!(spend, mc, ps_vars.bat_charge[b, n, t])
+            add_to_expression!(spend, mc, ps_vars.bat_discharge[b, n, t])
+        end
+    end
+    tech_spend === nothing || add_to_expression!(spend, tech_spend)
+    return spend
+end
+
+"""
+    master_fuel_day_spend(model, input, fuel_day) -> AffExpr
+
+The money of a day's fuel block (`add_master_fuel_day!`, whose cost is
+`fuel_day`): the fuel bought and transported and the electrolyzers' variable
+and water cost, less the coupled units' flat `fuel_cost` (which
+`day_operating_spend` counts and the fuel balance replaces). The fuel
+shortfall, excess and unmet non-electric demand penalties are left out.
+"""
+function master_fuel_day_spend(model::Model, input::MasterProblemInput, fuel_day::AffExpr)
+    spend = AffExpr(0.0)
+    has_master_fuel(input) || return spend
+    add_to_expression!(spend, fuel_day)
+    terms = model.ext[:master_fuel_last_day][2]
+    for k in (:pe_loss_cost, :pe_excess_cost)
+        add_to_expression!(spend, -1.0, terms[k])
+    end
+    return spend
 end
 
 """
@@ -4608,6 +4759,7 @@ function add_representative_days_validation!(
         cap_exempt, prev_floor = re_cap_exemption(input, targets, y_idx, periods, prev_floor)
 
         vars.operational_costs[y_idx] = AffExpr[]
+        day_spends = AffExpr[]   # the days' money, for budget_scope: total
         annual_co2 = [AffExpr(0.0) for _ in input.co2_budget_groups]
         # Each system's renewable and total generation and demand, scaled
         # to the year
@@ -4633,7 +4785,7 @@ function add_representative_days_validation!(
             ps_vars = create_day_ps_vars!(model, input, y_idx, day_idx + day_offset, hours)
 
             # Add operational constraints via delegation to power_system.jl
-            tech_output, tech_day_cost = add_day_operational_constraints!(
+            tech_output, tech_day_cost, tech_spend = add_day_operational_constraints!(
                 model, ps_vars, vars, input, y_idx, day_idx + day_offset, day_demand, start_hour;
                 re_cap_exempt = cap_exempt, curtailment = curt_year,
                 period_scale = scale
@@ -4643,11 +4795,14 @@ function add_representative_days_validation!(
             day_cost = calculate_day_operational_cost_tsam(ps_vars, input, y_idx, hours, weight;
                 tech_output=tech_output, tech_day_cost=tech_day_cost)
             # M2 (#89): fuel balance, fuel infrastructure and electrolyzers
-            add_to_expression!(day_cost, add_master_fuel_day!(model, ps_vars, input, y_idx,
+            fuel_day = add_master_fuel_day!(model, ps_vars, input, y_idx,
                 start_hour, hours, tech_output;
-                extra = k -> master_fuel_capacity(vars, input, y_idx, k)),
-                weight)
+                extra = k -> master_fuel_capacity(vars, input, y_idx, k))
+            add_to_expression!(day_cost, fuel_day, weight)
             push!(vars.operational_costs[y_idx], day_cost)
+            input.budget_total && push!(day_spends,
+                year_day_spend(model, ps_vars, input, hours, scale, weight,
+                               tech_output, tech_spend, fuel_day))
             record_master_day!(model, scenario_idx, y_idx, ps_vars, input, hours, scale)
 
             # The day's CO2, renewable output and demand, scaled to the
@@ -4659,6 +4814,7 @@ function add_representative_days_validation!(
                         start_hour, hours, scale)
         end
 
+        input.budget_total && record_year_operating_cost!(model, scenario_idx, y_idx, day_spends)
         push!(vars.operational_costs[y_idx],
             add_curtailment_limit!(model, input, curt_year, y_idx; scenario_idx))
         push!(vars.operational_costs[y_idx],
@@ -4770,6 +4926,7 @@ function add_tsam_periods_validation!(
         cap_exempt, prev_floor = re_cap_exemption(input, targets, y_idx, periods, prev_floor)
 
         vars.operational_costs[y_idx] = AffExpr[]
+        day_spends = AffExpr[]   # the days' money, for budget_scope: total
         annual_co2 = [AffExpr(0.0) for _ in input.co2_budget_groups]
         re_energy = [AffExpr(0.0) for _ in master_systems(input)]
         re_generation = [AffExpr(0.0) for _ in re_energy]
@@ -4897,7 +5054,7 @@ function add_tsam_periods_validation!(
                 end
             end
 
-            tech_output, tech_day_cost = add_day_operational_constraints!(
+            tech_output, tech_day_cost, tech_spend = add_day_operational_constraints!(
                 model, ps_vars, vars, input, y_idx, chrono_idx + day_offset,
                 day_demand, start_hour;
                 initial_soc_overrides=soc_initial,
@@ -4916,11 +5073,15 @@ function add_tsam_periods_validation!(
             )
             # M2 (#89): fuel balance, fuel infrastructure and electrolyzers
             # (cyclic tanks per period; the day's cost is in $, × weight)
-            add_to_expression!(day_cost, add_master_fuel_day!(model, ps_vars, input, y_idx,
+            fuel_day = add_master_fuel_day!(model, ps_vars, input, y_idx,
                 start_hour, hours, tech_output;
-                extra = k -> master_fuel_capacity(vars, input, y_idx, k)),
-                weight)
+                extra = k -> master_fuel_capacity(vars, input, y_idx, k))
+            add_to_expression!(day_cost, fuel_day, weight)
             push!(vars.operational_costs[y_idx], day_cost)
+            input.budget_total && push!(day_spends,
+                year_day_spend(model, ps_vars, input, hours,
+                               max(1.0, input.temporal_resolution_hours) * weight, weight,
+                               tech_output, tech_spend, fuel_day))
             record_master_day!(model, scenario_idx, y_idx, ps_vars, input, hours,
                 max(1.0, input.temporal_resolution_hours) * weight)
 
@@ -4934,6 +5095,7 @@ function add_tsam_periods_validation!(
                         start_hour, hours, tres * weight)
         end
 
+        input.budget_total && record_year_operating_cost!(model, scenario_idx, y_idx, day_spends)
         push!(vars.operational_costs[y_idx],
             add_curtailment_limit!(model, input, curt_year, y_idx; scenario_idx))
         push!(vars.operational_costs[y_idx],
@@ -4961,6 +5123,9 @@ Create the Master Problem optimization model.
 - `capacity_states::Bool`: hourly rows reference per-year capacity state
                            variables (`add_capacity_states!`, default) instead
                            of the investment sums; the same LP either way
+- `defer_budget::Bool`: with `input.budget_total`, leave the budget out (the
+                        stochastic master adds it once its scenarios'
+                        operating costs exist)
 
 # Returns
 - `model::Model`: JuMP model
@@ -4971,7 +5136,8 @@ function create_master_problem(
     input::MasterProblemInput;
     use_representative_days::Bool = true,
     custom_constraints = nothing,
-    capacity_states::Bool = true
+    capacity_states::Bool = true,
+    defer_budget::Bool = false
 )
     # Create model with optimizer
     model = Model(create_optimizer(
@@ -4993,7 +5159,8 @@ function create_master_problem(
 
     # Add constraints
     add_investment_constraints!(model, vars, input)
-    add_budget_constraints!(model, vars, input)
+    # budget_scope: total needs the years' operating cost (below)
+    input.budget_total || add_budget_constraints!(model, vars, input)
     # Retirement cascade constraints - ensures once retired, stays retired
     add_retirement_cascade_constraints!(model, vars, input)
     add_capacity_adequacy_constraints!(model, vars, input)
@@ -5013,6 +5180,13 @@ function create_master_problem(
     # the representative days / TSAM periods (add_re_target_constraints!),
     # which hold the renewable and total generation (define_re_share!)
     define_re_share!(model, vars, input)
+
+    # Investment and operating cost of each year against one budget
+    # (budget_scope: total); a stochastic master adds it over its scenarios
+    if input.budget_total && !defer_budget
+        add_budget_constraints!(model, vars, input;
+            operating = budget_operating_cost(model, vars, input))
+    end
 
     # User-defined investment constraints (declarative config + plugin overlays).
     apply_user_constraints!(model, vars, input, custom_constraints)
@@ -5405,7 +5579,8 @@ function create_stochastic_master_problem(input::StochasticMasterInput;
 
     # Investment structure only; the operation is added per scenario below.
     model, vars, targets = create_master_problem(base_input;
-        use_representative_days=false, custom_constraints=custom_constraints)
+        use_representative_days=false, custom_constraints=custom_constraints,
+        defer_budget=true)
 
     scenario_costs = Dict{Int, Vector{AffExpr}}[]
     first_soc = nothing
@@ -5436,6 +5611,12 @@ function create_stochastic_master_problem(input::StochasticMasterInput;
         for c in costs
             add_to_expression!(expected, c, scenario.probability)
         end
+    end
+
+    if base_input.budget_total
+        add_budget_constraints!(model, vars, base_input;
+            operating = budget_operating_cost(model, vars, base_input;
+                                              scenarios = input.scenarios))
     end
 
     build_stochastic_objective!(model, vars, base_input, input.scenarios, scenario_costs)

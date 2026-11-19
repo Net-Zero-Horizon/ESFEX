@@ -130,7 +130,7 @@ The total system cost over the window is minimized. Terms priced per MWh are wri
 \min \; Z = \Delta t \left( Z^{\text{op}} + Z^{\text{bat}} + Z^{\text{pen}} + Z^{\text{sec}} + Z^{\text{CO2}} + Z^{\text{conv}} + Z^{\text{elz}} + Z^{\text{shift}} + Z^{\text{spill}} \right) + \frac{T \Delta t}{8760} \left( Z^{\text{fix}} + Z^{\text{bat,fix}} + Z^{\text{elz,fix}} \right) + Z^{\text{start}} \tag{OBJ}
 \]
 
-Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the converter cost (OBJ-11, `charge_converter_costs!`), the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2), the line flow cost (OBJ-17) and the cost-ceiling violation (COST-1).
+Implemented in `build_objective!()`. A few terms are added to the objective by the constraint builders that create their variables: the converter cost (OBJ-11, `charge_converter_costs!`), the year-end battery SOC shortfall (BAT-5), the N-1 shortfall (N1-1, N1-2), the line flow cost (OBJ-17) and the operating budget excess (COST-1).
 
 ### 3.1 Operational Costs
 
@@ -530,7 +530,7 @@ Inside a year the rolling windows chain the SOC (each window starts from the SOC
 E_{b,n,T+1} + s^{\text{end}}_{b,n} \geq E^{\text{year}}_{b,n} \cdot (1 - \epsilon), \qquad s^{\text{end}}_{b,n} \geq 0 \quad \forall b, n \tag{BAT-5}
 \]
 
-where \(\epsilon\) is the `soc_end_tolerance`. The shortfall \(s^{\text{end}}\) costs \(0.1 \cdot C^{\text{LOL}} / \Delta t\) per MWh in the objective: well above any generation cost, so the battery is refilled from generation, but below the cost of load shedding, so load is never shed to refill it, and a last window too short to refill stays feasible.
+where \(\epsilon\) is the `soc_end_tolerance`. The shortfall \(s^{\text{end}}\) costs \(0.1 \cdot C^{\text{LOL}} / \Delta t\) per MWh in the objective: well above any generation cost, so the battery is refilled from generation, but below the cost of load shedding, so load is never shed to refill it, and a last window too short to refill stays feasible. It is reported in the cost breakdown's `soc_violation_cost` (earlier versions left it out of every component, so the breakdown's total exceeded the sum of its parts).
 
 !!! note "Why the year-end floor matters"
     Each year restarts from the configured `soc_initial`. Without the floor the last window would empty the batteries and the year would get that stored energy for free. The master problem applies the same rule (year-cyclic SOC).
@@ -963,17 +963,27 @@ All SCOPF slacks are priced like the preventive ones.
 ---
 
 
-### Maximum Annual System Cost
+### Annual Operating Budget
 
-Implemented in `add_max_annual_system_cost!()`.
+Implemented in `add_operating_budget!()` (the runner adds it to each window once the objective is complete, primary energy included). Only when the system sets `max_annual_operating_cost` (\$/yr); off by default. The master's investment budget, `max_annual_investment`, plays no part in the dispatch.
 
-#### COST-1: Operating Cost Ceiling
+#### COST-1: Operating Budget of the Window
 
 \[
-\Delta t \sum_{g,n,t} \left( c^{\text{fuel}}_{g,n} + c^{\text{maint}}_{g,n} \right) p_{g,n,t} + \frac{T \Delta t}{H_{\text{year}}} \left( Z^{\text{fix}} + Z^{\text{bat,fix}} \right) - s^{\text{cost}} \leq \frac{T \Delta t}{H_{\text{year}}} \, C^{\max}_{\text{annual}} \tag{COST-1}
+\Delta t \sum_{g,n,\, t \leq K} \left( c^{\text{fuel}}_{g,n} + c^{\text{maint}}_{g,n} \right) p_{g,n,t} + \frac{K \Delta t}{H_{\text{year}}} \left( Z^{\text{fix}} + Z^{\text{bat,fix}} \right) + Z^{\text{PE,fuel}}_{\leq K} - s^{\text{bud}} \leq B_w \tag{COST-1}
 \]
 
-The annual ceiling `MAX_ANNUAL_SYSTEM_COST` (default 20·10⁹) is scaled to the window, and so is the fixed O&M (OBJ-1a, OBJ-3c). The constraint is soft: the violation \(s^{\text{cost}} \geq 0\) (`cost_violation`) costs 10 × the largest generator variable cost per unit in the objective.
+over the window's committed steps \(t \leq K\) (the overlap tail is solved again by the next window). The left side is the money the window pays (`OPERATING_BUDGET_COSTS`); the formula shows its main terms, and the start-ups, battery maintenance, electrolyzer, converter and line-flow costs count too. \(Z^{\text{PE,fuel}}\) is the fuel bought and transported in the primary-energy block (a fuel-coupled unit pays its fuel there, not in \(c^{\text{fuel}}\)). Modelling penalties (unserved energy, reserve, inertia and N-1 shortfalls, curtailment, RE shortfall, SOC and spillage, fuel shortfall), battery degradation and the CO2 price (a transfer to the state) are not spending. The master's `budget_scope: total` budget (BUD-2) counts the same categories. The window's budget is its share of what is left of the year's:
+
+\[
+B_w = \max\!\left(0,\; B^{op} - \sum_{w' < w} \left( S_{w'} - s^{\text{bud}}_{w'} \right) \right) \cdot \frac{D_w}{D^{rest}_w}
+\]
+
+with \(S_{w'}\) what an earlier window's committed steps spent, \(D_w\) the demand of this window's committed steps and \(D^{rest}_w\) the demand from its start to the end of the year. A window that spends less than its share leaves the rest to the next ones; the last window gets all that is left. Spending above \(B_w\) is already penalised, so it does not shrink the later windows' shares again.
+
+The excess \(s^{\text{bud}} \geq 0\) (`operating_budget_excess`) costs `OPERATING_BUDGET_PENALTY` = 1000 \$ per \$. Above the budget a MWh from a unit with variable cost \(c\) then costs \(1001\,c\), more than shedding the load at VOLL whenever \(c > \text{VOLL}/1001\) (1 \$/MWh at a VOLL of 1000 \$/MWh, 50 \$/MWh at 50 000 \$/MWh): fuel the budget cannot pay for becomes unserved energy, as a fuel shortage would. The constant is a ratio, so the M\$ scaling of the costs leaves it unchanged; a higher one would only widen the range of the objective's coefficients. An excess remains only where the spending cannot be avoided (fixed O&M above the budget). The excess and its penalty are in the cost breakdown (`operating_budget_excess`, money already counted in fuel and O&M; `operating_budget_penalty`, a cost) and in the HDF5 `cost_breakdown/year_*` attributes, and the runner logs a warning for a year with an excess.
+
+Earlier versions used `max_annual_system_cost`, the master's investment budget, as this cap, prorated to each window by its hours, priced at 10 × the largest variable cost, and left its penalty out of every component of the cost breakdown (whose total then exceeded the sum of its parts).
 
 ---
 
@@ -1090,7 +1100,7 @@ Penalty coefficients and their YAML keys. Keys under `penalties:` belong to each
 | `add_sectoral_demand_constraints!()` | SEC-1, SEC-2, SHIFT-1 | `power_system.jl` |
 | `add_n1_security_constraints!()` | N1-1, N1-2 | `power_system.jl` |
 | `add_scopf_constraints!()` | N1-3, N1-4 | `power_system.jl` |
-| `add_max_annual_system_cost!()` | COST-1 | `power_system.jl` |
+| `add_operating_budget!()` | COST-1 | `power_system.jl` |
 | `extract_solution()` | Solution extraction and metrics | `power_system.jl` |
 
 ---

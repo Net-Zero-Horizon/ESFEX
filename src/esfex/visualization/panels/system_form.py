@@ -162,11 +162,27 @@ class SystemForm(QWidget):
         cl.setContentsMargins(6, 6, 6, 6)
         cl.setSpacing(4)
 
-        self._max_annual_cost = QDoubleSpinBox()
-        self._max_annual_cost.setRange(0, 1e15)
-        self._max_annual_cost.setDecimals(0)
-        self._max_annual_cost.editingFinished.connect(self._on_changed)
-        cl.addRow(tr("system_form.max_annual_cost"), self._max_annual_cost)
+        self._max_annual_investment = QDoubleSpinBox()
+        self._max_annual_investment.setRange(0, 1e15)
+        self._max_annual_investment.setDecimals(0)
+        self._max_annual_investment.editingFinished.connect(self._on_changed)
+        cl.addRow(tr("system_form.max_annual_investment"), self._max_annual_investment)
+
+        self._budget_scope = QComboBox()
+        self._budget_scope.addItem(tr("system_form.budget_scope_investment"), "investment")
+        self._budget_scope.addItem(tr("system_form.budget_scope_total"), "total")
+        self._budget_scope.setToolTip(tr("system_form.budget_scope_tip"))
+        self._budget_scope.currentIndexChanged.connect(self._on_changed)
+        cl.addRow(tr("system_form.budget_scope"), self._budget_scope)
+
+        # 0 = no operating budget (shown as "Off")
+        self._max_annual_operating = QDoubleSpinBox()
+        self._max_annual_operating.setRange(0, 1e15)
+        self._max_annual_operating.setDecimals(0)
+        self._max_annual_operating.setSpecialValueText(tr("system_form.operating_cost_off"))
+        self._max_annual_operating.setToolTip(tr("system_form.max_annual_operating_cost_tip"))
+        self._max_annual_operating.editingFinished.connect(self._on_changed)
+        cl.addRow(tr("system_form.max_annual_operating_cost"), self._max_annual_operating)
 
         self._life_ext_factor = QDoubleSpinBox()
         self._life_ext_factor.setRange(0, 10)
@@ -255,7 +271,10 @@ class SystemForm(QWidget):
         self._co2_annual.setValue(s.co2_annual_budget)
 
         # Cost Limits
-        self._max_annual_cost.setValue(s.max_annual_system_cost)
+        self._max_annual_investment.setValue(s.max_annual_investment)
+        i = self._budget_scope.findData(s.budget_scope)
+        self._budget_scope.setCurrentIndex(max(i, 0))
+        self._max_annual_operating.setValue(s.max_annual_operating_cost or 0.0)
         self._life_ext_factor.setValue(s.life_extension_cost_factor)
 
         # Penalties
@@ -308,7 +327,9 @@ class SystemForm(QWidget):
         s.co2_annual_budget = self._co2_annual.value()
 
         # Cost Limits
-        s.max_annual_system_cost = self._max_annual_cost.value()
+        s.max_annual_investment = self._max_annual_investment.value()
+        s.budget_scope = self._budget_scope.currentData() or "investment"
+        s.max_annual_operating_cost = self._max_annual_operating.value() or None
         s.life_extension_cost_factor = self._life_ext_factor.value()
 
         # Penalties

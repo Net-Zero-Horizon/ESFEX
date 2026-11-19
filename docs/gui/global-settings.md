@@ -216,7 +216,9 @@ The master-problem meaning of the RE target, increments, discount rate and cost 
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| Max Annual System Cost ($) | 20e9 | Annual investment budget: caps the overnight cost of what the master builds in each investment period (soft). The dispatch also holds each window's operating cost below its share of this value (soft) |
+| Max Annual Investment ($/yr) | 20e9 | Annual investment budget (`max_annual_investment`): caps the overnight cost of what the master builds in each investment period (soft) |
+| Budget Scope | Investment only | Investment only: the budget caps the build year's investment. Investment + operation (`budget_scope: total`): it also covers the money that year spends on operation (no penalties, no CO2 price) |
+| Max Annual Operating Cost ($/yr) | Off | Annual operating budget of the dispatch (`max_annual_operating_cost`): fuel, maintenance and fixed O&M; spending above it costs 1000 $ per $, so unaffordable fuel becomes unserved energy. 0 = off |
 | Life Extension Cost Factor (x) | 0.20 | Life extension costs `invest_cost × factor` per MW per year |
 
 ### Penalties

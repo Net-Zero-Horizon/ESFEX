@@ -820,6 +820,10 @@ function create_benders_master(
 
     # The investment constraints of the monolithic master
     add_investment_constraints!(model, vars, input)
+    # Investment budget only: the operation lives in the subproblems (the
+    # Python adapter solves the monolithic master for budget_scope: total)
+    input.budget_total &&
+        @warn "Benders: the annual budget covers the investment only (budget_scope: total is ignored)"
     add_budget_constraints!(model, vars, input)
     add_retirement_cascade_constraints!(model, vars, input)
     add_capacity_adequacy_constraints!(model, vars, input)

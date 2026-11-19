@@ -504,12 +504,21 @@ The values shown are the defaults. `max_curtailment_ratio` is an annual, per-sys
     TARGET_RE_PENETRATION: 0.8           # final-year RE share
     MIN_ANNUAL_INCREMENT: 0.01           # bounds on the yearly step of the RE target path
     MAX_ANNUAL_INCREMENT: 0.1
-    MAX_ANNUAL_SYSTEM_COST: 20000000000.0  # $/year investment budget
+    max_annual_investment: 20000000000.0  # $/year investment budget (master)
+    budget_scope: investment             # or total: investment + the year's operating cost
+    # max_annual_operating_cost: 5.0e8   # $/year operating budget of the dispatch (off when unset)
     discount_rate: 0.05
     life_extension_cost_factor: 0.2
 ```
 
-The uppercase names are legacy aliases written by the Studio; the lowercase field names (`target_re_penetration`, `max_annual_system_cost`, ...) work too. There is no `initial_re_penetration` key: the starting RE share is always computed from existing capacity. The RE target is a planning target, used only in `development` runs; `economic_dispatch` and `unit_commitment` runs apply none. How the target path is built is described in [Master Problem](master-problem.md).
+The uppercase names are legacy aliases written by older Studio versions; the lowercase field names (`target_re_penetration`, ...) work too.
+
+Two separate budgets, each per system:
+
+- `max_annual_investment` caps the overnight investment of each build year in the master. With `budget_scope: total` the money the year spends on operation (fuel, maintenance, start-ups, fixed O&M, life extension, decommissioning; no modelling penalty and no CO2 price) counts against the same budget, so a build that lowers the fuel bill by more than its cost makes room in it. Older files call it `max_annual_system_cost` (or `MAX_ANNUAL_SYSTEM_COST`); that key is read as `max_annual_investment` and the Studio saves it under the new name.
+- `max_annual_operating_cost` (off unless set) caps the dispatch's fuel, maintenance and fixed O&M over each year. The windows share it by demand and carry what earlier windows left; spending above it costs 1000 $ per $, so fuel the budget cannot pay for becomes unserved energy, and the runner warns for a year that goes over it. See [COST-1](../formulation/operational-dispatch.md#annual-operating-budget).
+
+There is no `initial_re_penetration` key: the starting RE share is always computed from existing capacity. The RE target is a planning target, used only in `development` runs; `economic_dispatch` and `unit_commitment` runs apply none. How the target path is built is described in [Master Problem](master-problem.md).
 
 ### Power Flow
 
@@ -707,7 +716,7 @@ systems:
     TARGET_RE_PENETRATION: 0.8
     MIN_ANNUAL_INCREMENT: 0.01
     MAX_ANNUAL_INCREMENT: 0.1
-    MAX_ANNUAL_SYSTEM_COST: 20000000000.0
+    max_annual_investment: 20000000000.0
     power_flow_mode: dcopf
 
     nodes:
