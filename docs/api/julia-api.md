@@ -523,14 +523,14 @@ With TSAM inter-period linking, an existing battery's period starts at a free le
 
 ### Curtailment Limit
 
-In the master problem, each system's curtailment over the year is capped at a fraction of its renewable generation over the year. Each representative day or TSAM period adds its per-system curtailment (`system_day_curtailment`), renewable output (`system_day_renewable`) and exemption to a `CurtailmentYear` with its weight in the year; after the year's days, `add_curtailment_limit!` adds one constraint per system, with an excess priced at `CURTAILMENT_EXCESS_PENALTY` (10⁴ $/MWh), and returns the excess's cost, an operating cost of the year:
+In the master problem, each system's curtailment over the year is capped at a fraction of its renewable generation over the year. Each representative day or TSAM period adds its per-system curtailment (`system_day_curtailment`), renewable output (`system_day_renewable`) and exemption to a `CurtailmentYear` with its weight in the year; after the year's days, `add_curtailment_limit!` adds one constraint per system, with an excess priced at `curtailment_excess_penalty(input)`: at least `CURTAILMENT_EXCESS_PENALTY` (10⁴ $/MWh) and 100 × (`CURTAILMENT_EXCESS_FACTOR`) the dearer of the RE shortfall price (`re_shortfall_penalty`) and `curtailment_cost`, with a stochastic scenario's multipliers, so the excess stays the last resort whatever those prices are. It returns the excess's cost, an operating cost of the year:
 
 ```julia
 curt, re, exempt, smax = curtailment_year_sums(year)   # weighted, / the largest weight
 for s in eachindex(curt)
     excess = @variable(model, lower_bound = 0)          # MWh/year
     @constraint(model, curt[s] <= input.max_curtailment_ratio * re[s] + exempt[s] + excess / smax)
-    add_to_expression!(cost, CURTAILMENT_EXCESS_PENALTY, excess)
+    add_to_expression!(cost, curtailment_excess_penalty(input), excess)
 end
 ```
 
