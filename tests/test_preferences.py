@@ -307,3 +307,38 @@ class TestLoadPreferencesEdgeCases:
         save_preferences(data)
         loaded = load_preferences()
         assert loaded == data
+
+
+# ===========================================================================
+# Solver time limit and dead preferences (round 44, M44)
+# ===========================================================================
+
+
+@pytest.mark.parametrize("limit", [0, 3600, 100_000])
+def test_preferences_time_limit_accepts_no_limit(qapp, limit):
+    """solver.time_limit 0 means no limit; the preferences' box clamped it
+    to 60..86400 s, so "no limit" could not be chosen (nor more than a day)."""
+    from esfex.visualization.i18n import tr
+    from esfex.visualization.panels.preferences_dialog import _SolverSimulationPage
+
+    page = _SolverSimulationPage({"solver": {"time_limit": limit}})
+    assert page.collect_solver()["time_limit"] == limit
+    if limit == 0:
+        assert page.time_limit_spin.text() == tr("global_form.time_limit_none")
+
+
+def test_unused_preferences_and_dialog_are_gone():
+    """simulation.default_output_dir and advanced.cache_dir were defined and
+    translated but never shown nor read; SimulationDialog was never used."""
+    from esfex.visualization.preferences import DEFAULT_PREFERENCES
+
+    assert "default_output_dir" not in DEFAULT_PREFERENCES["simulation"]
+    assert "cache_dir" not in DEFAULT_PREFERENCES["advanced"]
+    panels = Path(__file__).parents[1] / "src" / "esfex" / "visualization" / "panels"
+    assert not (panels / "simulation_dialog.py").exists()
+    tdir = panels.parent / "translations"
+    for lang in ("en", "es", "fr", "pt", "ja"):
+        d = json.loads((tdir / f"{lang}.json").read_text(encoding="utf-8"))
+        assert "simulation" not in d
+        assert "running_sim" not in d["messages"]
+        assert not {"sim_default_output_dir", "cache_dir"} & set(d["preferences"])

@@ -244,7 +244,9 @@ class _SolverSimulationPage(QWidget):
         sform.addRow(tr("preferences.threads"), self.threads_spin)
 
         self.time_limit_spin = QSpinBox()
-        self.time_limit_spin.setRange(60, 86400)
+        # 0 = no limit (solver.time_limit), as in the project's settings form
+        self.time_limit_spin.setRange(0, 10_000_000)
+        self.time_limit_spin.setSpecialValueText(tr("global_form.time_limit_none"))
         self.time_limit_spin.setSingleStep(60)
         self.time_limit_spin.setValue(s.get("time_limit", 3600))
         self.time_limit_spin.setSuffix(" s")

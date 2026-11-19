@@ -1095,7 +1095,6 @@
     "sim_default_pe": "デフォルトで一次エネルギーを有効化",
     "sim_default_log_level": "デフォルトログレベル:",
     "sim_log_to_file": "シミュレーションログをファイルに書き出し",
-    "sim_default_output_dir": "デフォルト出力ディレクトリ:",
     "chart_backend": "チャートバックエンド:",
     "export_dpi": "エクスポートDPI:",
     "default_export_format": "デフォルトエクスポート形式:",
@@ -1115,7 +1114,6 @@
     "cache_preload": "プリロード（起動時にすべて）",
     "cache_lazy": "レイジー（オンデマンド）",
     "debug_mode": "デバッグモード",
-    "cache_dir": "キャッシュディレクトリ:",
     "telemetry_opt_out": "テレメトリを無効化",
     "reset_all": "すべての環境設定をリセット",
     "reset_all_confirm_title": "環境設定のリセット",
@@ -1199,12 +1197,6 @@
     "infra_applied_msg": "{n} 件の簡略化を適用しました。更新結果を確認するには再検証してください。",
     "infra_none_checked": "提案がチェックされていません。適用する項目をチェックしてください。",
     "infra_no_groups": "このスコープで統合可能なグループは見つかりませんでした。"
-  },
-  "simulation": {
-    "title": "ESFEXシミュレーション",
-    "preparing": "シミュレーションを準備中...",
-    "cancel_btn": "キャンセル",
-    "close_btn": "閉じる"
   },
   "sensitivity": {
     "title": "グローバル感度分析 (Sobol)",
@@ -1497,7 +1489,6 @@
     "hour_mismatch_title": "時間数の不一致",
     "hour_mismatch_msg": "読み込んだファイルは {n1} 時間ですが、ノード '{name}'（インデックス {idx}）は既に {n2} 時間です。\nすべてのノードは同じ時間数を共有する必要があります。",
     "validating": "システム設定を検証中...",
-    "running_sim": "シミュレーション実行中...",
     "no_year_data": "{year} 年の詳細結果がありません。",
     "no_gen_data": "発電データがありません。",
     "node_no_centroid": "このノードには重心が設定されていません。まず「配置」でマップ上に設定してください。"
