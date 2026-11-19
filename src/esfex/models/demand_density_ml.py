@@ -356,7 +356,7 @@ def build_density_features(
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Per-CELL inference on the 0.25° grid (matches the training-time pipeline:
-# predict a density per 0.25° cell, multiply by the cell's area, then sum cells).
+# predict a density per 0.25° cell, multiply by its land area, then sum cells).
 # ──────────────────────────────────────────────────────────────────────────────
 
 _CELL_DEG = 0.25
@@ -375,18 +375,71 @@ def cell_area_km2(lat: float | np.ndarray):
     )
 
 
+def cell_overlap_fraction(poly, lats, lons, dlat: float, dlon: float) -> np.ndarray:
+    """Fraction of each cell's area inside the study region *poly*.
+
+    The cells are the lat/lon rectangles of *dlat* × *dlon* degrees centred
+    at (*lats*, *lons*); *poly* is a shapely geometry in (lon, lat). A cell
+    wholly inside is 1 (no intersection computed), one outside it 0, and one
+    the boundary crosses ``area(cell ∩ poly) / area(cell)``, so a coastal
+    cell whose centre lies at sea still counts with the part of it that is
+    in the region."""
+    import shapely
+
+    lats = np.asarray(lats, dtype=np.float64)
+    lons = np.asarray(lons, dtype=np.float64)
+    if not poly.is_valid:
+        poly = shapely.make_valid(poly)
+    shapely.prepare(poly)
+    if dlat <= 0 or dlon <= 0:                # degenerate sampling: the centre decides
+        return shapely.contains_xy(poly, lons, lats).astype(np.float64)
+    boxes = shapely.box(lons - dlon / 2, lats - dlat / 2, lons + dlon / 2, lats + dlat / 2)
+    frac = np.zeros(len(lats), dtype=np.float64)
+    hit = shapely.intersects(poly, boxes)
+    inner = hit & shapely.contains(poly, boxes)
+    frac[inner] = 1.0
+    edge = np.where(hit & ~inner)[0]
+    if edge.size:
+        inter = shapely.area(shapely.intersection(boxes[edge], poly))
+        frac[edge] = np.minimum(inter / (dlat * dlon), 1.0)
+    return frac
+
+
+def land_overlap_weight(inside, land_km2, cell_km2) -> np.ndarray:
+    """Share of each cell's land that lies in the study region: the weight of
+    the cell's demand (``density × land_km2 × w``).
+
+    *inside* is the fraction of the cell's area inside the region
+    (:func:`region_cells_025`), *land_km2* the cell's land area (shipped grid)
+    and *cell_km2* its total area. ``w = min(1, inside × cell_km2 / land_km2)``:
+    a coastal cell whose land the region covers counts whole, and a cell on a
+    land border is split between the countries in proportion to their part of
+    its land. A cell wholly inside is 1; one without land in the grid
+    (``land_km2 = 0``) takes ``inside``."""
+    inside = np.asarray(inside, dtype=np.float64)
+    land = np.asarray(land_km2, dtype=np.float64)
+    cell = np.broadcast_to(np.asarray(cell_km2, dtype=np.float64), inside.shape)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = np.where(land > 0, np.minimum(1.0, inside * cell / land), inside)
+    w[inside >= 1.0] = 1.0
+    return w
+
+
 def region_cells_025(
     polygon_latlon: Optional[list[tuple[float, float]]] = None,
     bounds: Optional[tuple[float, float, float, float]] = None,
     node_lats: Optional[list[float]] = None,
     node_lons: Optional[list[float]] = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Enumerate the 0.25° grid-cell centroids covering the study region.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Enumerate the 0.25° grid cells covering the study region.
 
     Centroids are aligned to the global 0.25° raster grid so they sample the
-    GDP / population rasters at their own cells. Returns (lats, lons, areas_km2)
-    for every cell whose centroid is inside the drawn polygon (or the bounding
-    box, or a small pad around the nodes)."""
+    GDP / population rasters at their own cells. Returns ``(lats, lons,
+    areas_km2, inside)`` for every cell that overlaps the drawn polygon (or
+    lies in the bounding box, or a small pad around the nodes); ``inside`` is
+    the fraction of the cell's area in the region (:func:`cell_overlap_fraction`,
+    1 without a polygon), which :func:`land_overlap_weight` turns into the
+    cell's weight."""
     if bounds is not None:
         s, w, n, e = bounds
     elif node_lats and node_lons:
@@ -398,7 +451,7 @@ def region_cells_025(
         las = [p[0] for p in pts]; los = [p[1] for p in pts]
         s, n, w, e = min(las), max(las), min(los), max(los)
     else:
-        return np.array([]), np.array([]), np.array([])
+        return np.array([]), np.array([]), np.array([]), np.array([])
 
     # Global-grid-aligned centroids: lat = -90 + (j+0.5)*0.25, lon similarly.
     j0 = int(math.floor((s + 90.0) / _CELL_DEG))
@@ -415,13 +468,17 @@ def region_cells_025(
     # nation the box reaches neighbouring countries, whose populated cells then
     # get assigned to the nearest border node and inflate its demand (Japan's
     # western nodes absorbed ~45 M of South Korea + ~24 M of China).
+    # A cell is kept when it overlaps the domain, with the fraction of it
+    # inside: testing only its centre dropped coastal cells centred at sea
+    # (Cuba lost 7 % of its population).
+    inside = np.ones(len(lats), dtype=np.float64)
     poly = _make_poly(polygon_latlon) if _as_rings(polygon_latlon) else None
     if poly is not None:
-        from shapely.geometry import Point
-        keep = np.array([poly.contains(Point(lo, la)) for la, lo in zip(lats, lons)])
-        lats, lons = lats[keep], lons[keep]
+        inside = cell_overlap_fraction(poly, lats, lons, _CELL_DEG, _CELL_DEG)
+        keep = inside > 0
+        lats, lons, inside = lats[keep], lons[keep], inside[keep]
 
-    return lats, lons, cell_area_km2(lats)
+    return lats, lons, cell_area_km2(lats), inside
 
 
 def predict_region_cell_demand(
@@ -442,10 +499,11 @@ def predict_region_cell_demand(
 
     For every 0.25° cell: predict the demand density (MW/km²) from the cell's
     own predictors and the (shared) UTC hourly temperature and calendar of
-    *year*, then multiply by the cell area. Row ``h`` is UTC hour ``h`` of the
-    year with 29 February skipped. *places* holds the cells' climate normals,
-    energy-use context and local-date offsets (:func:`place_predictors`,
-    computed here when not given)."""
+    *year*, then multiply by *areas*: the density workflow passes each cell's
+    land area times its weight (:func:`land_overlap_weight`). Row ``h`` is UTC
+    hour ``h`` of the year with 29 February skipped. *places* holds the cells'
+    climate normals, energy-use context and local-date offsets
+    (:func:`place_predictors`, computed here when not given)."""
     hpy = 8760
     n = len(lats)
     if n == 0:
@@ -576,34 +634,41 @@ def _make_poly(polygon):
 
 
 def _nearest_node_cells(clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
-    """Yield (node_index, lat, lon) for each interior grid point of the study
-    region, assigning the point to its nearest node (the Voronoi partition).
+    """Yield (node_index, lat, lon, weight) for each sample of the study
+    region, assigning the sample to its nearest node (the Voronoi partition).
 
-    Points are enumerated over ``bbox_ring`` and kept only when inside the
-    ``clip`` domain (single ring or multi-ring/archipelago); a ``None`` clip
-    keeps the whole box."""
-    poly = _make_poly(clip) if _as_rings(clip) else None
-    point_cls = None
-    if poly is not None:
-        from shapely.geometry import Point as point_cls  # noqa: N813
-
+    Samples are a ``grid`` × ``grid`` lattice over ``bbox_ring``, each standing
+    for the lattice cell around it. With a ``clip`` domain (single ring or
+    multi-ring/archipelago) a sample's weight is the fraction of its lattice
+    cell inside the domain (:func:`cell_overlap_fraction`, the weighting of
+    the 0.25° demand cells; there is no land grid at these points), and
+    samples outside it are skipped; a ``None`` clip keeps the whole box at
+    weight 1."""
     lat_min = min(lat for lat, _ in bbox_ring)
     lat_max = max(lat for lat, _ in bbox_ring)
     lon_min = min(lng for _, lng in bbox_ring)
     lon_max = max(lng for _, lng in bbox_ring)
+    la_s = np.linspace(lat_min, lat_max, grid)
+    lo_s = np.linspace(lon_min, lon_max, grid)
+    LA, LO = np.meshgrid(la_s, lo_s, indexing="ij")
+    LA = LA.ravel(); LO = LO.ravel()
+
+    poly = _make_poly(clip) if _as_rings(clip) else None
+    if poly is not None:
+        step = max(grid - 1, 1)
+        w = cell_overlap_fraction(poly, LA, LO,
+                                  (lat_max - lat_min) / step, (lon_max - lon_min) / step)
+    else:
+        w = np.ones(LA.size, dtype=np.float64)
 
     mlng = _M_PER_DEG_LNG_EQ * math.cos(math.radians(mean_lat))
     nx = np.asarray(node_lons, dtype=np.float64) * mlng
     ny = np.asarray(node_lats, dtype=np.float64) * _M_PER_DEG_LAT
 
-    for la in np.linspace(lat_min, lat_max, grid):
-        py = la * _M_PER_DEG_LAT
-        for lo in np.linspace(lon_min, lon_max, grid):
-            if poly is not None and not poly.contains(point_cls(lo, la)):
-                continue
-            px = lo * mlng
-            d2 = (nx - px) ** 2 + (ny - py) ** 2
-            yield int(np.argmin(d2)), la, lo
+    for i in np.where(w > 0)[0]:
+        la, lo = float(LA[i]), float(LO[i])
+        d2 = (nx - lo * mlng) ** 2 + (ny - la * _M_PER_DEG_LAT) ** 2
+        yield int(np.argmin(d2)), la, lo, float(w[i])
 
 
 def compute_node_areas_km2(
@@ -616,8 +681,10 @@ def compute_node_areas_km2(
     """Per-node area (km²) as the Voronoi partition of the study region.
 
     Each sampled cell of the study region is assigned to its nearest node; a
-    node's area is its share of the total region area. Robust for any node
-    count (including 1)."""
+    node's area is its share of the total region area, each sample counting
+    with the fraction of its cell inside the region (a coastal sample centred
+    at sea still counts for its land part). Robust for any node count
+    (including 1)."""
     n = len(node_lats)
     if n == 0:
         return []
@@ -628,14 +695,14 @@ def compute_node_areas_km2(
     if n == 1:
         return [total_area]
 
-    counts = np.zeros(n, dtype=np.int64)
-    for ni, _la, _lo in _nearest_node_cells(
+    counts = np.zeros(n, dtype=np.float64)
+    for ni, _la, _lo, w in _nearest_node_cells(
             clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
-        counts[ni] += 1
+        counts[ni] += w
 
     if counts.sum() == 0:
         return [total_area / n] * n
-    counts = np.maximum(counts, 1)   # no node vanishes
+    counts = np.maximum(counts, 1.0)   # no node vanishes
     shares = counts / counts.sum()
     return [float(total_area * s) for s in shares]
 
@@ -654,8 +721,9 @@ def _sample_node_raster(
     grid: int,
 ) -> list[Optional[float]]:
     """Cell-averaged value of ``sample_fn(lat, lon)`` per node, over each
-    node's Voronoi cell. Points where ``sample_fn`` returns None/≤0 are skipped;
-    a node with no valid samples yields None."""
+    node's Voronoi cell, each sample weighted by the part of its cell inside
+    the region. Points where ``sample_fn`` returns None/≤0 are skipped; a node
+    with no valid samples yields None."""
     n = len(node_lats)
     if n == 0:
         return []
@@ -664,13 +732,14 @@ def _sample_node_raster(
     if total_area <= 0:
         return [None] * n
     acc = np.zeros(n, dtype=np.float64)
-    cnt = np.zeros(n, dtype=np.int64)
-    for ni, la, lo in _nearest_node_cells(clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
+    cnt = np.zeros(n, dtype=np.float64)
+    for ni, la, lo, w in _nearest_node_cells(
+            clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
         v = sample_fn(la, lo)
         if v is None or v <= 0:
             continue
-        acc[ni] += v
-        cnt[ni] += 1
+        acc[ni] += w * v
+        cnt[ni] += w
     return [float(acc[i] / cnt[i]) if cnt[i] else None for i in range(n)]
 
 
@@ -1144,14 +1213,15 @@ def sample_node_pop_and_area(
         return [(None, 0.0)] * n
 
     sum_pop = np.zeros(n, dtype=np.float64)
-    cnt_pop = np.zeros(n, dtype=np.int64)
-    total_inside = 0
-    for ni, la, lo in _nearest_node_cells(clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
-        total_inside += 1
+    cnt_pop = np.zeros(n, dtype=np.float64)
+    total_inside = 0.0
+    for ni, la, lo, w in _nearest_node_cells(
+            clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
+        total_inside += w
         pd = sample_pop_density(la, lo, year)
         if pd is not None and pd > 0:
-            sum_pop[ni] += pd
-            cnt_pop[ni] += 1
+            sum_pop[ni] += w * pd
+            cnt_pop[ni] += w
 
     out: list[tuple[Optional[float], float]] = []
     for ni in range(n):
