@@ -170,12 +170,13 @@ class TestCellGrid:
 
     def test_region_cells_aligned_and_inside_bounds(self):
         from esfex.models.demand_density_ml import region_cells_025
-        lats, lons, areas = region_cells_025(bounds=(19.8, -85.0, 23.3, -74.0))
+        lats, lons, areas, inside = region_cells_025(bounds=(19.8, -85.0, 23.3, -74.0))
         assert len(lats) == len(lons) == len(areas) > 0
         # Centroids sit on the global 0.25° grid (…, x.125, x.375, …).
         frac = np.modf(np.abs(lats) / 0.25)[0]
         assert np.allclose(frac, 0.5, atol=1e-6)
         assert areas.min() > 0
+        assert np.all(inside == 1.0)       # no polygon: every cell whole
         # Roughly covers the Cuba bounding box span.
         assert lats.min() >= 19.5 and lats.max() <= 23.6
 
@@ -183,8 +184,8 @@ class TestCellGrid:
         from esfex.models.demand_density_ml import region_cells_025
         # A small triangle → fewer cells than its bounding box.
         poly = [(21.0, -80.0), (21.0, -78.0), (23.0, -79.0)]
-        latp, lonp, _ = region_cells_025(polygon_latlon=poly)
-        latb, lonb, _ = region_cells_025(bounds=(21.0, -80.0, 23.0, -78.0))
+        latp, lonp, _, _ = region_cells_025(polygon_latlon=poly)
+        latb, lonb, _, _ = region_cells_025(bounds=(21.0, -80.0, 23.0, -78.0))
         assert 0 < len(latp) < len(latb)
 
 
@@ -202,7 +203,7 @@ class TestMultiRingDomainClip:
     def test_region_cells_clip_to_all_islands_excluding_gap(self):
         from esfex.models.demand_density_ml import region_cells_025
         multi = [self.ISLAND_A, self.ISLAND_B]
-        lats, lons, _ = region_cells_025(polygon_latlon=multi)
+        lats, lons, _, _ = region_cells_025(polygon_latlon=multi)
         assert len(lats) > 0
         # Every kept cell lies inside one island box — none in the 1°<lon<10°
         # gap (the "foreign" water/land that the bbox would otherwise include).
@@ -211,7 +212,7 @@ class TestMultiRingDomainClip:
         assert np.all(in_a | in_b)
         assert in_a.any() and in_b.any()   # both islands kept
         # Strictly fewer than the full bounding box (which spans the gap).
-        latb, _, _ = region_cells_025(bounds=(0.0, 0.0, 1.0, 11.0))
+        latb, _, _, _ = region_cells_025(bounds=(0.0, 0.0, 1.0, 11.0))
         assert len(lats) < len(latb)
 
     def test_node_area_partition_respects_multiring(self):
@@ -227,6 +228,77 @@ class TestMultiRingDomainClip:
         bbox_area = compute_node_areas_km2(
             [0.5], [5.5], bounds=(0.0, 0.0, 1.0, 11.0))[0]
         assert sum(areas) < 0.5 * bbox_area
+
+
+class TestLandOverlapWeight:
+    """A cell the region boundary crosses counts with the share of its land
+    inside the region, not by whether its centre is inside: coastal cells
+    centred at sea were dropped whole (Cuba lost 7 % of its population)."""
+
+    # The 0.25° cell centred at (21.125, -79.875): lat 21.0–21.25, lon -80.0 – -79.75.
+    LAT, LON = 21.125, -79.875
+
+    @staticmethod
+    def _box(s, w, n, e):
+        return [(s, w), (s, e), (n, e), (n, w)]
+
+    def test_coastal_cell_centred_at_sea_gets_its_land_share(self):
+        from esfex.models.demand_density_ml import (
+            cell_area_km2, land_overlap_weight, region_cells_025)
+        # The island covers the western 30 % of the cell; its centre is at sea.
+        lats, lons, km2, inside = region_cells_025(
+            polygon_latlon=self._box(21.0, -80.0, 21.25, -79.925))
+        assert len(lats) == 1
+        assert (lats[0], lons[0]) == (self.LAT, self.LON)
+        assert inside[0] == pytest.approx(0.3, rel=1e-9)
+        cell = float(cell_area_km2(self.LAT))
+        # The cell's land is that 30 %: it counts whole.
+        assert land_overlap_weight(inside, [0.3 * cell], km2)[0] == pytest.approx(1.0)
+        # Half the cell is land, the region covers 30 % of the cell: 0.6 of its land.
+        assert land_overlap_weight(inside, [0.5 * cell], km2)[0] == pytest.approx(0.6)
+        # No land in the grid: the fraction of the cell inside.
+        assert land_overlap_weight(inside, [0.0], km2)[0] == pytest.approx(0.3)
+
+    def test_interior_cell_weight_is_one(self):
+        from esfex.models.demand_density_ml import land_overlap_weight, region_cells_025
+        lats, lons, km2, inside = region_cells_025(
+            polygon_latlon=self._box(20.0, -81.0, 22.0, -79.0))
+        whole = (lats > 20.0) & (lats < 22.0) & (lons > -81.0) & (lons < -79.0)
+        assert whole.sum() == 64 and len(lats) == 64
+        assert np.all(inside == 1.0)
+        # The grid's land area of a whole land cell can exceed the computed
+        # cell area by rounding, and a lake makes it smaller: the weight is 1.
+        land = km2 * np.where(np.arange(len(km2)) % 2, 1.0000028, 0.7)
+        assert np.all(land_overlap_weight(inside, land, km2) == 1.0)
+
+    def test_border_cell_split_between_neighbours(self):
+        from esfex.models.demand_density_ml import (
+            cell_area_km2, land_overlap_weight, region_cells_025)
+        cell = float(cell_area_km2(self.LAT))
+        land = 0.8 * cell          # 30 % country A, 50 % country B, 20 % sea
+        a = region_cells_025(polygon_latlon=self._box(21.0, -80.5, 21.25, -79.925))
+        b = region_cells_025(polygon_latlon=self._box(21.0, -79.925, 21.25, -79.8))
+
+        def weight(res):
+            lats, lons, km2, inside = res
+            k = np.where((lats == self.LAT) & (lons == self.LON))[0]
+            assert k.size == 1      # the shared cell is in both countries
+            return land_overlap_weight(inside[k], [land], km2[k])[0]
+
+        wa, wb = weight(a), weight(b)
+        assert wa == pytest.approx(0.375)
+        assert wb == pytest.approx(0.625)
+        assert wa + wb == pytest.approx(1.0)
+
+    def test_node_areas_count_coastal_samples(self):
+        # A large island and a thin one (lat 1.46–1.5) that no sample point
+        # falls strictly inside with grid=16 (rows every 0.1°): the thin
+        # island's node must still get its share of the area (0.04 / 0.84),
+        # not the one-sample floor.
+        multi = [self._box(0.0, 0.0, 0.8, 1.0), self._box(1.46, 0.0, 1.5, 1.0)]
+        areas = compute_node_areas_km2([0.4, 1.48], [0.5, 0.5],
+                                       polygon_latlon=multi, grid=16)
+        assert areas[1] / sum(areas) == pytest.approx(0.04 / 0.84, rel=0.02)
 
 
 class TestDensityFeatures:

@@ -957,7 +957,8 @@ class DemandProfileBuilder:
         """Per-CELL spatial pipeline (the authoritative use of the density
         model). For every 0.25° grid cell of the study region, predict a demand
         DENSITY (MW/km²) from the cell's own population/GDP density + climate +
-        calendar, multiply by the cell area, and SUM the cells of each node.
+        calendar, multiply by the cell's land in the region, and SUM the cells of
+        each node.
         The trajectory comes from re-running the model each year with that
         year's gridded SSP GDP (nearest 5-year step, no interpolation); the
         level is the raw model integral, optionally anchored to a national
@@ -1001,7 +1002,7 @@ class DemandProfileBuilder:
 
         # ── 0.25° grid cells over the study region ─────────────────
         emit(12, "Enumerating 0.25° grid cells…")
-        clats, clons, _cell_areas = region_cells_025(
+        clats, clons, cell_km2, cell_inside = region_cells_025(
             polygon_latlon=poly, bounds=bnds,
             node_lats=list(proxy.node_lats), node_lons=list(proxy.node_lons))
         if len(clats) == 0:
@@ -1039,10 +1040,13 @@ class DemandProfileBuilder:
 
         # ── Cell population and land area (the article's grids) ────
         # Densities are per km² of LAND and the predicted density covers the
-        # cell's land, as in the training table and the article's maps.
+        # cell's land, as in the training table and the article's maps. A cell
+        # the region boundary crosses counts with the share of its land inside
+        # the region (coastal cells whole, border cells split).
         emit(20, "Sampling population & GDP per cell…")
-        from esfex.models.demand_density_ml import _ssp_gdp_total_nearest
+        from esfex.models.demand_density_ml import _ssp_gdp_total_nearest, land_overlap_weight
         pop0, land0 = model.context.population_and_land(clats, clons)
+        cell_w = land_overlap_weight(cell_inside, land0, cell_km2)
         idx = np.where((pop0 > 0) & (land0 > 0))[0]
         if idx.size == 0:
             raise ValueError("No populated cells in the study region.")
@@ -1089,6 +1093,7 @@ class DemandProfileBuilder:
         if idx.size == 0:
             raise ValueError("No populated cells with GDP in the study region.")
         alat = clats[idx]; alon = clons[idx]; aarea = land0[idx]
+        a_land_w = aarea * cell_w[idx]                   # land of the cell in the region
         a_node = cell_node[idx]
         base_pd = pop0[idx] / aarea                      # people per km² of land
 
@@ -1147,7 +1152,7 @@ class DemandProfileBuilder:
                 if a.size == 0:
                     continue
                 cell_mw = predict_region_cell_demand(
-                    model, alat[a], alon[a], aarea[a],
+                    model, alat[a], alon[a], a_land_w[a],
                     lpd[a], lgd[a], lgpc[a],
                     _temp_utc(nd, yr), yr, country_iso=macro.country_iso,
                     places=places[nd],
