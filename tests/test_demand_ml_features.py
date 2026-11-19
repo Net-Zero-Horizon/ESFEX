@@ -121,6 +121,11 @@ def test_temperature_must_cover_the_year():
     with pytest.raises(ValueError, match="8760"):
         build_hourly_features("CUB", np.full(100, 20.0), LAT, LON, 2025,
                               static_features=STATICS, country_id=17.0)
+    gappy = _temperature()
+    gappy[100] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        build_hourly_features("CUB", gappy, LAT, LON, 2025,
+                              static_features=STATICS, country_id=17.0)
     X = build_hourly_features("CUB", None, LAT, LON, 2025,
                               static_features=STATICS, country_id=17.0)
     assert set(X[:, FEATURE_COLS.index("temperature")]) == {20.0}
