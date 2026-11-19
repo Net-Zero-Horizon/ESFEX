@@ -474,6 +474,132 @@ Per-release notes are also published on the
   folder, uncompressed, and Import Project restores them together with the
   remembered file.
 
+- **ESFEX can be driven from scripts and agents.** `esfex validate`, `esfex run`
+  and `esfex info` take `--json`, and the new `esfex summary` command reads a
+  results file (`--json` too). A `--json` command prints exactly one JSON
+  object on stdout (everything else, Julia's and the solver's output
+  included, goes to stderr) with `"schema": "esfex.<command>/1"`, `"ok"` and
+  `"errors"`, each error with a `code`, the YAML `key` it is about, a
+  `message` and a `fix` hint. Exit codes: 0 success, 1 invalid case or failed
+  run, 2 usage error. The same functions are in the new `esfex.api` package
+  (`validate_case`, `summary`, `system_info`, `collect_warnings`,
+  `read_warnings`, `read_master_diagnostics`), plain Python that returns
+  JSON-ready data, imports no Qt and does not start Julia. New guide page
+  "Using ESFEX from Scripts and Agents".
+
+- **`esfex summary RESULTS.h5`.** Per year: the cost and its components, with
+  a check that they add up to the total; the RE share against the year's
+  target; load shed (energy, hours, peak); curtailment (energy, share of the
+  renewable energy available); emissions; what the master built (MW, MWh by
+  technology) and retired; capacity in service by fuel; storage; transmission
+  losses and the loss-repair bounds when the file records them. Then the
+  run's warnings and the master's binding constraints and paid slacks
+  (`/diagnostics`). `--year` and `--section` narrow it. It reads attributes
+  and two small datasets per year, never the generation time series, so it
+  is quick on multi-GB files; files written by older versions are read too.
+
+- **End-of-run warnings summary.** A run (`esfex run`, the Studio, or
+  `Orchestrator.run()` from Python) now collects the warnings and errors it
+  logs, the Julia models' `@warn` lines included, groups them by kind
+  ("Generator 'pv' has 3 hours ..." and "Generator 'wind' has 7 hours ..."
+  are one kind) and ends with a summary such as "9 warnings in 7 kinds: 3×
+  ..., 1× ...". The default `basic` console hid warnings entirely, so a run
+  could finish "successfully" with problems nobody saw. The groups are
+  written to the new `/diagnostics/warnings` group of the results file (also
+  when the run fails) and kept in `Orchestrator.warnings_summary`.
+
+- **`esfex validate` names the YAML key of each error and checks the data
+  files.** A loader error now says where it is
+  (`systems.Cuba.generators.pv.rated_power`) instead of only the field name
+  (`'min_power'`); `ConfigLoadError.issues` lists every problem with its key
+  path. `validate` (and `run --dry-run`) also checks that the demand files and
+  every `availability_file` exist, resolved as the run resolves them; a
+  missing one used to show up only once the run reached it.
+
+- **`esfex info --json`.** Versions, Julia and sysimage, every solver with
+  `installed` and `licensed` (Gurobi and Xpress: whether a licence file is
+  where the solver looks for one; the file is never read), data assets and
+  paths, in a fraction of a second: Julia is started only with `--probe`.
+  `esfex info --no-probe` gives the same quick view as text.
+
+- **Results files record what wrote them.** New root attributes
+  `esfex_version`, `solver` and `config_file`.
+
+- **Why did the master build this? Binding constraints, duals and paid
+  slacks are recorded per master year.** After each master solve (each year
+  of a myopic run, the single solve of perfect foresight) ESFEX now groups
+  the model's rows by constraint family (RE target, RE growth cap,
+  curtailment cap, annual budget, capacity adequacy, CO2 budget, build
+  limits, hourly capacity, reserves, storage…, with the constraint catalog's
+  codes) and reports which of them bind, their largest and summed dual (the
+  cost of tightening the constraint by one unit, in $ of that year), the
+  rows with the largest duals by name, and every slack or penalty variable
+  the plan pays for (RE shortfall, budget overrun, adequacy shortfall,
+  curtailment above the cap, CO2 violation, and the representative days'
+  load shed and reserve shortfalls scaled to the year) with its amount,
+  price and cost. A few INFO lines sum it up in the log, e.g.
+  `Master 2025 binding: Annual budget (investment) (10 $/$, at its penalty)`
+  and `Master 2025 paid slacks: Budget overrun $11,000,000 at 10 $/$
+  ($110,000,000)`, and the full record is written to the results file under
+  `/diagnostics/master/year_{YYYY}/{binding,top,slacks}` (perfect foresight:
+  rows without a year in `all`), readable with
+  `esfex.io.master_diagnostics.read_master_diagnostics`. Until now the only
+  way to see why the plan looked as it did was to rerun with the master LP
+  exported. A dual of a row with its own slack is measured per unit of that
+  slack, so an unattainable RE target shows exactly its
+  `FRE_penetration_loss` and the curtailment cap its excess price per MWh. Not
+  recorded for Benders or MGA/SPORES runs; a master without duals (integer
+  variables) reports its tight rows only. New Julia functions
+  `master_diagnostics` and `master_paid_slacks`, adapter method
+  `MasterProblemAdapter.diagnostics()`. Documented in the master-problem
+  guide ("Why did the master build this?"), the HDF5 output schema and the
+  constraint catalog ("Families in the binding report").
+
+- **An interrupted myopic run can be resumed.** A myopic `development`
+  run (`master_problem.planning_mode: myopic`) of a large system takes
+  hours, and a crash, a kill, a lost solver licence or a reboot at year 18
+  used to lose all of it. The run now keeps a checkpoint next to its results
+  file (`<results>.checkpoint.json`), rewritten in one step after every
+  master year it plans and every year it dispatches: the capacity each year
+  built per technology and build year, the retirements and NPV-based
+  retirements, the fuel and electrolyzer capacity, the RE shares, annuities
+  and yearly costs, the master plan once every year is planned, the fuel
+  tank levels carried into the next year, the warnings so far, and a
+  fingerprint of the case (a hash of the configuration and the size and
+  SHA-256 of every input file it names). `esfex run -c CASE --resume
+  [RESULTS.h5]` (default: the newest results file of the case in the output
+  directory) drops what the interrupted run wrote of the year it did not
+  finish, restores the state and continues from the first year not
+  completed, appending to the same results file; the result is the one the
+  uninterrupted run gives. It refuses, with exit code 1 and a structured
+  error (`--json`: `status` `resume_refused`, `errors[].code`), a file
+  without a checkpoint, a run that completed, a perfect-foresight or
+  operations run, other `--years` / `--start-year`, and a case whose
+  configuration (except `logging` and the solver's `verbose`, `threads`
+  and `time_limit`), input files or ESFEX version changed;
+  `--force-resume` lets those last differences through with a warning each.
+  `--resume --dry-run` only reports whether and where the run would resume.
+  `run --json` reports `resumed_from` (the first year solved) and `resume`.
+  From Python: `Orchestrator.run(resume_from=..., force_resume=...)` and
+  `esfex.io.checkpoint`. The results file records `planning_mode` and the
+  checkpoint's name in its root attributes. The Studio has no resume button
+  yet.
+
+- **Bounds of the line-loss repair, in the log and the HDF5.** The first
+  solve, with lines free to lose more than the PWL loss of their flow, is a
+  relaxation of the model with exact PWL losses: its objective is a lower
+  bound, and the repaired solve an upper bound. Each master solve and each
+  dispatch year now logs both and their gap (INFO above 0.1 %, DEBUG
+  otherwise; the dispatch sums its windows and gives the largest window
+  gap), and the HDF5 scenario attributes hold them:
+  `master_loss_repair_{lower_bound, objective, gap, rounds, linearised,
+  released}` (of the master solve that planned the year; not under MGA or
+  Benders) and `dispatch_loss_repair_{…, gap_max, windows,
+  windows_repaired}`. Julia: `loss_repair_bounds(model)`. A large gap
+  measures how much energy the lines discarded in the first solve, not the
+  distance of the plan from the optimum (Cuba's master: 1.53 G$ against
+  5.77 G$).
+
 ### Changed
 
 - **The old master fuel-infrastructure variables are replaced.** The
@@ -3953,6 +4079,38 @@ Per-release notes are also published on the
   `region_cells_025` now also returns each cell's fraction inside the domain,
   and `land_overlap_weight` gives the weight.
 
+- **The line-loss repair no longer keeps every direction its first solve
+  happened to pick.** When the lines discard energy in the first solve
+  (surplus renewables, curtailment priced or capped), the repair holds each
+  line of an over-losing step in the direction that solve gave it, and kept
+  that direction for the rest of the solve. Where the solve had been
+  discarding energy that direction is arbitrary, so the plan depended on
+  which of its equal-cost points the solver returned (Cuba's one-year
+  master with 8 GW of PV: 6.69 G$ with Gurobi's barrier without crossover,
+  6.99 G$ with the default method, +4.4 %), and lines were often held at
+  zero flow in a direction the cheapest plan runs the other way. Once the
+  losses are settled, the repair now checks every held line-step whose
+  flow sits at zero: when the reduced cost of the other direction says
+  reversing would lower the cost, the line-step is released back to the PWL
+  loss model and the repair goes on, holding it the other way if it
+  over-loses again. A line-step is released at most twice per solve, the
+  repair runs at most 20 rounds (was 8), and it ends on its best round
+  without over-loss. The model stays an LP; unit commitment (a MIP, no
+  duals) skips the check. A held flow above zero is not checked (no local
+  signal), so some dependence on the first solve remains. On Cuba's
+  current one-year master (8 GW of PV) the plan costs 5.77 G$ instead of
+  6.03 G$ under barrier without crossover (−4.3 %) and 5.79 G$ instead of
+  6.06 G$ under Gurobi's default method (−4.4 %); the two methods end
+  0.22 % apart (0.38 % before). The repair takes 19 rounds instead of 3 or
+  4, so such a master solves 2.5 to 3.5 times longer.
+
+
+- **The Grid Builder says when it cannot name nodes offline.** Without the
+  Natural Earth admin-1 shapefile (not shipped), the nodes Nominatim did not
+  name kept "Node i" with no explanation, and every one of them tried to read
+  the missing file again. ESFEX now logs a warning once, with the path to put the
+  shapefile at, and the file is not looked for again.
+
 ### Removed
 
 - The unused modules `availability_generator/solar_cf.py` and `wind_cf.py`
@@ -4003,6 +4161,10 @@ Per-release notes are also published on the
   `shape_lag_24h`, `shape_lag_168h`) of the training dataset frame, which
   only the TFT comparison read. The XGBoost features and model are
   unchanged.
+
+- `demand_density_ml.gdp_density_point`, a point GDP-density lookup with its
+  own interpolation between SSP steps that nothing in ESFEX called (the demand
+  estimation reads each cell's SSP GDP and interpolates between steps itself).
 
 ## [0.3.0] — 2026-08-27
 
