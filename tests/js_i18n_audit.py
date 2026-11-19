@@ -37,7 +37,7 @@ _PLOTLY_COLORSCALES = {
 }
 # Units and acronyms written the same in every language.
 _UNITS = {"MW", "MWh", "GW", "GWh", "TWh", "kW", "kWh", "kV", "Hz", "USD",
-          "LCOE", "LMP", "tCO", "Mt", "kt"}
+          "LCOE", "LMP", "tCO", "Mt", "kt", "Mvar", "MVA", "Sk"}
 _PLOTLY_ENUM = re.compile(
     r"^([xy]\d* (domain|paper)|top to bottom|bottom to top|"
     r"(top|middle|bottom)( (left|center|right))?|(left|center|right))$")
@@ -49,6 +49,10 @@ def _visible(s: str) -> bool:
     st = s.strip()
     if st.startswith("&copy;"):           # map tile attributions, as published
         return False
+    if re.fullmatch(r"[a-z][\w]*-[\w-]*( [a-z][\w-]*)*|[a-z][\w-]* [a-z][\w]*-[\w-]*", st):
+        return False                        # CSS class lists ("grid-line month")
+    if re.match(r"^\)?\s*(drop-shadow|rotate|translate|scale|matrix)\(", st):
+        return False                        # CSS / SVG functions built in pieces
     if (re.fullmatch(r"([\w-]+\s*:[^;]*;\s*)+([\w-]+\s*:[^;]*)?", st)
             or re.match(r"^[a-z-]+\s*:\s*[a-z-]+\(", st)):
         return False                        # inline CSS declarations
@@ -56,7 +60,8 @@ def _visible(s: str) -> bool:
     s = re.sub(r"""[\w:-]+=("[^"]*"?|'[^']*'?)""", " ", s)
     s = re.sub(r"""^[^<"]*"|"[^>"]*$""", " ", s)
     text = re.sub(r"<[^>]*>?|&\w+;|\$\{[^}]*\}|%\{[^}]*\}", " ", s).strip()
-    if re.fullmatch(r"[\w-]+(,\s*[\w-]+)+", text):   # font-family lists
+    if re.fullmatch(r"[\w -]+(,\s*[\w -]+)+", text) and re.search(
+            r"\b(sans-serif|serif|monospace|system-ui)\b", text):  # font families
         return False
     words = re.findall(r"[A-Za-z]{2,}", text)
     if words and all(w in _UNITS for w in words):     # "%{x}: %{y} GWh"

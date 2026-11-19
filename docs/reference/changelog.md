@@ -1564,6 +1564,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **The map, single-line diagram, dashboard and result charts are
+  translated.** These web views showed English in every language. Their text
+  now comes from the `web` section of the translation files (about 570 new
+  keys): map popups, drawing hints and the Leaflet.draw tooltips; the SLD
+  legend, tooltips, symbols and results overlays; the dashboard's cards, KPIs
+  and year detail; the interruptions editor; and the titles, axes, legends and
+  hover texts of the 36 result chart pages. Month names follow the language.
+  The map, SLD, dashboard and interruptions editor relabel themselves when
+  the language changes; an open result chart takes the new language on its
+  next refresh. Labels that the Python side still sends in English inside the
+  chart data (cash-flow components, Sankey nodes, error messages) are not
+  covered yet.
+
 - **The whole Studio is translated.** About 760 texts outside the Grid
   Builder were written in English in the code, so they stayed English in
   every language: the main window (console, SLD bar, dialogs, status bar),
