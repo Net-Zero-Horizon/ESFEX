@@ -1690,6 +1690,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **The wind wizard reaches its analysis step again.** Leaving the criteria
+  step raised a TypeError, so no wind analysis could start: the step built
+  windrex's MCDA settings, whose criteria have no `direction` and which keep
+  no LULC scores, while the wizard runs esfex's own wind analyzer. It now
+  builds esfex's settings, as the turbine step already did for `WindConfig`.
+  The solar PV wizard was not affected.
+
 - **Open views follow a language change.** Some texts built in Python kept
   the old language until the view was rebuilt. Now:
   - the dashboard fetches its data again, so its series and cost components
