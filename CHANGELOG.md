@@ -9,14 +9,6 @@ Per-release notes are also published on the
 
 ## [Unreleased]
 
-### Fixed
-
-- **The Marginal Technology chart says what its colours mean.** A legend
-  names the technology of each colour, and each panel has a title. The
-  hourly strip was painted with Plotly's default colours instead of the
-  technology colours. Gas and hydrogen now have their own palette colours
-  instead of the grey of "Other" in the UC charts.
-
 ## [0.4.0] — 2026-11-20
 
 ### Highlights
@@ -46,6 +38,10 @@ Per-release notes are also published on the
   views (map, single-line diagram, dashboard, charts) are translated into
   Spanish, French, Portuguese and Japanese. The Validate dialog has a
   realism check, and projects remember their results.
+- **Primary energy can be trusted.** A fuel shortfall costs at least ten
+  times the fuel, the fuel price is the one configured, a unit's fuel use
+  follows its own efficiency, tanks lose fuel only when a loss is given,
+  and a year of dispatch no longer runs out of memory.
 - **HiGHS 1.16 (HiGHS.jl 1.27) is supported.**
 - **Results differ from 0.3.0.** Many costs were missing or counted twice,
   and several units were read wrong: ramp limits are a fraction of capacity
@@ -58,6 +54,8 @@ Per-release notes are also published on the
 - The line-loss repair keeps the line directions of the first solve: the
   check that releases them is implemented but off, because on a real case it
   made the master 2.5 to 10 times slower.
+- A dispatch with primary energy is slower: on the Cuba case a year takes
+  about 2.7 times as long as without it.
 - On large LP master problems, HiGHS's interior-point solver can stop with
   "ipm no progress". See the solver guide's section on large LP master
   problems; a commercial barrier solver is the reliable choice there.
@@ -1747,6 +1745,12 @@ Per-release notes are also published on the
   directory).
 
 ### Fixed
+
+- **The Marginal Technology chart says what its colours mean.** A legend
+  names the technology of each colour, and each panel has a title. The
+  hourly strip was painted with Plotly's default colours instead of the
+  technology colours. Gas and hydrogen now have their own palette colours
+  instead of the grey of "Other" in the UC charts.
 
 - **A year of dispatch with primary energy no longer runs out of memory.**
   Each rolling-horizon window added the primary-energy cost to the
