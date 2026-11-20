@@ -7,7 +7,7 @@
   "pérdida de carga"; VOLL: "valor de la carga perdida"), and so does the ENS
   index ("energía no suministrada").
 - $B is "miles de M$", never "billón" (10^12 in Spanish).
-- Converters are "AC/DC", not "CA/CC".
+- Converters are "AC/DC", not "CA/CC" (in every language).
 """
 from __future__ import annotations
 
@@ -71,4 +71,7 @@ def test_billion_is_never_billon():
 
 
 def test_converters_are_ac_dc():
-    assert not [k for k, v in ES.items() if "CA/CC" in v]
+    # In every language, not only Spanish.
+    bad = [(lang, k) for lang in ("es", "fr", "pt", "ja")
+           for k, v in _flat(lang).items() if "CA/CC" in v]
+    assert not bad, bad
