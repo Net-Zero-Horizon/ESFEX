@@ -73,6 +73,16 @@ _WEATHER_CELL_DEG = 0.1
 _WEATHER_SAFE_WORKERS = 4
 
 
+
+def tr(key: str, **kwargs) -> str:
+    """GUI translation; English when no language is set (CLI, agents)."""
+    from esfex.visualization.i18n import tr as _tr
+    return _tr(key, **kwargs)
+
+
+def _kind_label(kind: str) -> str:
+    return tr(f"availability_generator.kind_{kind}")
+
 def _default_max_workers() -> int:
     return _WEATHER_SAFE_WORKERS
 
@@ -170,7 +180,7 @@ def generate_for_grid_build(
     gens = list(state.generators.items())
     if not gens:
         if progress_callback:
-            progress_callback(100, "No generators to process.")
+            progress_callback(100, tr("availability_generator.progress_no_generators"))
         return {}
 
     # Classify once: (gid, gen, canonical_fuel, kind).
@@ -214,7 +224,9 @@ def generate_for_grid_build(
     for idx, (gid, gen, canonical, kind) in enumerate(classified):
         pct = int(100 * (idx + 1) / total)
         if progress_callback:
-            progress_callback(pct, f"Profile {idx + 1}/{total}: {gid} ({kind})")
+            progress_callback(pct, tr("availability_generator.progress_profile",
+                                    i=idx + 1, n=total, gen=gid,
+                                    kind=_kind_label(kind)))
 
         if use_weather_data and kind in ("solar", "wind"):
             cf = weather_cache.get(
@@ -257,7 +269,8 @@ def generate_for_grid_build(
             "%d wind/solar generator(s) had no weather data available; left "
             "without an availability profile: %s", len(skipped), shown)
     if progress_callback:
-        progress_callback(100, f"Wrote {len(written)} availability CSV(s).")
+        progress_callback(100, tr("availability_generator.progress_wrote",
+                                    n=len(written)))
     return written
 
 
@@ -314,7 +327,8 @@ def _prefetch_weather_cfs(
         return _prefetch_open_meteo(keys, weather_year, progress_callback)
 
     if progress_callback:
-        progress_callback(0, f"Fetching weather for {total} location(s)…")
+        progress_callback(0, tr("availability_generator.progress_fetching_weather",
+                                  n=total))
 
     def _work(key: tuple):
         return key, _fetch_one_weather_cf(
@@ -337,7 +351,8 @@ def _prefetch_weather_cfs(
             if progress_callback:
                 progress_callback(
                     int(100 * done / total),
-                    f"Weather {done}/{total} location(s)…")
+                    tr("availability_generator.progress_weather_n",
+                       done=done, n=total))
 
     logger.info(
         "Weather availability: %d unique location(s) fetched for the build.",
@@ -371,13 +386,15 @@ def _prefetch_open_meteo(
                    if not om._cache_path(cache_dir, *c, weather_year).exists()]
     n_cells = len(cells)
     if progress_callback:
-        msg = f"Weather for {n_cells} location(s)"
         if to_download:
             per_min = om.CALLS_PER_MINUTE_BUDGET / om.year_request_cost(weather_year)
             minutes = len(to_download) / per_min
-            msg += (f" — {len(to_download)} to download from Open-Meteo "
-                    f"(~{max(1, round(minutes))} min at its free rate limit)")
-        progress_callback(0, msg + "…")
+            msg = tr("availability_generator.progress_weather_download",
+                     n=n_cells, download=len(to_download),
+                     minutes=max(1, round(minutes)))
+        else:
+            msg = tr("availability_generator.progress_weather_cached", n=n_cells)
+        progress_callback(0, msg)
 
     limiter = om.MinuteRateLimiter()
     stop = threading.Event()
@@ -414,7 +431,8 @@ def _prefetch_open_meteo(
             done += 1
             if progress_callback:
                 progress_callback(int(100 * done / n_cells),
-                                  f"Weather {done}/{n_cells} location(s)…")
+                                  tr("availability_generator.progress_weather_n",
+                                     done=done, n=n_cells))
 
     if quota_reason:
         logger.warning(

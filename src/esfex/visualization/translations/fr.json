@@ -2982,7 +2982,17 @@
     "no_generators_selected": "Aucun générateur sélectionné avec un type de profil Solaire ou Éolien.",
     "no_model_loaded": "Aucun modèle chargé. Veuillez d'abord charger une configuration.",
     "export_failed": "Échec de l'export de la configuration : {error}",
-    "done_status": "Terminé ! {count} profil(s) généré(s)."
+    "done_status": "Terminé ! {count} profil(s) généré(s).",
+    "progress_no_generators": "Aucun générateur à traiter.",
+    "progress_profile": "Profil {i}/{n} : {gen} ({kind})",
+    "progress_wrote": "{n} CSV de disponibilité écrit(s).",
+    "progress_fetching_weather": "Téléchargement de la météo pour {n} emplacement(s)…",
+    "progress_weather_n": "Météo {done}/{n} emplacement(s)…",
+    "progress_weather_cached": "Météo pour {n} emplacement(s)…",
+    "progress_weather_download": "Météo pour {n} emplacement(s) : {download} à télécharger depuis Open-Meteo (~{minutes} min avec sa limite gratuite)…",
+    "kind_solar": "solaire",
+    "kind_wind": "éolien",
+    "kind_synthetic": "synthétique"
   },
   "electrical": {
     "inherited_from_bus": "(du jeu de barres)",
@@ -3522,7 +3532,7 @@
     "no_nodes_msg": "Le système n'a aucun nœud. Activez la création automatique des nœuds ou créez-les manuellement avant de construire.",
     "no_criterion_title": "Aucun critère",
     "no_criterion_msg": "Sélectionnez au moins un critère de regroupement.",
-    "clustering_done": "{count} nœuds créés par regroupement {criterion}.",
+    "clustering_done": "{count} nœuds créés par regroupement selon : {criterion}.",
     "clustering_error": "Erreur de regroupement : {error}",
     "error_msg": "Erreur : {error}",
     "engine_auto": "Automatique (XGBoost)",
@@ -3703,7 +3713,34 @@
     "progress_geofabrik_downloading": "Téléchargement de l'extrait Geofabrik « {region} »...",
     "progress_geofabrik_download_bytes": "Téléchargement de « {region} » : {done}/{total} Go",
     "progress_geofabrik_scanning": "Parcours de l'extrait ({millions} M d'éléments, {kept} conservés)...",
-    "report_timing_line": "{label} : {seconds} s"
+    "report_timing_line": "{label} : {seconds} s",
+    "cluster_fetching_buildings_from": "Téléchargement des bâtiments depuis {source}…",
+    "cluster_naming_nodes": "Nommage des nœuds à partir d'OpenStreetMap…",
+    "cluster_naming_nodes_n": "Nommage des nœuds ({done}/{total})…",
+    "cluster_no_valid_criteria": "Aucun critère valide sélectionné : {criteria}",
+    "cluster_running_criterion": "Exécution du critère « {criterion} » ({i}/{n})…",
+    "cluster_merging": "Fusion des critères (regroupement par consensus)…",
+    "cluster_consensus_kmeans": "K-means de consensus (k={k})…",
+    "cluster_consensus_done": "Consensus terminé : {k} nœuds",
+    "cluster_extracting_infra": "Extraction des positions des infrastructures…",
+    "cluster_fetching_buildings": "Téléchargement des emprises de bâtiments…",
+    "cluster_buildings_failed": "Échec du téléchargement des bâtiments ; utilisation des infrastructures…",
+    "cluster_too_few_buildings": "Trop peu de bâtiments ; utilisation des infrastructures…",
+    "cluster_clustering_buildings": "Regroupement de {n} centroïdes de bâtiments…",
+    "cluster_preparing_regional": "Préparation du regroupement par équilibre régional…",
+    "cluster_regional_kmeans": "Exécution du K-means régional (k={k})…",
+    "cluster_optimal_k": "Détermination du nombre optimal de nœuds…",
+    "cluster_kmeans": "Exécution du K-means (k={k})…",
+    "cluster_done": "Regroupement terminé : {k} nœuds",
+    "cluster_criterion_infrastructure": "densité des infrastructures",
+    "cluster_criterion_demand": "indicateur de demande",
+    "cluster_criterion_regional": "équilibre régional",
+    "criterion_infrastructure_label": "Densité des infrastructures",
+    "criterion_infrastructure_desc": "K-means sur toutes les positions d'infrastructure (postes, générateurs, batteries, entrées de combustible). Place les nœuds au centre des groupes.",
+    "criterion_demand_label": "Indicateur de demande (emprises de bâtiments)",
+    "criterion_demand_desc": "Télécharge les emprises de bâtiments (Overture/Microsoft/Google) et regroupe selon la densité de bâtiments pour approcher les pôles de demande. Nécessite un téléchargement supplémentaire.",
+    "criterion_regional_label": "Équilibre régional (couverture uniforme)",
+    "criterion_regional_desc": "K-means modifié avec une initialisation spatialement uniforme. Assure une couverture géographique homogène quelle que soit la densité. Adapté aux études de planification."
   },
   "interruptions": {
     "title": "Interruptions de service",
@@ -4011,7 +4048,8 @@
     "scenario_probabilities": "Probabilités des scénarios",
     "no_risk_derating": "Sans déclassement lié au risque",
     "risk_coefficient": "Coefficient de risque",
-    "per_element_risk_coefficients": "Coefficients de risque par élément"
+    "per_element_risk_coefficients": "Coefficients de risque par élément",
+    "haz_screening": "Pré-évaluation multialéa"
   },
   "risk_panels": {
     "node_n": "Nœud {n}",
@@ -5108,7 +5146,8 @@
       "info_re": "EnR : {pct} %",
       "info_demand": "Demande : {power}",
       "info_gen": "Prod. : {power}",
-      "info_v_viol": "Viol. V : {n}"
+      "info_v_viol": "Viol. V : {n}",
+      "load_label": "Charge {node}"
     },
     "dashboard": {
       "system": "Système",

@@ -2982,7 +2982,17 @@
     "no_generators_selected": "プロファイル種別が太陽光または風力の発電機が選択されていません。",
     "no_model_loaded": "モデルが読み込まれていません。先に設定を読み込んでください。",
     "export_failed": "設定のエクスポートに失敗しました: {error}",
-    "done_status": "完了しました。{count} 件のプロファイルを生成しました。"
+    "done_status": "完了しました。{count} 件のプロファイルを生成しました。",
+    "progress_no_generators": "処理する発電機がありません。",
+    "progress_profile": "プロファイル {i}/{n}：{gen}（{kind}）",
+    "progress_wrote": "{n} 件の可用率 CSV を書き出しました。",
+    "progress_fetching_weather": "{n} 地点の気象データを取得中…",
+    "progress_weather_n": "気象データ {done}/{n} 地点…",
+    "progress_weather_cached": "{n} 地点の気象データ…",
+    "progress_weather_download": "{n} 地点の気象データ：Open-Meteo から {download} 地点をダウンロード（無料枠の制限で約 {minutes} 分）…",
+    "kind_solar": "太陽光",
+    "kind_wind": "風力",
+    "kind_synthetic": "合成"
   },
   "electrical": {
     "inherited_from_bus": "（母線から継承）",
@@ -3703,7 +3713,34 @@
     "progress_geofabrik_downloading": "Geofabrik 抽出データ「{region}」をダウンロード中...",
     "progress_geofabrik_download_bytes": "「{region}」をダウンロード中: {done}/{total} GB",
     "progress_geofabrik_scanning": "抽出データを走査中（{millions}M 要素、{kept} 件を保持）...",
-    "report_timing_line": "{label}: {seconds} 秒"
+    "report_timing_line": "{label}: {seconds} 秒",
+    "cluster_fetching_buildings_from": "{source} から建物を取得中…",
+    "cluster_naming_nodes": "OpenStreetMap からノード名を付与中…",
+    "cluster_naming_nodes_n": "ノード名を付与中（{done}/{total}）…",
+    "cluster_no_valid_criteria": "有効な基準が選択されていません：{criteria}",
+    "cluster_running_criterion": "基準「{criterion}」を実行中（{i}/{n}）…",
+    "cluster_merging": "基準を統合中（コンセンサスクラスタリング）…",
+    "cluster_consensus_kmeans": "コンセンサス K-means（k={k}）…",
+    "cluster_consensus_done": "コンセンサス完了：{k} ノード",
+    "cluster_extracting_infra": "インフラの位置を抽出中…",
+    "cluster_fetching_buildings": "建物フットプリントを取得中…",
+    "cluster_buildings_failed": "建物の取得に失敗しました。インフラを使用します…",
+    "cluster_too_few_buildings": "建物が少なすぎます。インフラを使用します…",
+    "cluster_clustering_buildings": "{n} 件の建物重心をクラスタリング中…",
+    "cluster_preparing_regional": "地域バランスクラスタリングを準備中…",
+    "cluster_regional_kmeans": "地域 K-means を実行中（k={k}）…",
+    "cluster_optimal_k": "最適なノード数を決定中…",
+    "cluster_kmeans": "K-means を実行中（k={k}）…",
+    "cluster_done": "クラスタリング完了：{k} ノード",
+    "cluster_criterion_infrastructure": "インフラ密度",
+    "cluster_criterion_demand": "需要指標",
+    "cluster_criterion_regional": "地域バランス",
+    "criterion_infrastructure_label": "インフラ密度",
+    "criterion_infrastructure_desc": "すべてのインフラ位置（変電所、発電機、蓄電池、燃料受入点）に K-means を適用し、クラスタ中心にノードを配置します。",
+    "criterion_demand_label": "需要指標（建物フットプリント）",
+    "criterion_demand_desc": "建物フットプリント（Overture/Microsoft/Google）を取得し、建物密度でクラスタリングして需要の集中地点を近似します。追加のダウンロードが必要です。",
+    "criterion_regional_label": "地域バランス（均一カバー）",
+    "criterion_regional_desc": "空間的に均一な初期化を行う改良 K-means。密度に関係なく地理的に均等なカバーを確保します。計画検討に適しています。"
   },
   "interruptions": {
     "title": "サービス停止",
@@ -4011,7 +4048,8 @@
     "scenario_probabilities": "シナリオ確率",
     "no_risk_derating": "リスクによる出力低減なし",
     "risk_coefficient": "リスク係数",
-    "per_element_risk_coefficients": "要素別リスク係数"
+    "per_element_risk_coefficients": "要素別リスク係数",
+    "haz_screening": "マルチハザードスクリーニング"
   },
   "risk_panels": {
     "node_n": "ノード {n}",
@@ -5108,7 +5146,8 @@
       "info_re": "再エネ: {pct}%",
       "info_demand": "需要: {power}",
       "info_gen": "発電: {power}",
-      "info_v_viol": "電圧逸脱: {n}"
+      "info_v_viol": "電圧逸脱: {n}",
+      "load_label": "負荷 {node}"
     },
     "dashboard": {
       "system": "システム",

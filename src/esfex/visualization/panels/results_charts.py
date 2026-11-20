@@ -5568,18 +5568,22 @@ def _build_mga_bundle(h5f, base_prefix: str) -> dict:
 
 def _load_mga_bundle(h5_path: Path, base_prefix: str) -> dict:
     """Cache-aware loader: all five MGA charts share the same bundle so
-    the HDF5 read + analytics happen exactly once per batch render."""
+    the HDF5 read + analytics happen exactly once per batch render. The
+    bundle holds translated labels and hover texts, so it is kept per
+    language."""
+    from esfex.visualization.i18n import get_language
+    key = (base_prefix, get_language())
     cache = _active_cache()
     if cache is not None:
         store = getattr(cache, "mga_bundle", None)
         if store is None:
             cache.mga_bundle = store = {}
-        if base_prefix in store:
-            return store[base_prefix]
+        if key in store:
+            return store[key]
     with _open_h5(h5_path) as h5f:
         bundle = _build_mga_bundle(h5f, base_prefix)
     if cache is not None and "error" not in bundle:
-        cache.mga_bundle[base_prefix] = bundle
+        cache.mga_bundle[key] = bundle
     return bundle
 
 

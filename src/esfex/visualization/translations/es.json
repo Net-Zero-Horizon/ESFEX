@@ -2982,7 +2982,17 @@
     "no_generators_selected": "No hay generadores seleccionados con un tipo de perfil Solar o Eólica.",
     "no_model_loaded": "No hay ningún modelo cargado. Cargue primero una configuración.",
     "export_failed": "No se pudo exportar la configuración: {error}",
-    "done_status": "¡Listo! Se generaron {count} perfil(es)."
+    "done_status": "¡Listo! Se generaron {count} perfil(es).",
+    "progress_no_generators": "No hay generadores que procesar.",
+    "progress_profile": "Perfil {i}/{n}: {gen} ({kind})",
+    "progress_wrote": "Se escribieron {n} CSV de disponibilidad.",
+    "progress_fetching_weather": "Descargando datos meteorológicos de {n} ubicación(es)…",
+    "progress_weather_n": "Meteorología {done}/{n} ubicación(es)…",
+    "progress_weather_cached": "Datos meteorológicos de {n} ubicación(es)…",
+    "progress_weather_download": "Datos meteorológicos de {n} ubicación(es): {download} por descargar de Open-Meteo (~{minutes} min con su límite gratuito)…",
+    "kind_solar": "solar",
+    "kind_wind": "eólico",
+    "kind_synthetic": "sintético"
   },
   "electrical": {
     "inherited_from_bus": "(del bus)",
@@ -3703,7 +3713,34 @@
     "progress_geofabrik_downloading": "Descargando el extracto de Geofabrik '{region}'...",
     "progress_geofabrik_download_bytes": "Descargando '{region}': {done}/{total} GB",
     "progress_geofabrik_scanning": "Recorriendo el extracto ({millions} M de elementos, {kept} conservados)...",
-    "report_timing_line": "{label}: {seconds} s"
+    "report_timing_line": "{label}: {seconds} s",
+    "cluster_fetching_buildings_from": "Descargando edificios de {source}…",
+    "cluster_naming_nodes": "Nombrando nodos a partir de OpenStreetMap…",
+    "cluster_naming_nodes_n": "Nombrando nodos ({done}/{total})…",
+    "cluster_no_valid_criteria": "No hay criterios válidos seleccionados: {criteria}",
+    "cluster_running_criterion": "Ejecutando el criterio «{criterion}» ({i}/{n})…",
+    "cluster_merging": "Combinando criterios (agrupamiento por consenso)…",
+    "cluster_consensus_kmeans": "K-means de consenso (k={k})…",
+    "cluster_consensus_done": "Consenso completado: {k} nodos",
+    "cluster_extracting_infra": "Extrayendo posiciones de la infraestructura…",
+    "cluster_fetching_buildings": "Descargando huellas de edificios…",
+    "cluster_buildings_failed": "Falló la descarga de edificios; se usa la infraestructura…",
+    "cluster_too_few_buildings": "Muy pocos edificios; se usa la infraestructura…",
+    "cluster_clustering_buildings": "Agrupando {n} centroides de edificios…",
+    "cluster_preparing_regional": "Preparando el agrupamiento por equilibrio regional…",
+    "cluster_regional_kmeans": "Ejecutando K-means regional (k={k})…",
+    "cluster_optimal_k": "Determinando el número óptimo de nodos…",
+    "cluster_kmeans": "Ejecutando K-means (k={k})…",
+    "cluster_done": "Agrupamiento completado: {k} nodos",
+    "cluster_criterion_infrastructure": "densidad de infraestructura",
+    "cluster_criterion_demand": "indicador de demanda",
+    "cluster_criterion_regional": "equilibrio regional",
+    "criterion_infrastructure_label": "Densidad de infraestructura",
+    "criterion_infrastructure_desc": "K-means sobre todas las posiciones de infraestructura (subestaciones, generadores, baterías, entradas de combustible). Coloca los nodos en los centros de los grupos.",
+    "criterion_demand_label": "Indicador de demanda (huellas de edificios)",
+    "criterion_demand_desc": "Descarga huellas de edificios (Overture/Microsoft/Google) y agrupa por densidad de edificios para aproximar los focos de demanda. Requiere una descarga adicional.",
+    "criterion_regional_label": "Equilibrio regional (cobertura uniforme)",
+    "criterion_regional_desc": "K-means modificado con inicialización espacialmente uniforme. Garantiza una cobertura geográfica pareja sin importar la densidad. Adecuado para estudios de planificación."
   },
   "interruptions": {
     "title": "Interrupciones de servicio",
@@ -4011,7 +4048,8 @@
     "scenario_probabilities": "Probabilidades de Escenarios",
     "no_risk_derating": "Sin reducción por riesgo",
     "risk_coefficient": "Coeficiente de Riesgo",
-    "per_element_risk_coefficients": "Coeficientes de Riesgo por Elemento"
+    "per_element_risk_coefficients": "Coeficientes de Riesgo por Elemento",
+    "haz_screening": "Cribado multiamenaza"
   },
   "risk_panels": {
     "node_n": "Nodo {n}",
@@ -5108,7 +5146,8 @@
       "info_re": "ER: {pct}%",
       "info_demand": "Demanda: {power}",
       "info_gen": "Gen.: {power}",
-      "info_v_viol": "Viol. V: {n}"
+      "info_v_viol": "Viol. V: {n}",
+      "load_label": "Carga {node}"
     },
     "dashboard": {
       "system": "Sistema",
