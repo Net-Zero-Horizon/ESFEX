@@ -5308,7 +5308,7 @@ function create_master_problem(
     defer_budget::Bool = false
 )
     # Create model with optimizer
-    model = Model(create_optimizer(
+    model = solver_model(create_optimizer(
         solver_name=input.solver_name,
         threads=input.threads,
         time_limit=input.time_limit,

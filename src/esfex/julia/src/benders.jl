@@ -802,7 +802,7 @@ function create_benders_master(
     input::MasterProblemInput;
     rep_days_by_year::Dict{Int, Vector{Int}} = benders_rep_days(input)
 )
-    model = Model(create_optimizer(
+    model = solver_model(create_optimizer(
         solver_name=input.solver_name,
         threads=input.threads,
         time_limit=capped_time_limit(input.time_limit, BENDERS_MASTER_TIME_LIMIT),
@@ -1089,7 +1089,7 @@ function create_benders_subproblem(
 
     constraint_store = Dict{String, Any}()
 
-    sp_model = model === nothing ? Model(benders_subproblem_optimizer(input)) : model
+    sp_model = model === nothing ? solver_model(benders_subproblem_optimizer(input)) : model
 
     # Create PowerSystemVariables (reuse existing function)
     ps_vars = create_day_ps_vars!(sp_model, input, year_idx, day_idx, hours)
@@ -1494,7 +1494,7 @@ function create_benders_year_subproblem(
 )::BendersYearSubproblem
     timesteps_per_day = 24 ÷ input.temporal_resolution_hours
     # Each day had at most 300 s
-    model = Model(benders_subproblem_optimizer(input;
+    model = solver_model(benders_subproblem_optimizer(input;
         time_limit = 300.0 * max(length(days), 1)))
     day_sps = SubproblemData[]
     cost = AffExpr(0.0)

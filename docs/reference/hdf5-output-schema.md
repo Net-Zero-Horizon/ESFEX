@@ -264,7 +264,7 @@ Node axes are at node level: when the operational network has buses that differ 
 | `master_loss_repair_gap` | float | (objective − lower bound) / \|objective\|, 0 when no line over-lost |
 | `master_loss_repair_rounds` | int | Repair rounds (re-solves) of that solve |
 | `master_loss_repair_linearised` | int | Line-steps held in one direction at the end |
-| `master_loss_repair_released` | int | Held line-steps the direction check released |
+| `master_loss_repair_released` | int | Held line-steps the direction check released (0: the check is off in 0.4) |
 | `dispatch_loss_repair_lower_bound` | float | Sum over the year's dispatch windows of the objective ($) of their first, PWL, solve (whole windows, look-ahead steps included, so not comparable to `total_cost`). Written when the dispatch has PWL or linear losses |
 | `dispatch_loss_repair_objective` | float | Sum over the windows of their repaired objective ($), on the same steps |
 | `dispatch_loss_repair_gap` | float | Gap of the two sums |

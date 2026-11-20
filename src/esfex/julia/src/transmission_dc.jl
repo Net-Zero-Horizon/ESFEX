@@ -382,9 +382,12 @@ end
 # A copy (copy_model) gets no registry: the hook then solves it as it stands
 JuMP.copy_extension_data(::PWLLossRepair, ::JuMP.AbstractModel, ::JuMP.AbstractModel) = nothing
 
-# Rounds of the repair, the ones that release directions included (was 8
-# before the direction check; Cuba's one-year master settles in ~20)
-const LOSS_REPAIR_MAX_ROUNDS = 20
+# Rounds of the repair, the ones that release directions included
+const LOSS_REPAIR_MAX_ROUNDS = 8
+# The direction check (step 3 of `optimize_exact_losses!`) is off: on Cuba's
+# master it took the repair from 3 rounds to 19 and the master 2.5 to 10 times
+# longer (a TSAM year from 0.5 h to over 6 h). Tests switch it on.
+const LOSS_REPAIR_DIRECTION_CHECK = Ref(false)
 const LOSS_REPAIR_TOL_MW = 1e-3      # over-loss (MW) ignored as solver noise
 # A line-step released twice by the direction check stays held (no cycling)
 const LOSS_REPAIR_MAX_RELEASES = 2
@@ -639,7 +642,9 @@ the PWL loss of the net flow on any line:
    round that would only update alphas is skipped when the linearised
    losses together miss the PWL losses of their flows by at most
    $(100 * LOSS_REPAIR_RETUNE_SHARE) % of all line losses.
-3. Direction check (`reversible_blocks`): once the losses are settled, a
+3. Direction check (`reversible_blocks`), off unless
+   `LOSS_REPAIR_DIRECTION_CHECK[]` is set (it multiplies the rounds and the
+   solve time of a large master): once the losses are settled, a
    held line-step whose flow sits at zero and whose opposite direction
    would lower the objective (reduced cost of that direction's first
    segment, held at 0) is released back to the PWL model and the repair
@@ -698,6 +703,7 @@ mutable struct LossRepairStats
 end
 
 function optimize_exact_losses!(model; kwargs...)
+    sync_highs_threads!(model)
     reg = get(model.ext, :pwl_loss_repair, nothing)
     if !(reg isa PWLLossRepair) || isempty(reg.blocks)
         return optimize!(model; ignore_optimize_hook = true, kwargs...)
@@ -776,7 +782,8 @@ function repair_losses!(model, reg::PWLLossRepair, resolve!, retry, retrying,
             end
             # A release needs two more rounds: its solve, and the repair of
             # the steps that over-lose again
-            r + 2 <= LOSS_REPAIR_MAX_ROUNDS && (release = reversible_blocks(model, reg, F, obj))
+            LOSS_REPAIR_DIRECTION_CHECK[] && r + 2 <= LOSS_REPAIR_MAX_ROUNDS &&
+                (release = reversible_blocks(model, reg, F, obj))
             isempty(release) && return keep_best_round!(model, best, obj, resolve!, retry)
         elseif r == LOSS_REPAIR_MAX_ROUNDS
             if !isempty(over_groups)

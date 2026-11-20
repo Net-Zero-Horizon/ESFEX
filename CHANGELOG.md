@@ -4148,30 +4148,30 @@ Per-release notes are also published on the
   `region_cells_025` now also returns each cell's fraction inside the domain,
   and `land_overlap_weight` gives the weight.
 
-- **The line-loss repair no longer keeps every direction its first solve
-  happened to pick.** When the lines discard energy in the first solve
-  (surplus renewables, curtailment priced or capped), the repair holds each
-  line of an over-losing step in the direction that solve gave it, and kept
-  that direction for the rest of the solve. Where the solve had been
-  discarding energy that direction is arbitrary, so the plan depended on
-  which of its equal-cost points the solver returned (Cuba's one-year
-  master with 8 GW of PV: 6.69 G$ with Gurobi's barrier without crossover,
-  6.99 G$ with the default method, +4.4 %), and lines were often held at
-  zero flow in a direction the cheapest plan runs the other way. Once the
-  losses are settled, the repair now checks every held line-step whose
-  flow sits at zero: when the reduced cost of the other direction says
-  reversing would lower the cost, the line-step is released back to the PWL
-  loss model and the repair goes on, holding it the other way if it
-  over-loses again. A line-step is released at most twice per solve, the
-  repair runs at most 20 rounds (was 8), and it ends on its best round
-  without over-loss. The model stays an LP; unit commitment (a MIP, no
-  duals) skips the check. A held flow above zero is not checked (no local
-  signal), so some dependence on the first solve remains. On Cuba's
-  current one-year master (8 GW of PV) the plan costs 5.77 G$ instead of
-  6.03 G$ under barrier without crossover (−4.3 %) and 5.79 G$ instead of
-  6.06 G$ under Gurobi's default method (−4.4 %); the two methods end
-  0.22 % apart (0.38 % before). The repair takes 19 rounds instead of 3 or
-  4, so such a master solves 2.5 to 3.5 times longer.
+- **The line-loss repair can depend on the first solve's line
+  directions (known limitation, 0.5).** When the lines discard energy in
+  the first solve (surplus renewables, curtailment priced or capped), the
+  repair holds each line of an over-losing step in the direction that
+  solve gave it, and that direction is arbitrary there: Cuba's one-year
+  master with 8 GW of PV costs 6.69 G$ under Gurobi's barrier without
+  crossover and 6.99 G$ under its default method (+4.4 %). A direction
+  check that releases held line-steps whose reversal would lower the cost
+  is implemented (5.77 G$ and 5.79 G$ on that master) but off: it took the
+  repair from 3 rounds to 19 and the master 2.5 to 10 times longer, a TSAM
+  year of the Cuba case from 0.5 h to over 6 h. It comes back as an option
+  once it is faster. The repair runs at most 8 rounds, as before, and ends
+  on its best round without over-loss.
+- **Solves with HiGHS 1.16 (HiGHS.jl 1.27) no longer end
+  `OTHER_ERROR`.** HiGHS 1.16 runs every solve of a process on one thread
+  scheduler, sized by its first solve, and refuses a solve that asks for
+  another thread count. The Julia `Manifest.toml` is not shipped, so a
+  fresh install got that version, and a solve after one with another
+  count failed: Benders' single-threaded subproblems after its master, or a
+  second case with other `solver.threads` in the same Python process (121
+  failed checks in the Julia tests). Every model ESFEX builds
+  (`solver_model`) now resets the scheduler before a solve whose thread
+  count changed (`sync_highs_threads!`); a run with one count is
+  unaffected. Tested with HiGHS 1.14 and 1.16.
 
 
 - **The Grid Builder says when it cannot name nodes offline.** Without the
