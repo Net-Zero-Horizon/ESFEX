@@ -4996,7 +4996,10 @@
         "subtitle": "Which technology sets the system price each hour",
         "axis_hour": "Hour",
         "axis_technology": "Technology",
-        "axis_hours_marginal": "Hours marginal"
+        "axis_hours_marginal": "Hours marginal",
+        "legend_title": "Color = marginal technology",
+        "panel_timeline": "Marginal technology in each hour",
+        "panel_hours": "Hours each technology set the price"
       },
       "uc_storage_soc": {
         "no_data": "No batteries in this run",

@@ -4996,7 +4996,10 @@
         "subtitle": "Que tecnologia define o preço do sistema em cada hora",
         "axis_hour": "Hora",
         "axis_technology": "Tecnologia",
-        "axis_hours_marginal": "Horas como marginal"
+        "axis_hours_marginal": "Horas como marginal",
+        "legend_title": "Cor = tecnologia marginal",
+        "panel_timeline": "Tecnologia marginal em cada hora",
+        "panel_hours": "Horas em que cada tecnologia definiu o preço"
       },
       "uc_storage_soc": {
         "no_data": "Não há baterias nesta execução",
