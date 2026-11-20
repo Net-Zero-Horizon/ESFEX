@@ -311,7 +311,7 @@ Returns `SensitivityParameter` objects for each detected group. Objective groups
 | `co2_*`, `carbon_*` | `co2_budget` | CO2 budget RHS |
 | `budget_*` | `cost_budget` | Budget constraint RHS |
 
-Groups only appear if the LP file contains matching names. The master problem's nodal power-balance constraints are unnamed in the exported LP, so the `demand` group is usually absent; the named RHS groups in the master are `re_ratio_*` and `max_curtailment_*`.
+Groups only appear if the LP file contains matching names. The master problem's nodal power-balance constraints are unnamed in the exported LP, so the `demand` group is usually absent; the named RHS groups in the master are `re_target_*` (whose right side is 0, so perturbing it has no effect), `max_curtailment_*` and `budget_*`.
 
 ---
 

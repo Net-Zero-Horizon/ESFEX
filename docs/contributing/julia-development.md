@@ -20,12 +20,16 @@ src/esfex/julia/
     ├── transmission_acopf.jl # ACOPF formulations (SOC, QC, SDP, NLP)
     ├── power_system.jl       # Operational dispatch / unit commitment
     ├── primary_energy.jl     # Fuel supply chain
+    ├── committed_steps.jl    # Steps a rolling-horizon window keeps
     ├── master_problem.jl     # Capacity expansion (single, multi-system, stochastic)
+    ├── master_fuel.jl        # Fuel balance, fuel infrastructure and electrolyzers in the master
+    ├── master_diagnostics.jl # Binding constraints, duals and paid slacks of the master
     ├── benders.jl            # Benders decomposition of the master problem
     ├── mga.jl                # MGA / SPORES near-optimal alternatives
-    ├── electrolyzer.jl       # Electrolyzers
+    ├── electrolyzer.jl       # Stand-alone electrolyzer model (not used by a run)
     ├── dcopf_benchmark.jl    # Standalone DCOPF benchmark (solve_dcopf)
-    └── acopf_benchmark.jl    # Standalone ACOPF benchmark (solve_acopf)
+    ├── acopf_benchmark.jl    # Standalone ACOPF benchmark (solve_acopf)
+    └── log_forwarding.jl     # Julia logs to the Python logger
 ```
 
 ### Module Entry Point
@@ -49,12 +53,16 @@ module ESFEX
     include("transmission_acopf.jl")
     include("power_system.jl")
     include("primary_energy.jl")
+    include("committed_steps.jl")
     include("master_problem.jl")
+    include("master_fuel.jl")
+    include("master_diagnostics.jl")
     include("benders.jl")
     include("mga.jl")
     include("electrolyzer.jl")
     include("dcopf_benchmark.jl")
     include("acopf_benchmark.jl")
+    include("log_forwarding.jl")
 
     export create_power_system, create_master_problem
     export create_optimizer, diagnose_infeasibility

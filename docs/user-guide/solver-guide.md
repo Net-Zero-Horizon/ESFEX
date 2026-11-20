@@ -328,7 +328,7 @@ With `method: auto`, Gurobi solves an LP with its concurrent optimizer: barrier 
 | `barrier_conv_tol` | float | 1e-12 to 1e-1 | 1e-8 | Barrier convergence tolerance |
 | `mip_emphasis` | combo | `balanced`, `feasibility`, `optimality`, `best_bound`, `hidden_feasibility` | `balanced` | MIP solving emphasis |
 
-Method-specific: `feasibility_tol` and `optimality_tol` need `lp_method: auto`, `primal_simplex`, `dual_simplex` or `network`; `barrier_conv_tol` needs `lp_method: auto` or `barrier`. CPLEX ignores `solver.verbose`.
+Method-specific: `feasibility_tol` and `optimality_tol` need `lp_method: auto`, `primal_simplex`, `dual_simplex` or `network`; `barrier_conv_tol` needs `lp_method: auto` or `barrier`. CPLEX ignores `solver.verbose` in the dispatch windows; the master solves follow it.
 
 ### GLPK Options
 

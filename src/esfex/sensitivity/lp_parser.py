@@ -112,7 +112,8 @@ class LPModel:
         anonymous (exported as c1, c2, ...), so they cannot be grouped by name
         here; demand-RHS sensitivity is therefore only available when balance
         constraints carry a demand_bal_/power_balance_ label. The named RHS
-        groups that DO exist in the master are re_ratio_* and max_curtailment_*.
+        groups that DO exist in the master are re_target_* (right side 0),
+        max_curtailment_* and budget_*.
         """
         groups: dict[str, list[tuple[str, int]]] = {}
         demand_re = re.compile(r"demand_bal_|power_balance_")

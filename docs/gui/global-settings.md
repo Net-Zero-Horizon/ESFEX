@@ -286,7 +286,7 @@ Type a name and click **Add**; **Remove Selected** deletes the selected scenario
 | Demand | Demand growth as an annual factor (`demand_growth`) |
 | Financial | Discount rate (`discount_rate`) |
 
-Each one scales a term of the stochastic master; see [Stochastic Programming](../formulation/stochastic-programming.md#22-scenario-multipliers) for what it applies to. The fuel-chain and electrolyzer multipliers need **Primary Energy** on: the master has a fuel balance only then. A project saved by an earlier version may contain other keys: the ones that mean one of these multipliers (for example `gen_fuel_cost` or `fuel_price` for `fuel_cost`, `gen_invest_cost` for both technology investment costs) are translated when the project is opened, and the rest (electrolyzer, fuel import and fuel infrastructure costs, loss of fuel supply penalty) are dropped with a warning in the log, because the master problem has no cost they could scale.
+Each one scales a term of the stochastic master; see [Stochastic Programming](../formulation/stochastic-programming.md#22-scenario-multipliers) for what it applies to. The fuel-chain and electrolyzer multipliers need **Primary Energy** on: the master has a fuel balance only then. A project saved by an earlier version may contain other keys: the ones that mean one of these multipliers (for example `gen_fuel_cost` or `fuel_price` for `fuel_cost`, `gen_invest_cost` for both technology investment costs) are translated when the project is opened; any other key is dropped with a warning in the log.
 
 ### Using Stochastic Optimization
 

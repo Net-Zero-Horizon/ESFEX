@@ -209,7 +209,7 @@ The optimal investment plan minimizes this expected cost, hedging against all th
 ### 4.6 Slack Penalties
 
 
-The RE-target, budget and capacity-adequacy slacks belong to the first stage and are penalised once, outside the scenario sum.
+The budget and capacity-adequacy slacks belong to the first stage and are penalised once, outside the scenario sum. The RE-target shortfall is second-stage: each scenario has its own, priced in its operating cost (§4.3).
 
 ---
 

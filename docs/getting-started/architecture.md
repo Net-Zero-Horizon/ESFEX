@@ -87,7 +87,7 @@ The bridge (`bridge/`) converts between Python data structures (NumPy arrays, Py
 | `MasterProblemAdapter` | `master_problem.jl`, `benders.jl` | Multi-year capacity expansion planning |
 | `TransmissionDCAdapter` | `transmission_dc.jl` | DC power-flow constraints (Kirchhoff formulation) |
 | `PrimaryEnergyAdapter` | `primary_energy.jl` | Fuel supply chain optimization |
-| `ElectrolyzerAdapter` | `electrolyzer.jl` | Power-to-hydrogen modeling |
+| `ElectrolyzerAdapter` | `electrolyzer.jl` | Stand-alone power-to-hydrogen model (not used by the runner) |
 | `MGAAdapter` | `mga.jl` | Near-optimal alternatives (MGA and SPORES) |
 
 Each adapter follows the same pattern:
@@ -167,13 +167,15 @@ The Julia code (`julia/src/`) implements the optimization models using JuMP [**[
 | `types.jl` | Input/output data structures (structs) |
 | `power_system.jl` | Operational dispatch and unit commitment |
 | `master_problem.jl` | Multi-year capacity expansion (monolithic) |
+| `master_fuel.jl` | Fuel balance, fuel infrastructure and electrolyzers in the master |
+| `master_diagnostics.jl` | Binding constraints, duals and paid slacks of the master |
 | `benders.jl` | Benders decomposition of the master problem (`master_problem.solver_method: benders`) |
 | `mga.jl` | MGA/SPORES near-optimal alternative generation |
 | `transmission_dc.jl` | DC power flow (bus KCL, angle-based line flows) |
 | `transmission_ac.jl` | AC power flow verification (Newton-Raphson post-DC) |
 | `transmission_acopf.jl` | AC-OPF formulations: SOC, QC, SDP, polar NLP, rectangular NLP |
 | `primary_energy.jl` | Fuel supply chain optimization |
-| `electrolyzer.jl` | Power-to-hydrogen conversion |
+| `electrolyzer.jl` | Stand-alone power-to-hydrogen model, not used by a run (the dispatch's electrolyzers are in `power_system.jl`) |
 | `user_constraints.jl` | Registry for user-defined (custom) constraints and plugin constraint hooks |
 | `dcopf_benchmark.jl`, `acopf_benchmark.jl` | Stand-alone DC/AC-OPF solves used for benchmarking |
 
@@ -189,7 +191,7 @@ HiGHS [**[21]**](../reference/bibliography.md#ref21) is the default solver. GLPK
 | AC Power Flow | `transmission_ac.jl` | Post-DC Newton-Raphson verification of voltages, reactive power, and losses [**[5]**](../reference/bibliography.md#ref5) |
 | AC-OPF | `transmission_acopf.jl` | AC-OPF dispatch with convex relaxations (SOC, QC, SDP) or exact NLP (polar, rectangular), selected with `power_flow_mode` |
 | Primary Energy | `primary_energy.jl` | Fuel supply chains with storage, transport, and import constraints |
-| Electrolyzer | `electrolyzer.jl` | Power-to-hydrogen conversion with capacity investment and efficiency modeling |
+| Electrolyzer | `power_system.jl` (dispatch), `master_fuel.jl` (investment) | Power-to-hydrogen conversion; with primary energy on, the hydrogen fills the node's hydrogen tank |
 | MGA/SPORES | `mga.jl` | Near-optimal alternative generation [**[7]**](../reference/bibliography.md#ref7), [**[8]**](../reference/bibliography.md#ref8): Hop-Skip-Jump diversity (MGA) or one alternative per objective (SPORES) |
 
 ---
@@ -305,13 +307,15 @@ src/esfex/
 |       +-- types.jl              # Data structures
 |       +-- power_system.jl       # Operational dispatch
 |       +-- master_problem.jl     # Capacity expansion
+|       +-- master_fuel.jl        # Fuel block of the master
+|       +-- master_diagnostics.jl # Binding constraints and duals of the master
 |       +-- benders.jl            # Benders decomposition
 |       +-- mga.jl                # MGA/SPORES alternatives
 |       +-- transmission_dc.jl    # DC power flow
 |       +-- transmission_ac.jl    # AC power flow verification
 |       +-- transmission_acopf.jl # AC-OPF formulations
 |       +-- primary_energy.jl     # Fuel supply chain
-|       +-- electrolyzer.jl       # Power-to-hydrogen
+|       +-- electrolyzer.jl       # Stand-alone power-to-hydrogen model
 |       +-- user_constraints.jl   # Custom constraint registry
 +-- visualization/        # Studio (PySide6 + Leaflet.js)
     +-- app.py            # Application entry point

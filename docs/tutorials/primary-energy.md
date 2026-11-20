@@ -187,7 +187,7 @@ received = 100 * (1 - 0.005 * 150 / 100) = 100 * 0.9925 = 99.25 tonnes
       transport_pipelines: {}
 ```
 
-`efficiency` (default 0.8 when a fuel has no entry) applies in every mode. The investment fields (`investment_cost`, `expansion_limit`) are used by the master problem, which builds fuel storage and route capacity on its representative days in `simulation_mode: development`; each dispatch year then uses what was built as existing capacity. A run without a master (`economic_dispatch`, `unit_commitment`) builds none. `expansion_limit: 2.0` means new capacity may reach twice the existing capacity, so the total cannot exceed 3x the original. Built capacity does not retire within the horizon, so `lifetime` is not used.
+`efficiency` (default 0.8 when a fuel has no entry) applies in every mode. The investment fields (`investment_cost`, `expansion_limit`) are used by the master problem, which builds fuel storage and route capacity on its representative days in `simulation_mode: development`; each dispatch year then uses what was built as existing capacity. A run without a master (`economic_dispatch`, `unit_commitment`) builds none. `expansion_limit: 2.0` means new capacity may reach twice the existing capacity, so the total cannot exceed 3x the original. Built capacity does not retire within the horizon; the master charges it as annuities over `lifetime` (defaults 30 years for storage, 20 for routes).
 
 ---
 

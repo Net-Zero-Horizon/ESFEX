@@ -587,8 +587,6 @@ Written when the primary energy model is active.
 | `total_ne_demand_satisfied/{fuel}` | dataset | Non-electric demand served (same periods) |
 | `total_loss_of_supply/{fuel}` | dataset | Unserved fuel demand (same periods) |
 | `final_storage_levels/{fuel}` | dataset | Storage levels at the end of the year |
-| `transport_investments/{fuel}` | dataset | Transport capacity investments |
-| `storage_investments/{fuel}` | dataset | Storage capacity investments |
 | `transport_flows/{fuel}` | dataset | Flows per route and period `[routes x periods]` |
 | `fuel_for_power/{unit}` | dataset | Fuel burnt by each fuel-coupled unit `[nodes x steps]`, in fuel units per step (attribute `units`); `{unit}` is the unit's dataset name in the per-generator groups |
 | `total_fuel_cost`, `total_transport_cost`, `total_loss_penalty` | attributes | Cost totals ($) |

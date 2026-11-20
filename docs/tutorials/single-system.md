@@ -461,7 +461,7 @@ with h5py.File(h5_path, "r") as f:
         print(f"{yr}: {em:,.0f} tCO2 ({status} budget)")
 ```
 
-Emissions should decline as diesel generation is displaced. The CO2 budget is a soft limit of the operational dispatch: each rolling-horizon window gets its share of `annual_budget`, and emissions above it cost `co2_budget_violation` ($/t, default 500). The master problem does not see the budget; it sees the CO2 price (`penalties.co2_cost`).
+Emissions should decline as diesel generation is displaced. The CO2 budget is a soft limit of the operational dispatch: each rolling-horizon window gets its share of `annual_budget`, and emissions above it cost `co2_budget_violation` ($/t, default 500). The master problem holds the same annual budget, at the same price per tonne above it, and also sees the CO2 price (`penalties.co2_cost`).
 
 ### Battery Utilization
 

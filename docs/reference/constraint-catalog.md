@@ -303,7 +303,7 @@ The days reuse the dispatch constraints above (generators and batteries with cap
 | `bt_soc_zero_*`, `bt_dis_zero_*`, `bt_ch_zero_*` | OP-2c | Battery technology fixed to 0 where its efficiency is 0 |
 | `lol_sec_ub_{sector}_y{y}_d{d}_n{n}_t{t}` | OP-5 | Sectoral LOL <= sector demand at the bus |
 | `lol_sec_sum_y{y}_d{d}_n{n}_t{t}`, `lol_sec_residual_y{y}_d{d}_n{n}_t{t}` | OP-5 | Bus load shed minus sectoral LOL is in [0, bus demand not covered by any sector] (the sectoral LOL is part of the load shed) |
-| `max_curtailment_s{σ}_y{y}` | CURT-1 | Annual, per system: curtailment (existing + technologies) over the year <= `max_curtailment_ratio` × RE generation over the year (+ the RE-3c exemption) + the excess `curtailment_excess_s{σ}_y{y}` (MWh/yr, at 10⁴ $/MWh); a stochastic scenario's `max_curtailment_sc{k}_s{σ}_y{y}` |
+| `max_curtailment_s{σ}_y{y}` | CURT-1 | Annual, per system: curtailment (existing + technologies) over the year <= `max_curtailment_ratio` × RE generation over the year (+ the RE-3c exemption) + the excess `curtailment_excess_s{σ}_y{y}` (MWh/yr, at max(10⁴, 100 × the dearer of the RE shortfall price and the curtailment cost) $/MWh); a stochastic scenario's `max_curtailment_sc{k}_s{σ}_y{y}` |
 
 ### TSAM Inter-Period Linking
 
@@ -404,10 +404,7 @@ The Benders master contains TECH, BUD, RET-2, CAP, TXN and the operating bound (
 
 ### Investment
 
-| Label Pattern | Family | Description |
-|---------------|--------|-------------|
-| `inv_transport_limit_{f}_{ip}_r{r}` | PE-INV1 | Transport investment <= route capacity × expansion limit |
-| `inv_storage_limit_{f}_{ip}_{n}` | PE-INV2 | Storage investment <= base capacity × expansion limit |
+The dispatch builds no fuel infrastructure. The master's build limits are `fuel_storage_inv_total_{f}_{n}`, `fuel_transport_inv_total_{f}_{r}` and `elz_inv_total_e{e}_b{b}` (`master_fuel.jl`, PE-5d).
 
 ### Periodic Supply, Transport and Demand
 
@@ -424,6 +421,7 @@ A period's shipment `T[r, p]` leaves its origin evenly over the period's steps a
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
 | `hr_storage_initial_{f}_{n}` | PE-H1 | Tank initial level |
+| `hr_storage_cyclic_{f}_{n}` | PE-H1 | In the master's representative days: the tank ends each period at its starting level (no initial level) |
 | `hr_storage_balance_{f}_{n}_{t}` | PE-4 | `V[t+1] = V[t] + eta * (local supply + arrivals [+ electrolyzer H2 for Hydrogen]) - drawn - departures` (no loss on V) |
 | `hr_storage_dispatch_rate_*` | PE-H3 | Drawn <= rate × Δt × capacity (rate per hour; only at nodes with a tank) |
 | `hr_storage_min_*`, `hr_storage_max_*`, `hr_storage_min_final_*` | PE-5 | Tank level bounds (after each step; minimum also at period ends, and not during a tank outage). The maximum is 0 at a node without a tank |
@@ -434,6 +432,7 @@ A period's shipment `T[r, p]` leaves its origin evenly over the period's steps a
 | `hr_emissions_*`, `hr_emissions_direct_*`, `hr_total_emissions_{n}_{t}` | PE-EM | Emissions |
 | `link_supply_storage_in_*`, `link_ne_*` | PE-LINK | A period's local supply and non-electric use add up over its steps |
 | `pe_coupling_gen{g}_n{n}_{t}` | PE-8 | `Σ_b∈n gen_output[g, b, t] * Δt <= fuel_for_power[n, t] * mwhe_per_unit` (inequality, per unit and node) |
+| `pe_coupling_tech{k}_n{n}_{t}` | PE-8 | The same for candidate technology k in the master: `Σ_b∈n tech_output[k, b, t] * Δt <= fuel_for_power[n, t] * mwhe_per_unit` |
 
 The dispatch electrolyzers (ELZ-1/ELZ-2 in `power_system.jl`) have no constraint of their own here: their hydrogen is a term of the `Hydrogen` tank balance (PE-H2). `electrolyzer.jl` defines its own electrolyzer constraints, which the runner does not use.
 

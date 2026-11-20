@@ -11,8 +11,8 @@ class Orchestrator:
     def __init__(
         self,
         config: ESFEXConfig,
-        output_dir: Optional[Path] = None,
-        config_path: Optional[Path] = None,
+        output_dir: Optional[Union[str, Path]] = None,
+        config_path: Optional[Union[str, Path]] = None,
     ) -> None
 ```
 
@@ -21,8 +21,8 @@ class Orchestrator:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `config` | `ESFEXConfig` | (required) | Validated ESFEX configuration object |
-| `output_dir` | `Optional[Path]` | `"./results"` | Directory for HDF5 output files and logs |
-| `config_path` | `Optional[Path]` | `None` | Path to the original YAML file (for relative path resolution of demand files, availability profiles, etc.) |
+| `output_dir` | `Optional[Union[str, Path]]` | `"./results"` | Directory for HDF5 output files and logs |
+| `config_path` | `Optional[Union[str, Path]]` | `None` | Path to the original YAML file (for relative path resolution of demand files, availability profiles, etc.) |
 
 **Attributes:**
 
