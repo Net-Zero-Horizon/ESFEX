@@ -4762,7 +4762,7 @@
         "hover_objective": "目的: {objective}",
         "hover_peak_re": "再エネ最大: {pct}%",
         "trace_alternative": "代替案",
-        "colorbar_cost": "コスト ($B)",
+        "colorbar_cost": "コスト (十億ドル)",
         "trace_optimal": "最適解",
         "axis_pc1": "PC1（分散 {pct}%）",
         "axis_pc2": "PC2（分散 {pct}%）",
@@ -4793,7 +4793,7 @@
         "title_b": "b)  意思決定のロバスト性",
         "subtitle_b": "MGA集合全体での技術別投資容量 (MW) の最小↔最大 · CV順（下ほど必須、上ほど代替可能）",
         "axis_distance": "コスト最適解からの距離（正規化）",
-        "axis_cost": "システムコスト ($B)"
+        "axis_cost": "システムコスト (十億ドル)"
       },
       "mga_spatial": {
         "no_data": "空間的差異のデータがありません。",

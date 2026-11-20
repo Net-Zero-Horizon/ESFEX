@@ -1690,6 +1690,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Fixed
 
+- **One Spanish term per concept.** The same concept had several names
+  across the Studio. Now curtailment and spillage are "vertimiento" (it was
+  also "curtailment", "derrame" and "vertido"), load shedding and the loss-of-
+  load cost are "deslastre de carga" (also "pérdida de carga" and
+  "deslastre"), and $B is "miles de M$" everywhere ("mil M$" in two charts).
+  The reliability indices keep their standard names (LOLP, LOLH, LOLF, VOLL,
+  ENS). Converters are "AC/DC" (five texts said "CA/CC"). The French and
+  Japanese $B labels are made uniform too.
+  `tests/test_i18n_glossary.py` keeps the glossary.
+
 - **The wind wizard reaches its analysis step again.** Leaving the criteria
   step raised a TypeError, so no wind analysis could start: the step built
   windrex's MCDA settings, whose criteria have no `direction` and which keep
