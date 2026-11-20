@@ -62,7 +62,7 @@ function solve_dcopf(;
     n_line = length(line_from)
 
     # ── Model ────────────────────────────────────────────────────────────
-    model = Model(create_optimizer(solver_name="highs", verbose=false))
+    model = solver_model(create_optimizer(solver_name="highs", verbose=false))
 
     # ── Variables ────────────────────────────────────────────────────────
     @variable(model, pg[1:n_gen])             # generator output (MW)

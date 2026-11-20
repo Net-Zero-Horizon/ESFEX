@@ -214,7 +214,7 @@ import Ipopt
 
         # solver.time_limit 0 = no limit: a model solves instead of stopping
         # at once (HiGHS read 0 s as stop now: TIME_LIMIT on this LP)
-        m = ESFEX.Model(create_optimizer(solver_name = "highs", time_limit = 0.0))
+        m = ESFEX.solver_model(create_optimizer(solver_name = "highs", time_limit = 0.0))
         x = ESFEX.JuMP.@variable(m, [1:200], lower_bound = 0, upper_bound = 10)
         ESFEX.JuMP.@constraint(m, [i in 1:199], x[i] + 2x[i+1] >= 1 + mod(i, 7))
         ESFEX.JuMP.@objective(m, Min, sum((1 + mod(i, 5)) * x[i] for i in 1:200))
@@ -231,6 +231,26 @@ import Ipopt
         @test ESFEX.capped_time_limit(0.0, 600.0) == 600.0
         @test ESFEX.capped_time_limit(100.0, 600.0) == 100.0
         @test ESFEX.capped_time_limit(7200.0, 600.0) == 600.0
+    end
+
+    @testset "HiGHS solves with another thread count in the same process" begin
+        # HiGHS 1.16 sizes one thread scheduler per process at its first
+        # solve and ended a solve asking for another count OTHER_ERROR (the
+        # Benders subproblems run on 1 thread, the master on solver.threads)
+        function lp(threads)
+            m = ESFEX.solver_model(create_optimizer(solver_name = "highs", threads = threads))
+            x = ESFEX.JuMP.@variable(m, x >= 0)
+            ESFEX.JuMP.@constraint(m, x >= 1)
+            ESFEX.JuMP.@objective(m, Min, x)
+            return m
+        end
+        for threads in (4, 1, 4, 2)
+            m = lp(threads)
+            ESFEX.optimize_retrying!(m, nothing, "test")
+            @test termination_status(m) == ESFEX.MOI.OPTIMAL
+        end
+        # Another solver: nothing to sync
+        @test ESFEX.sync_highs_threads!(ESFEX.Model()) === nothing
     end
 
     @testset "_compute_year_target" begin
@@ -2088,7 +2108,7 @@ import Ipopt
                   [sum(full.slopes[1] .* full.segment_widths[1])]
         end
 
-        @testset "loss repair: a direction held at zero flow is released (L44)" begin
+        @testset "loss repair: a direction held at zero flow is released (L44, opt-in)" begin
             # Three buses in a triangle of 50 MW lines, linear losses (5 %),
             # 500 MW of PV for 50 MW of load, curtailment priced. The PWL
             # solve loses the surplus on the lines; the repair held each line
@@ -2128,51 +2148,63 @@ import Ipopt
                     pwl_loss_segments = segments, curtailment_cost = 2e-5)
                 return create_power_system(input)
             end
-            model, vars = triangle()
+            # Off by default (it multiplies a large master's solve time):
+            # the held directions stay, at their 0.084
+            model, _ = triangle()
             optimize!(model)
             @test termination_status(model) == ESFEX.MOI.OPTIMAL
-            obj = objective_value(model)
-            reg = model.ext[:pwl_loss_repair]
-            @test length(reg.blocks) == 3
-            # Lines lose exactly the loss of their net flow
-            for b in reg.blocks
-                @test value(b.ploss) ≈ 0.05 * abs(value(b.pf)) atol = 1e-6
-                @test b.releases <= ESFEX.LOSS_REPAIR_MAX_RELEASES
-            end
-            # The exact-loss optimum: with one loss segment, each pattern of
-            # held directions is an LP with exact losses; the best of the 8
-            em, _ = triangle()
-            ereg = em.ext[:pwl_loss_repair]
-            exact = Inf
-            for mask in 0:7
-                ESFEX.restore_pwl_losses!(ereg)
-                for (k, b) in enumerate(ereg.blocks)
-                    ESFEX.linearise_block!(b, isodd(mask >> (k - 1)) ? 1 : -1, b.slopes[1])
+            @test objective_value(model) > 0.08395
+            @test loss_repair_bounds(model)["released"] == 0
+            ESFEX.LOSS_REPAIR_DIRECTION_CHECK[] = true
+            try
+                model, vars = triangle()
+                optimize!(model)
+                @test termination_status(model) == ESFEX.MOI.OPTIMAL
+                obj = objective_value(model)
+                reg = model.ext[:pwl_loss_repair]
+                @test length(reg.blocks) == 3
+                # Lines lose exactly the loss of their net flow
+                for b in reg.blocks
+                    @test value(b.ploss) ≈ 0.05 * abs(value(b.pf)) atol = 1e-6
+                    @test b.releases <= ESFEX.LOSS_REPAIR_MAX_RELEASES
                 end
-                optimize!(em; ignore_optimize_hook = true)
-                termination_status(em) == ESFEX.MOI.OPTIMAL &&
-                    (exact = min(exact, objective_value(em)))
-            end
-            @test obj ≈ exact rtol = 1e-7
-            @test exact < 0.08395      # the held directions cost 0.084
+                # The exact-loss optimum: with one loss segment, each pattern of
+                # held directions is an LP with exact losses; the best of the 8
+                em, _ = triangle()
+                ereg = em.ext[:pwl_loss_repair]
+                exact = Inf
+                for mask in 0:7
+                    ESFEX.restore_pwl_losses!(ereg)
+                    for (k, b) in enumerate(ereg.blocks)
+                        ESFEX.linearise_block!(b, isodd(mask >> (k - 1)) ? 1 : -1, b.slopes[1])
+                    end
+                    optimize!(em; ignore_optimize_hook = true)
+                    termination_status(em) == ESFEX.MOI.OPTIMAL &&
+                        (exact = min(exact, objective_value(em)))
+                end
+                @test obj ≈ exact rtol = 1e-7
+                @test exact < 0.08395      # the held directions cost 0.084
 
-            # The bounds of the solve: the PWL solve (over-loss allowed, a
-            # relaxation) below, the repaired one above
-            bounds = loss_repair_bounds(model)
-            @test bounds["objective"] ≈ obj
-            @test bounds["lower_bound"] < bounds["objective"]
-            @test bounds["gap"] ≈ (obj - bounds["lower_bound"]) / obj
-            @test bounds["released"] >= 1
-            @test bounds["rounds"] >= 2
-            @test bounds["linearised"] == count(b -> b.dir != 0, reg.blocks)
-            # Re-solving starts again from the PWL model, to the same end
-            optimize!(model)
-            @test objective_value(model) ≈ obj rtol = 1e-7
-            @test loss_repair_bounds(model)["lower_bound"] ≈ bounds["lower_bound"]
-            # No loss model: nothing to repair, no bounds
-            model, _ = triangle(segments = 0)
-            optimize!(model)
-            @test loss_repair_bounds(model) === nothing
+                # The bounds of the solve: the PWL solve (over-loss allowed, a
+                # relaxation) below, the repaired one above
+                bounds = loss_repair_bounds(model)
+                @test bounds["objective"] ≈ obj
+                @test bounds["lower_bound"] < bounds["objective"]
+                @test bounds["gap"] ≈ (obj - bounds["lower_bound"]) / obj
+                @test bounds["released"] >= 1
+                @test bounds["rounds"] >= 2
+                @test bounds["linearised"] == count(b -> b.dir != 0, reg.blocks)
+                # Re-solving starts again from the PWL model, to the same end
+                optimize!(model)
+                @test objective_value(model) ≈ obj rtol = 1e-7
+                @test loss_repair_bounds(model)["lower_bound"] ≈ bounds["lower_bound"]
+                # No loss model: nothing to repair, no bounds
+                model, _ = triangle(segments = 0)
+                optimize!(model)
+                @test loss_repair_bounds(model) === nothing
+            finally
+                ESFEX.LOSS_REPAIR_DIRECTION_CHECK[] = false
+            end
         end
 
         @testset "loss repair: a stalled re-solve is retried or undone (round 37)" begin
@@ -3404,7 +3436,7 @@ import Ipopt
                     Dict{Int, Tuple{String, Float64, Float64, Float64}}(), 24, 72, 0.05,
                     1000.0, "economic_dispatch", Dict{String, Any}(), nothing,
                     Dict{Int, Vector{Float64}}(), 300.0, 1, 0)
-                m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+                m = ESFEX.solver_model(create_optimizer(solver_name = "highs"))
                 ESFEX.set_silent(m)
                 vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp)
                 terms = ESFEX.get_primary_energy_objective_terms(vars, inp, temporal, prices)
@@ -3442,7 +3474,7 @@ import Ipopt
                     TransportRoute[], Dict{Int, Tuple{String, Float64, Float64, Float64}}(),
                     24, 48, 0.05, 1000.0, mode, cumul, init,
                     Dict{Int, Vector{Float64}}(), 300.0, 1, 0)
-                m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+                m = ESFEX.solver_model(create_optimizer(solver_name = "highs"))
                 ESFEX.set_silent(m)
                 vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp)
                 terms = ESFEX.get_primary_energy_objective_terms(vars, inp, temporal, prices)
@@ -3480,7 +3512,7 @@ import Ipopt
                     Dict{Int, Tuple{String, Float64, Float64, Float64}}(), 24, 48, 0.05,
                     1000.0, "economic_dispatch", Dict{String, Any}(), nothing,
                     Dict{Int, Vector{Float64}}(), 300.0, 1, 0)
-                m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+                m = ESFEX.solver_model(create_optimizer(solver_name = "highs"))
                 ESFEX.set_silent(m)
                 vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp;
                                                                            outage_masks = masks)
@@ -3547,7 +3579,7 @@ import Ipopt
                     Dict("Gas" => [0.0, init2]),
                     Dict{Int, Vector{Float64}}(), 300.0, 1, offset,
                     arrivals)
-                m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+                m = ESFEX.solver_model(create_optimizer(solver_name = "highs"))
                 ESFEX.set_silent(m)
                 vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp)
                 terms = ESFEX.get_primary_energy_objective_terms(vars, inp, temporal, prices)
@@ -3690,7 +3722,7 @@ import Ipopt
                     Dict{Int, Tuple{String, Float64, Float64, Float64}}(), 2, 2, 0.05,
                     1000.0, "economic_dispatch", Dict{String, Any}(), nothing,
                     Dict{Int, Vector{Float64}}(), 300.0, 2, 0)
-                m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+                m = ESFEX.solver_model(create_optimizer(solver_name = "highs"))
                 ESFEX.set_silent(m)
                 vars, temporal, prices = ESFEX.create_primary_energy_model(m, inp)
                 terms = ESFEX.get_primary_energy_objective_terms(vars, inp, temporal, prices)
@@ -3966,7 +3998,7 @@ import Ipopt
             infra = Dict("Gas" => FuelInfrastructureConfig(100.0, 1.0e-9, 3.0, 1.0e-9, 2.0,
                                                           1.0, 20.0, 30.0, 0.5))
             pe2 = ESFEX.with_fields(pe; infrastructure = infra)
-            m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+            m = ESFEX.solver_model(create_optimizer(solver_name = "highs"))
             vars, _, _ = ESFEX.create_primary_energy_model(m, pe2)
             @test isempty(vars.storage_capacity_investment)
             @test isempty(vars.transport_capacity_investment)
@@ -5663,16 +5695,22 @@ import Ipopt
             # A master that stops at a limit with a feasible plan is used;
             # its objective is no lower bound. It used to end the iterations.
             MOI = ESFEX.MOI
-            m = ESFEX.Model(create_optimizer(solver_name = "highs"))
+            m = ESFEX.solver_model(create_optimizer(solver_name = "highs"))
             ESFEX.set_silent(m)
             ESFEX.set_attribute(m, "mip_max_improving_sols", 1)
             ESFEX.set_attribute(m, "presolve", "off")
+            # No heuristics, no gap, and large enough that the first
+            # improving solution is not the optimum (HiGHS 1.16 solved 30
+            # items at once, and took its first solution within 1 %)
+            ESFEX.set_attribute(m, "mip_heuristic_effort", 0.0)
+            ESFEX.set_attribute(m, "mip_rel_gap", 0.0)
+            nk = 120
+            w = [mod(7i, 13) + 3 for i in 1:nk]
+            v = [mod(11i, 17) + 2 for i in 1:nk]
+            x = ESFEX.@variable(m, [1:nk], Bin)
+            ESFEX.@constraint(m, sum(w[i] * x[i] for i in 1:nk) <= 2nk)
+            ESFEX.@objective(m, Min, -sum(v[i] * x[i] for i in 1:nk))
             n = 30
-            w = [mod(7i, 13) + 3 for i in 1:n]
-            v = [mod(11i, 17) + 2 for i in 1:n]
-            x = ESFEX.@variable(m, [1:n], Bin)
-            ESFEX.@constraint(m, sum(w[i] * x[i] for i in 1:n) <= 60)
-            ESFEX.@objective(m, Min, -sum(v[i] * x[i] for i in 1:n))
             optimize!(m)
             @test termination_status(m) == MOI.SOLUTION_LIMIT
             @test ESFEX.limit_with_feasible_point(m)
@@ -5684,7 +5722,7 @@ import Ipopt
 
             # An LP stopped by the simplex iteration limit: no feasible
             # primal point, but a feasible dual one bounds the optimum
-            lp = ESFEX.Model(create_optimizer(solver_name = "highs"))
+            lp = ESFEX.solver_model(create_optimizer(solver_name = "highs"))
             ESFEX.set_silent(lp)
             ESFEX.set_attribute(lp, "simplex_iteration_limit", 1)
             ESFEX.set_attribute(lp, "presolve", "off")

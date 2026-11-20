@@ -125,7 +125,7 @@ function create_power_system(input::PowerSystemInput; custom_constraints=nothing
         verbose=input.verbose,
         solver_options=input.solver_options
     )
-    model = Model(optimizer)
+    model = solver_model(optimizer)
     t_optimizer = time() - t0
 
     # Build variables
@@ -3701,6 +3701,7 @@ function _copy_with_optimizer(model, input::PowerSystemInput, what::String)
         return nothing
     end
     set_optimizer(new_model, optimizer)
+    set_optimize_hook(new_model, optimize_synced!)
     return new_model, reference_map
 end
 

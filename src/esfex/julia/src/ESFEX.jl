@@ -91,6 +91,55 @@ function _get_solver_optimizer(name::String)
     end
 end
 
+# HiGHS from 1.16 on runs every solve of the process on one thread
+# scheduler, sized by the first solve, and ends a solve that asks for another
+# thread count OTHER_ERROR ("the scheduler has already been initialized").
+# A process can mix counts (Benders' single-threaded subproblems, runs with
+# other settings): the scheduler is reset when the count changes.
+const _HIGHS_SCHEDULER_THREADS = Ref{Int}(-1)
+
+"""
+    sync_highs_threads!(model)
+
+Before a solve with HiGHS: when the model asks for another thread count
+than the solve before it, reset HiGHS's thread scheduler. Other solvers,
+and a model without an optimizer, are left alone.
+"""
+function sync_highs_threads!(model::JuMP.Model)
+    name = try
+        JuMP.solver_name(model)
+    catch
+        return
+    end
+    name == "HiGHS" || return
+    threads = Int(JuMP.get_attribute(model, "threads"))
+    if threads != _HIGHS_SCHEDULER_THREADS[]
+        # The first time too: a solve outside ESFEX may have sized it
+        HiGHS.Highs_resetGlobalScheduler(1)
+        _HIGHS_SCHEDULER_THREADS[] = threads
+    end
+    return
+end
+
+# The optimize hook of a model ESFEX builds (`solver_model`); the loss
+# repair's hook (`optimize_exact_losses!`) replaces it and syncs too
+function optimize_synced!(model; kwargs...)
+    sync_highs_threads!(model)
+    return JuMP.optimize!(model; ignore_optimize_hook = true, kwargs...)
+end
+
+"""
+    solver_model(optimizer) -> Model
+
+A JuMP model whose every `optimize!` first syncs HiGHS's thread scheduler
+(`sync_highs_threads!`).
+"""
+function solver_model(optimizer)
+    model = Model(optimizer)
+    JuMP.set_optimize_hook(model, optimize_synced!)
+    return model
+end
+
 # Include type definitions first (depends on JuMP and MOI imports above)
 include("types.jl")
 
