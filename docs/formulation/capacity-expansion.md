@@ -754,7 +754,7 @@ On each representative day (or TSAM period) the master builds the dispatch's own
 
 Supply limits and disruption windows use the day's absolute horizon hours, as in the dispatch.
 
-**Fuel-coupled units.** A generator or candidate technology whose fuel is in the model (it has an `energy_content`) burns tank fuel: \(\sum_{b \in n} \Delta t \, P_{g,b,t} \le \kappa_g W^{elec}_{g,n,t}\), with \(\kappa_g\) = mean `eff_at_rated` × `energy_content` (PE coupling, `pe_coupling_gen*` and `pe_coupling_tech*`). Like the dispatch, the master then does not also charge such a unit its flat `fuel_cost`: the fuel is paid through the fuel balance, at the fuel's price plus the node's import cost. A unit with a fuel-cost curve keeps its curve.
+**Fuel-coupled units.** A generator or candidate technology whose fuel is in the model (it has an `energy_content`) burns tank fuel: \(\sum_{b \in n} \Delta t \, P_{g,b,t} \le \kappa_g W^{elec}_{g,n,t}\), with \(\kappa_g\) = `eff_at_rated` × `energy_content` (for a unit at several nodes, `eff_at_rated` averaged over the nodes where it has rated power, weighted by that power; PE coupling, `pe_coupling_gen*` and `pe_coupling_tech*`). Like the dispatch, the master then does not also charge such a unit its flat `fuel_cost`: the fuel is paid through the fuel balance, at the fuel's price plus the node's import cost. A unit with a fuel-cost curve keeps its curve.
 
 **Electrolyzers.** Each electrolyzer draws power at its bus (`op_y*_d*_elz`), a load in the power balance, capped at its existing plus built power and ramp-limited as in the dispatch. Its hydrogen fills the node's `Hydrogen` tank. Without a `Hydrogen` fuel it is only a load. Without primary energy the master has no electrolyzers.
 

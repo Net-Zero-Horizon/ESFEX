@@ -72,7 +72,7 @@ class PenaltiesConfig(BaseModel):
         default=None,
         description="$/MWh EV driving energy not supplied (default: loss_of_load)",
     )
-    loss_of_fuel_supply: float = Field(default=100, description="$/unit fuel deficit")
+    loss_of_fuel_supply: float = Field(default=100, description="$/unit fuel deficit (at least 10 × the fuel's price plus its largest import cost) and excess supply")
     non_electric_demand_loss: float = Field(default=100, description="$/unit fuel demand unmet")
     soc_violation: float = Field(default=1e6, description="$/MWh SOC limit violation")
 

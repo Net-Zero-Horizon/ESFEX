@@ -1748,6 +1748,53 @@ Per-release notes are also published on the
 
 ### Fixed
 
+- **A year of dispatch with primary energy no longer runs out of memory.**
+  Each rolling-horizon window added the primary-energy cost to the
+  objective with code run at the top level of Julia's `Main`, where the
+  objective and the temporaries of `@objective` became globals, new ones
+  every window, each holding its window's model. On the Cuba case memory
+  grew by 0.5 GB a window and the process was killed at window 172 of 209
+  (102 GB); it now stays at about 7 GB.
+
+- **Fuel is not lost on its way into a tank unless a loss is given.** With
+  primary energy on, every unit bought at a node or shipped to it enters
+  the node's tank, at the tank's `efficiency`. A fuel with no
+  `fuel_infrastructure` entry took 0.8: a fifth of all its fuel was lost,
+  even at nodes without a tank, and every MWh it made cost 25 % more than
+  without primary energy. The default is now 1 (no loss).
+
+- **A unit's fuel cost is the one configured.** Without primary energy,
+  when the Studio layout held the positions of the units and fuel storages,
+  every thermal unit's `fuel_cost` was raised by the transport from the
+  nearest storage, at 0.5 $ per fuel unit and km whatever the unit (tonne
+  or MMBTU), and with the efficiency averaged over every node (see above).
+  It was logged only at debug level. On the Cuba case the gas units of
+  Energas came out at 20,000 to 61,000 $/MWh instead of 27 to 44, so they
+  never ran. The adjustment is removed: `fuel_cost` (or the one the fuels
+  block gives) is used as it is, and fuel transport is modelled by primary
+  energy, with its routes.
+
+- **Fuel-coupled units burn the fuel their efficiency says.** The MWh a
+  unit makes from a unit of fuel was `energy_content` × the mean of its
+  `eff_at_rated` over every node of the system, counting the nodes where
+  the unit has no capacity (efficiency 0). A plant at one of Cuba's 136
+  nodes came out 135 times less efficient (0.0023 instead of 0.31) and
+  burnt 135 times its fuel: with primary energy on, the dispatch and the
+  master ran short of fuel and shed load. The efficiency is now the unit's
+  at its nodes, weighted by rated power.
+
+- **A fuel shortfall is never cheaper than the fuel.** With primary energy
+  on, the fuel a unit burns is covered by what its node's tank releases
+  plus a shortfall, priced at `penalties.loss_of_fuel_supply` (default
+  100 $/unit). Below the fuel's price (775 $/t for diesel in the Cuba case)
+  the shortfall was a cheaper fuel: units ran on it instead of buying fuel,
+  in the dispatch and in the master, which then planned on fuel that does
+  not exist (on the Cuba case the master's 2026 cost fell from 1,960 to
+  1,013 M$ and 2025 built 380 MW more engines). A shortfall now costs
+  `loss_of_fuel_supply` or ten times the fuel's price in the year plus its
+  largest import cost, whichever is higher (`fuel_shortage_penalty`). The warning that asked to
+  raise the penalty is gone.
+
 - **One Spanish term per concept.** The same concept had several names
   across the Studio. Now curtailment and spillage are "vertimiento" (it was
   also "curtailment", "derrame" and "vertido"), load shedding and the loss-of-

@@ -185,14 +185,14 @@ _delivered_fraction(fparams::FuelRouteParams, route::TransportRoute) =
     _storage_efficiency(input, fuel_name) -> Float64
 
 Efficiency applied to a tank's inflows (`storage_efficiency` of the fuel's
-infrastructure, 0.8 when the fuel has none).
+infrastructure, 1 when the fuel has none). Every unit bought or shipped to a
+node enters its tank, so a default below 1 lost that share of all fuel (the
+0.8 it was cost a fifth of every fuel the user gave no efficiency).
 """
 function _storage_efficiency(input::PrimaryEnergyInput, fuel_name::String)
     haskey(input.infrastructure, fuel_name) &&
         return input.infrastructure[fuel_name].storage_efficiency
-    # @debug not @warn: called per step; the default is fine.
-    @debug "Storage efficiency not configured for $fuel_name, using default 0.8"
-    return 0.8
+    return 1.0
 end
 
 """
@@ -294,6 +294,28 @@ function prepare_fuel_data(input::PrimaryEnergyInput, temporal::TemporalMapping)
     end
 
     return adjusted_prices, max_supply_periodic, ne_demand_periodic
+end
+
+
+# A unit of fuel missing at a node costs at least this many times the
+# dearest unit bought: the shortfall must never be a cheaper fuel than the
+# real one
+const FUEL_SHORTAGE_PRICE_FACTOR = 10.0
+
+"""
+    fuel_shortage_penalty(input, fuel, price)
+
+Price of a unit of `fuel` missing at a node (`fuel_loss_of_supply_hourly`):
+`input.loss_of_fuel_supply_penalty`, or `FUEL_SHORTAGE_PRICE_FACTOR` × the
+dearest unit bought (the year's `price` plus the fuel's largest import cost)
+when that is higher. The fuel a
+unit burns is covered by what is drawn from the tank plus this shortfall, so
+below the fuel price the shortfall was a cheaper fuel: units ran on it instead
+of buying fuel.
+"""
+function fuel_shortage_penalty(input::PrimaryEnergyInput, fuel::FuelConfig, price::Float64)
+    bought = price + maximum(fuel.import_cost; init = 0.0)
+    return max(input.loss_of_fuel_supply_penalty, FUEL_SHORTAGE_PRICE_FACTOR * bought)
 end
 
 # =============================================================================
@@ -1047,11 +1069,13 @@ function get_primary_energy_objective_terms(
     # =========================================================================
 
     for fuel_name in fuel_names
+        shortage = fuel_shortage_penalty(input, fuel_by_name[fuel_name],
+                                         adjusted_prices[fuel_name])
         for n in 1:n_nodes
             for t in 1:input.hours
                 add_to_expression!(pe_loss_cost,
                     vars.fuel_loss_of_supply_hourly[fuel_name][n, t],
-                    loss_penalty)
+                    shortage)
             end
         end
     end
@@ -1433,9 +1457,10 @@ function extract_primary_energy_solution(
 
         # Fuel shortfall penalty (hourly)
         if haskey(vars.fuel_loss_of_supply_hourly, fuel_name)
+            shortage = fuel_shortage_penalty(input, fuel, price)
             for t in 1:min(keep, input.hours), n in 1:n_nodes
                 total_loss_penalty += value(vars.fuel_loss_of_supply_hourly[fuel_name][n, t]) *
-                    input.loss_of_fuel_supply_penalty
+                    shortage
             end
         end
     end

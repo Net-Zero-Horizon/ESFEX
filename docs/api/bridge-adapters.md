@@ -122,9 +122,8 @@ Converts Python configuration into a Julia `PowerSystemInput` struct. Steps:
 3. Applies `units_config` overrides to update `rated_power` for generators whose capacity was modified by MasterProblem investments.
 4. Creates virtual generators for technology investments that do not exist in `sys.generators` (e.g., "Investment Solar PV"). Their arrays are per bus of the system (`_is_per_bus`); with network reduction they are laid out on the reduced buses, and capacity on an eliminated bus moves to the retained bus of the same node with the largest `demand_fraction`.
 5. Repeats the above for batteries and virtual batteries.
-6. Applies geographic fuel transport cost adjustments based on generator-to-fuel-storage distance.
-7. Builds network, temporal, penalty, and solver configuration Julia structs.
-8. Constructs the final `ESFEX.PowerSystemInput(...)` with all fields.
+6. Builds network, temporal, penalty, and solver configuration Julia structs.
+7. Constructs the final `ESFEX.PowerSystemInput(...)` with all fields.
 
 ### add_operating_budget
 
@@ -636,14 +635,6 @@ def master_rep_day_ratios(demand: np.ndarray, num_years: int, offsets: list[int]
 ```
 
 Mean on the representative days (or TSAM periods, weighted by `weights`) starting at `offsets`, over the annual mean, for the horizon-mean demand and then each of `profiles` (Julia `representative_day_ratios`). 1.0 means the master's year has the real year's energy; NaN for a series that is zero all year.
-
-### _compute_geographic_fuel_adjustments
-
-```python
-def _compute_geographic_fuel_adjustments(sys_config: SystemConfig) -> Dict[str, List[float]]
-```
-
-Computes fuel cost adjustments based on geographic distance between generators and their nearest fuel storage facilities using haversine distance and per-fuel transport cost rates. Returns a dict mapping generator keys to adjusted fuel cost arrays.
 
 ### _resolve_element_bus_mapping
 
