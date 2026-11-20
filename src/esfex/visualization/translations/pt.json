@@ -2982,7 +2982,17 @@
     "no_generators_selected": "Não há geradores selecionados com um tipo de perfil Solar ou Eólica.",
     "no_model_loaded": "Nenhum modelo carregado. Carregue primeiro uma configuração.",
     "export_failed": "Não foi possível exportar a configuração: {error}",
-    "done_status": "Concluído! Foram gerados {count} perfil(is)."
+    "done_status": "Concluído! Foram gerados {count} perfil(is).",
+    "progress_no_generators": "Não há geradores a processar.",
+    "progress_profile": "Perfil {i}/{n}: {gen} ({kind})",
+    "progress_wrote": "Escritos {n} CSV de disponibilidade.",
+    "progress_fetching_weather": "A descarregar dados meteorológicos para {n} local(is)…",
+    "progress_weather_n": "Meteorologia {done}/{n} local(is)…",
+    "progress_weather_cached": "Dados meteorológicos para {n} local(is)…",
+    "progress_weather_download": "Dados meteorológicos para {n} local(is): {download} a descarregar do Open-Meteo (~{minutes} min com o seu limite gratuito)…",
+    "kind_solar": "solar",
+    "kind_wind": "eólico",
+    "kind_synthetic": "sintético"
   },
   "electrical": {
     "inherited_from_bus": "(do barramento)",
@@ -3522,7 +3532,7 @@
     "no_nodes_msg": "O sistema não tem nós. Ative a criação automática de nós ou crie nós manualmente antes de construir.",
     "no_criterion_title": "Sem critério",
     "no_criterion_msg": "Selecione pelo menos um critério de agrupamento.",
-    "clustering_done": "Criados {count} nós por agrupamento {criterion}.",
+    "clustering_done": "Criados {count} nós por agrupamento segundo: {criterion}.",
     "clustering_error": "Erro de agrupamento: {error}",
     "error_msg": "Erro: {error}",
     "engine_auto": "Automático (XGBoost)",
@@ -3703,7 +3713,34 @@
     "progress_geofabrik_downloading": "A transferir o extrato Geofabrik '{region}'...",
     "progress_geofabrik_download_bytes": "A transferir '{region}': {done}/{total} GB",
     "progress_geofabrik_scanning": "A percorrer o extrato ({millions} M elementos, {kept} mantidos)...",
-    "report_timing_line": "{label}: {seconds} s"
+    "report_timing_line": "{label}: {seconds} s",
+    "cluster_fetching_buildings_from": "A descarregar edifícios de {source}…",
+    "cluster_naming_nodes": "A nomear nós a partir do OpenStreetMap…",
+    "cluster_naming_nodes_n": "A nomear nós ({done}/{total})…",
+    "cluster_no_valid_criteria": "Nenhum critério válido selecionado: {criteria}",
+    "cluster_running_criterion": "A executar o critério «{criterion}» ({i}/{n})…",
+    "cluster_merging": "A combinar critérios (agrupamento por consenso)…",
+    "cluster_consensus_kmeans": "K-means de consenso (k={k})…",
+    "cluster_consensus_done": "Consenso concluído: {k} nós",
+    "cluster_extracting_infra": "A extrair posições das infraestruturas…",
+    "cluster_fetching_buildings": "A descarregar contornos de edifícios…",
+    "cluster_buildings_failed": "Falha ao descarregar edifícios; a usar as infraestruturas…",
+    "cluster_too_few_buildings": "Poucos edifícios; a usar as infraestruturas…",
+    "cluster_clustering_buildings": "A agrupar {n} centróides de edifícios…",
+    "cluster_preparing_regional": "A preparar o agrupamento por equilíbrio regional…",
+    "cluster_regional_kmeans": "A executar K-means regional (k={k})…",
+    "cluster_optimal_k": "A determinar o número ótimo de nós…",
+    "cluster_kmeans": "A executar K-means (k={k})…",
+    "cluster_done": "Agrupamento concluído: {k} nós",
+    "cluster_criterion_infrastructure": "densidade de infraestruturas",
+    "cluster_criterion_demand": "indicador de procura",
+    "cluster_criterion_regional": "equilíbrio regional",
+    "criterion_infrastructure_label": "Densidade de infraestruturas",
+    "criterion_infrastructure_desc": "K-means sobre todas as posições de infraestrutura (subestações, geradores, baterias, entradas de combustível). Coloca os nós nos centros dos grupos.",
+    "criterion_demand_label": "Indicador de procura (contornos de edifícios)",
+    "criterion_demand_desc": "Descarrega contornos de edifícios (Overture/Microsoft/Google) e agrupa pela densidade de edifícios para aproximar os focos de procura. Requer uma descarga adicional.",
+    "criterion_regional_label": "Equilíbrio regional (cobertura uniforme)",
+    "criterion_regional_desc": "K-means modificado com inicialização espacialmente uniforme. Garante uma cobertura geográfica homogénea independentemente da densidade. Adequado para estudos de planeamento."
   },
   "interruptions": {
     "title": "Interrupções de serviço",
@@ -4011,7 +4048,8 @@
     "scenario_probabilities": "Probabilidades dos cenários",
     "no_risk_derating": "Sem redução por risco",
     "risk_coefficient": "Coeficiente de risco",
-    "per_element_risk_coefficients": "Coeficientes de risco por elemento"
+    "per_element_risk_coefficients": "Coeficientes de risco por elemento",
+    "haz_screening": "Triagem multirrisco"
   },
   "risk_panels": {
     "node_n": "Nó {n}",
@@ -5108,7 +5146,8 @@
       "info_re": "ER: {pct}%",
       "info_demand": "Procura: {power}",
       "info_gen": "Prod.: {power}",
-      "info_v_viol": "Viol. V: {n}"
+      "info_v_viol": "Viol. V: {n}",
+      "load_label": "Carga {node}"
     },
     "dashboard": {
       "system": "Sistema",

@@ -292,6 +292,9 @@ def build_elk_graph(
             "elementType": "load",
             "elementId": f"load_node_{node.index}",
             "label": tr("sld_graph.load_label", node=node.name),
+            # The page relabels it on a language change.
+            "labelKey": "web.sld.load_label",
+            "labelParams": {"node": node.name},
             "sublabel": f"{node.demand.peak_mw:.0f} MW",
             "symbolType": "load",
             "color": colors.get("load", "#E67E22"),

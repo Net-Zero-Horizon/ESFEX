@@ -66,8 +66,9 @@ class ResultsCache:
 
         # MGA bundle (header / tech_range / parcoords / pathways /
         # spatial) per base_prefix — the five MGA-themed charts share it
-        # so the HDF5 only gets read once per batch.
-        self.mga_bundle: dict[str, dict] = {}
+        # so the HDF5 only gets read once per batch. Keyed by
+        # (base_prefix, language): the bundle holds translated texts.
+        self.mga_bundle: dict[tuple[str, str], dict] = {}
 
         # Transient per-scenario array cache (gen/battery dicts), shared
         # across charts WITHIN a batch render so the same scenario data is

@@ -2666,10 +2666,24 @@ function updateTheme(json) {
 }
 
 /** Language changed (web_i18n): the diagram's own text is data (names,
- *  ratings); the legend and the results overlays are redrawn in the new
- *  language. Static HTML is refilled by _applyI18n. */
+ *  ratings), except the equipment labels that carry a ``labelKey``; those,
+ *  the legend and the results overlays are redrawn in the new language.
+ *  Static HTML is refilled by _applyI18n. The N-1 badge text comes from
+ *  Python, which re-runs the selected contingency. */
 window.onEsfexLanguageChanged = function() {
     if (!svg || !currentData || !currentLayouted) return;
+    // Equipment whose label is a translated text (loads) carries its key.
+    var relabeled = false;
+    var be = currentData.busEquipment || {};
+    Object.keys(be).forEach(function(bid) {
+        (be[bid] || []).forEach(function(eq) {
+            if (eq.labelKey) {
+                eq.label = _t(eq.labelKey, eq.labelParams);
+                relabeled = true;
+            }
+        });
+    });
+    if (relabeled) _rerenderKeepingView();
     var sd = _site ? _siteData(_site.key) : null;
     _drawLegend(sd ? sd.data : currentData);
     _redrawOverlays();

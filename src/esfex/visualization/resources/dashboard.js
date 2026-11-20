@@ -197,17 +197,37 @@ function renderOverview(payload, mode) {
 }
 
 // Language changed (web_i18n): the static labels are refilled by
-// _applyI18n; the texts drawn here are redrawn from the last data.
-window.onEsfexLanguageChanged = function () {
+// _applyI18n; the texts drawn here are redrawn from the last data at
+// once, then the data is fetched again because Python builds some of its
+// labels (series, cost components) in the language active at the time.
+window.onEsfexLanguageChanged = async function () {
     setStatus(lastStatus.key, lastStatus.params);
     updateRangeDisplay();
     if (lastOverview) renderOverview(lastOverview.payload, lastOverview.mode);
-    if (lastDetail) {
-        setYearDetailTitle(lastDetail.year);
-        renderYearKpis(lastDetail.detail.kpis || {});
-        renderYearDispatch(lastDetail.detail.dispatch || null);
+    const detail = lastDetail;
+    if (detail) {
+        setYearDetailTitle(detail.year);
+        renderYearKpis(detail.detail.kpis || {});
+        renderYearDispatch(detail.detail.dispatch || null);
     }
+    if (lastOverview) await refresh();
+    if (detail && lastDetail === detail) await reloadYearDetail(detail.year);
 };
+
+// Fetch the open year panel again, in place (no scrolling).
+async function reloadYearDetail(year) {
+    if (!bridge || !state.system) return;
+    try {
+        const detail = JSON.parse(await call(
+            bridge.get_year_detail, state.system, year
+        ));
+        lastDetail = { year: year, detail: detail };
+        renderYearKpis(detail.kpis || {});
+        renderYearDispatch(detail.dispatch || null);
+    } catch (err) {
+        console.error("year detail reload failed", err);
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────
 // KPI schema — relabels cards in-place depending on the run mode.

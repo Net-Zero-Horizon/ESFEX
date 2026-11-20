@@ -1695,6 +1695,22 @@ Per-release notes are also published on the
 
 ### Fixed
 
+- **Open views follow a language change.** Some texts built in Python kept
+  the old language until the view was rebuilt. Now:
+  - the dashboard fetches its data again, so its series and cost components
+    change too;
+  - the results viewer relabels its chart list and toolbar and redraws its
+    charts (a hidden viewer does it when it is shown again);
+  - the MGA charts' labels and hover texts are cached per language, not
+    once per file;
+  - the single-line diagram relabels its loads in place, and the N-1 entries
+    and badge are rebuilt for the selected contingency.
+
+  The Grid Builder's node-placement criteria, its clustering progress and
+  the availability profiles' weather progress were also still English; they
+  are translated now, and the multi-hazard screening has a name in every
+  language.
+
 - **Risk workbench texts are current.** The fragility library editor said
   "49 built-in curves from NHESS-2024 and PNNL-33587"; the library has 170
   curves from several more sources. The count and the main sources are now

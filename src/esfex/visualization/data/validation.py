@@ -5633,7 +5633,9 @@ def apply_simplification_level(
     else:
         all_log.append(tr("validation.log_final_remaining", n=len(remaining)))
         for issue in remaining:
-            all_log.append(f"  [{issue.severity}] {issue.message}")
+            sev = tr("common.error" if issue.severity == "error"
+                     else "common.warning")
+            all_log.append(f"  [{sev}] {issue.message}")
 
     return all_log, remaining
 

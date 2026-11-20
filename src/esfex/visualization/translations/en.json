@@ -2982,7 +2982,17 @@
     "no_generators_selected": "No generators selected with a Solar or Wind profile type.",
     "no_model_loaded": "No model loaded. Please load a configuration first.",
     "export_failed": "Failed to export config: {error}",
-    "done_status": "Done! Generated {count} profile(s)."
+    "done_status": "Done! Generated {count} profile(s).",
+    "progress_no_generators": "No generators to process.",
+    "progress_profile": "Profile {i}/{n}: {gen} ({kind})",
+    "progress_wrote": "Wrote {n} availability CSV(s).",
+    "progress_fetching_weather": "Fetching weather for {n} location(s)…",
+    "progress_weather_n": "Weather {done}/{n} location(s)…",
+    "progress_weather_cached": "Weather for {n} location(s)…",
+    "progress_weather_download": "Weather for {n} location(s): {download} to download from Open-Meteo (~{minutes} min at its free rate limit)…",
+    "kind_solar": "solar",
+    "kind_wind": "wind",
+    "kind_synthetic": "synthetic"
   },
   "electrical": {
     "inherited_from_bus": "(from bus)",
@@ -3703,7 +3713,34 @@
     "progress_geofabrik_downloading": "Downloading Geofabrik extract '{region}'...",
     "progress_geofabrik_download_bytes": "Downloading '{region}': {done}/{total} GB",
     "progress_geofabrik_scanning": "Scanning extract ({millions}M elements, {kept} kept)...",
-    "report_timing_line": "{label}: {seconds}s"
+    "report_timing_line": "{label}: {seconds}s",
+    "cluster_fetching_buildings_from": "Fetching buildings from {source}…",
+    "cluster_naming_nodes": "Naming nodes from OpenStreetMap…",
+    "cluster_naming_nodes_n": "Naming nodes ({done}/{total})…",
+    "cluster_no_valid_criteria": "No valid criteria selected: {criteria}",
+    "cluster_running_criterion": "Running criterion “{criterion}” ({i}/{n})…",
+    "cluster_merging": "Merging criteria (consensus clustering)…",
+    "cluster_consensus_kmeans": "Consensus K-means (k={k})…",
+    "cluster_consensus_done": "Consensus complete: {k} nodes",
+    "cluster_extracting_infra": "Extracting infrastructure positions…",
+    "cluster_fetching_buildings": "Fetching building footprints…",
+    "cluster_buildings_failed": "Building download failed; using infrastructure…",
+    "cluster_too_few_buildings": "Too few buildings; using infrastructure…",
+    "cluster_clustering_buildings": "Clustering {n} building centroids…",
+    "cluster_preparing_regional": "Preparing regional balance clustering…",
+    "cluster_regional_kmeans": "Running regional K-means (k={k})…",
+    "cluster_optimal_k": "Determining the optimal number of nodes…",
+    "cluster_kmeans": "Running K-means (k={k})…",
+    "cluster_done": "Clustering complete: {k} nodes",
+    "cluster_criterion_infrastructure": "infrastructure density",
+    "cluster_criterion_demand": "demand proxy",
+    "cluster_criterion_regional": "regional balance",
+    "criterion_infrastructure_label": "Infrastructure Density",
+    "criterion_infrastructure_desc": "K-means on all infrastructure positions (substations, generators, batteries, fuel entries). Places nodes at cluster centers.",
+    "criterion_demand_label": "Demand Proxy (Building Footprints)",
+    "criterion_demand_desc": "Fetches building footprints (Overture/Microsoft/Google) and clusters by building density to approximate demand hotspots. Requires an additional download.",
+    "criterion_regional_label": "Regional Balance (Uniform Coverage)",
+    "criterion_regional_desc": "Modified K-means with spatially uniform initialization. Ensures even geographic coverage regardless of density. Good for planning studies."
   },
   "interruptions": {
     "title": "Service Interruptions",
@@ -4011,7 +4048,8 @@
     "scenario_probabilities": "Scenario Probabilities",
     "no_risk_derating": "No risk derating",
     "risk_coefficient": "Risk Coefficient",
-    "per_element_risk_coefficients": "Per-Element Risk Coefficients"
+    "per_element_risk_coefficients": "Per-Element Risk Coefficients",
+    "haz_screening": "Multi-hazard screening"
   },
   "risk_panels": {
     "node_n": "Node {n}",
@@ -5108,7 +5146,8 @@
       "info_re": "RE: {pct}%",
       "info_demand": "Demand: {power}",
       "info_gen": "Gen: {power}",
-      "info_v_viol": "V viol: {n}"
+      "info_v_viol": "V viol: {n}",
+      "load_label": "Load {node}"
     },
     "dashboard": {
       "system": "System",

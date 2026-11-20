@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 )
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 
-from esfex.visualization.i18n import tr
+from esfex.visualization.i18n import language_changed, tr
 from esfex.visualization.panels.results_cache import (
     ResultsCache,
     activate as _activate_cache,
@@ -48,6 +48,9 @@ from esfex.visualization.theme import current_theme
 from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
+
+# List items whose text is translated: (i18n key, is_category_header).
+_LABEL_ROLE = Qt.ItemDataRole.UserRole + 1
 
 # Chart category grouping for the sidebar
 _CHART_CATEGORIES = {
@@ -307,6 +310,8 @@ class ResultsDialog(QDialog):
         self._scan_results()
         self._build_ui()
         self._apply_dashboard_style()
+        if language_changed is not None:
+            language_changed.connect(self._on_language_changed)
 
     # ------------------------------------------------------------------
     # Scanning
@@ -412,6 +417,7 @@ class ResultsDialog(QDialog):
         lbl_charts = QLabel(tr("results_dialog.tab_charts"))
         lbl_charts.setObjectName("sidebarLabel")
         sb.addWidget(lbl_charts)
+        self._lbl_charts = lbl_charts
 
         self._chart_list = QListWidget()
         self._chart_list.setObjectName("chartList")
@@ -437,6 +443,7 @@ class ResultsDialog(QDialog):
 
         if self._dashboard_view is not None:
             dash_header = QListWidgetItem(f"  {tr('results_dialog.dashboard').upper()}")
+            dash_header.setData(_LABEL_ROLE, ("results_dialog.dashboard", True))
             dash_header.setFlags(Qt.ItemFlag.NoItemFlags)
             fnt = dash_header.font(); fnt.setBold(True)
             if fnt.pointSize() > 1:  # -1 when the base font is pixel-defined
@@ -446,6 +453,7 @@ class ResultsDialog(QDialog):
             self._chart_list.addItem(dash_header)
 
             dash_item = QListWidgetItem(f"    {tr('results_dialog.overview')}")
+            dash_item.setData(_LABEL_ROLE, ("results_dialog.overview", False))
             dash_item.setSizeHint(QSize(0, 28))
             # Sentinel: lets the selection handler recognise this
             # entry without relying on a fragile index.
@@ -485,6 +493,8 @@ class ResultsDialog(QDialog):
             if cat and cat != prev_category:
                 cat_label = tr(_CATEGORY_KEYS[cat]) if cat in _CATEGORY_KEYS else cat
                 header = QListWidgetItem(f"  {cat_label.upper()}")
+                if cat in _CATEGORY_KEYS:
+                    header.setData(_LABEL_ROLE, (_CATEGORY_KEYS[cat], True))
                 header.setFlags(Qt.ItemFlag.NoItemFlags)
                 header.setForeground(
                     self._chart_list.palette().color(
@@ -503,6 +513,8 @@ class ResultsDialog(QDialog):
             # Chart entry
             chart_title = tr(chart.TR_KEY) if chart.TR_KEY else chart.TITLE
             item = QListWidgetItem(f"    {chart_title}")
+            if chart.TR_KEY:
+                item.setData(_LABEL_ROLE, (chart.TR_KEY, False))
             item.setSizeHint(QSize(0, 28))
             self._chart_list.addItem(item)
 
@@ -619,7 +631,8 @@ class ResultsDialog(QDialog):
         # Plotly chart in the dialog via the `setFontScale` JS helper.
         # Matplotlib charts ignore it (no JS bridge) — they're being
         # phased out as we migrate to interactive Plotly versions.
-        tb_layout.addWidget(QLabel(tr("results_dialog.font")))
+        self._font_label = QLabel(tr("results_dialog.font"))
+        tb_layout.addWidget(self._font_label)
         self._font_slider = QSlider(Qt.Orientation.Horizontal)
         self._font_slider.setObjectName("fontSlider")
         self._font_slider.setFixedWidth(140)
@@ -1420,6 +1433,36 @@ class ResultsDialog(QDialog):
                 logger.exception("Failed to sync dashboard system selector")
         self._render_all_charts()
 
+    def _on_language_changed(self):
+        """Relabel the window and redraw the charts, whose texts are built
+        in Python in the language of the time. A hidden dialog redraws
+        when it is shown again (``showEvent``)."""
+        if self._closing:
+            return
+        self.setWindowTitle(tr("results_dialog.title"))
+        self._lbl_charts.setText(tr("results_dialog.tab_charts"))
+        self._system_label.setText(tr("results_panel.system"))
+        self._year_label.setText(tr("results_dialog.years"))
+        self._font_label.setText(tr("results_dialog.font"))
+        self._export_btn.setText(tr("results_dialog.export"))
+        for row in range(self._chart_list.count()):
+            item = self._chart_list.item(row)
+            spec = item.data(_LABEL_ROLE)
+            if spec:
+                key, header = spec
+                item.setText(f"  {tr(key).upper()}" if header
+                             else f"    {tr(key)}")
+        if 0 <= self._current_chart_idx < len(self._charts):
+            chart = self._charts[self._current_chart_idx]
+            if chart.TR_KEY:
+                self._chart_title_label.setText(tr(chart.TR_KEY))
+        elif self._is_dashboard_item(self._chart_list.currentItem()):
+            self._chart_title_label.setText(tr("results_dialog.dashboard"))
+        for chart in self._charts:
+            chart._loaded = False
+        if self.isVisible():
+            QTimer.singleShot(0, self._render_all_charts)
+
     def showEvent(self, event):
         """Render every chart up-front so navigation is instant."""
         super().showEvent(event)
@@ -1581,6 +1624,11 @@ class ResultsDialog(QDialog):
             # Real teardown requested by the host — release the HDF5
             # handle and let Qt destroy the widget.
             self._closing = True
+            if language_changed is not None:
+                try:
+                    language_changed.disconnect(self._on_language_changed)
+                except (RuntimeError, TypeError):
+                    pass
             if self._cache is not None:
                 self._cache.close()
                 self._cache = None

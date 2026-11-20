@@ -1599,6 +1599,31 @@ class MainWindow(QMainWindow):
                         for t in getattr(analyzer, "transformers", [])})
         return ratings
 
+    def _retranslate_sld_contingency(self):
+        """Relabel the contingency combo and redo the selected contingency,
+        whose badge text is built here in the language of the time."""
+        combo = getattr(self, "_sld_contingency_combo", None)
+        if combo is None or combo.count() == 0:
+            return
+        from esfex.visualization.sld.graph_builder import contingency_option_label
+
+        analyzer = getattr(self, "_sld_contingency_analyzer", None)
+        ratings = self._contingency_ratings(analyzer) if analyzer is not None else {}
+        combo.blockSignals(True)
+        try:
+            for i in range(combo.count()):
+                ctg = combo.itemData(i)
+                combo.setItemText(i, tr("messages.sld_no_contingency") if ctg is None
+                                  else contingency_option_label(ctg, ratings))
+        finally:
+            combo.blockSignals(False)
+        if combo.currentData() is not None:
+            try:
+                self._on_sld_contingency_changed(combo.currentIndex())
+            except Exception:
+                log.debug("Contingency re-run after a language change failed",
+                          exc_info=True)
+
     def _populate_contingency_combo_from_snapshot(self, snapshot: dict):
         """Populate the contingency combo from a snapshot dict."""
         analyzer = getattr(self, "_sld_contingency_analyzer", None)
@@ -2092,6 +2117,7 @@ class MainWindow(QMainWindow):
         # SLD ops bar
         if hasattr(self, '_sld_btn_analysis'):
             self._sld_btn_analysis.setText(tr("analysis_panel.analysis_btn"))
+        self._retranslate_sld_contingency()
 
         # Delegate to child panels
         self.toolbar.retranslateUi()

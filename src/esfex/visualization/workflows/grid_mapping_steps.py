@@ -934,35 +934,17 @@ class GridMappingReviewStep(QWidget):
 # Step 4: Build Network (was Step 5)
 # =====================================================================
 
-_CRITERIA = [
-    {
-        "key": "infrastructure",
-        "label": "Infrastructure Density",
-        "description": (
-            "K-means on all infrastructure positions (substations, "
-            "generators, batteries, fuel entries). Places nodes at "
-            "cluster centers."
-        ),
-    },
-    {
-        "key": "demand",
-        "label": "Demand Proxy (Building Footprints)",
-        "description": (
-            "Fetches building footprints (Overture/Microsoft/Google) "
-            "and clusters by building density to approximate demand "
-            "hotspots. Requires additional download."
-        ),
-    },
-    {
-        "key": "regional",
-        "label": "Regional Balance (Uniform Coverage)",
-        "description": (
-            "Modified K-means with spatially-uniform initialization. "
-            "Ensures even geographic coverage regardless of density. "
-            "Good for planning studies."
-        ),
-    },
-]
+# Node-placement criteria; the label and description are translated where
+# they are shown (``grid_builder.criterion_<key>_label`` / ``_desc``).
+_CRITERIA = [{"key": "infrastructure"}, {"key": "demand"}, {"key": "regional"}]
+
+
+def _criterion_label(key: str) -> str:
+    return tr(f"grid_builder.criterion_{key}_label")
+
+
+def _criterion_desc(key: str) -> str:
+    return tr(f"grid_builder.criterion_{key}_desc")
 
 
 class GridMappingBuildStep(QWidget):
@@ -1086,11 +1068,11 @@ class GridMappingBuildStep(QWidget):
         node_right.addWidget(node_right_hdr)
 
         # Create description label first (toggled signal fires during init)
-        self._lbl_criterion_info = QLabel(_CRITERIA[0]["description"])
+        self._lbl_criterion_info = QLabel(_criterion_desc(_CRITERIA[0]["key"]))
         self._chk_criteria: dict[str, QCheckBox] = {}
         for crit in _CRITERIA:
-            chk = QCheckBox(crit["label"])
-            chk.setToolTip(crit["description"])
+            chk = QCheckBox(_criterion_label(crit["key"]))
+            chk.setToolTip(_criterion_desc(crit["key"]))
             chk.toggled.connect(self._on_criterion_toggled)
             self._chk_criteria[crit["key"]] = chk
             node_right.addWidget(chk)
@@ -1439,7 +1421,7 @@ class GridMappingBuildStep(QWidget):
             if self._chk_criteria[crit["key"]].isChecked()
         ]
         if checked:
-            descs = [c["description"] for c in checked]
+            descs = [_criterion_desc(c["key"]) for c in checked]
             self._lbl_criterion_info.setText(" | ".join(descs))
         else:
             self._lbl_criterion_info.setText(
@@ -1695,7 +1677,9 @@ class GridMappingBuildStep(QWidget):
         self._cluster_progress.setValue(100)
         self._lbl_cluster_status.setText(
             tr("grid_builder.clustering_done", count=result.n_clusters,
-               criterion=result.criterion_used)
+               criterion=" + ".join(
+                   tr(f"grid_builder.cluster_criterion_{c}")
+                   for c in result.criterion_used.split("+") if c))
         )
         self._start_build(result.node_positions)
 
