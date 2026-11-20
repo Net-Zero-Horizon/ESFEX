@@ -32,9 +32,6 @@ from PySide6.QtWidgets import (
 )
 
 from windrex import (
-    CriterionConfig,
-    DEFAULT_LULC_SCORES,
-    MCDAConfig,
     TurbineSpec,
     load_turbine_database,
 )
@@ -45,6 +42,15 @@ from windrex import (
 # windrex's own analyzer, which esfex does not use; importing it here passed
 # kwargs it no longer accepts and broke get_config().
 from esfex.visualization.workflows.wind_analysis import WindConfig
+# Same for the MCDA settings: esfex's analyzer reads a dict of criteria with a
+# ``direction`` and the LULC scores; windrex's MCDAConfig takes a list of
+# criteria with ``is_benefit`` and no LULC scores, so building it from the
+# criteria step raised a TypeError.
+from esfex.visualization.workflows.wind_analysis import (
+    DEFAULT_LULC_SCORES,
+    CriterionConfig,
+    MCDAConfig,
+)
 
 from esfex.visualization.i18n import tr
 
