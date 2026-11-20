@@ -51,6 +51,10 @@ plugins:
 markdown_extensions:
   - pymdownx.arithmatex:
       generic: true
+      # \( \) and \[ \] only: a $ is a currency sign ("$/MWh"),
+      # and the Studio's documentation viewer reads only these delimiters
+      inline_syntax: [round]
+      block_syntax: [square, begin]
   - pymdownx.highlight:
       anchor_linenums: true
       line_spans: __span

@@ -139,9 +139,9 @@ The master works at `temporal.resolution_hours`. Demand is aggregated with the *
 
 The objective is the discounted sum of the yearly costs, with year 1 undiscounted:
 
-$$
+\[
 \min \; \sum_{y=1}^{Y} \frac{1}{(1+r)^{y-1}} \left[ C^{inv}_y + C^{ext}_y + C^{dec}_y + C^{op}_y + C^{slack}_y \right]
-$$
+\]
 
 - \(C^{inv}_y\): **investment annuities**. Every MW (or MWh) built pays \(\mathrm{CRF}(r, L) = r(1+r)^L / ((1+r)^L - 1)\) times its overnight cost in each year it is in service inside the horizon, from the first year of its investment period until it reaches its lifetime \(L\) (\(1/L\) per year when `discount_rate` is 0). This covers technologies (`invest_cost` × MW, `lifetime`), battery technologies (`invest_cost_power` × MW + `invest_cost_energy` × MWh, `lifetime`), transmission (`transference_invest_cost` × MW, 40 years), converters (`invest_cost`, `life_time`), reservoir capacity (`reservoir_invest_cost`, the generator's `life_time`), and primary-energy storage, transport and electrolyzers (their `lifetime` / `life_time`). Nothing is charged after the horizon, so a plant built in the last years pays only for the years it serves, not its whole overnight cost (as in GenX and PyPSA).
 - \(C^{ext}_y\): life-extension cost of existing units kept beyond their lifetime.
@@ -277,10 +277,10 @@ The starting share \(\rho^{init}\) is always computed from the existing renewabl
 
 In `perfect_foresight` mode, the yearly target path is:
 
-$$
+\[
 \tau_1 = \rho^{init}, \qquad
 \tau_y = \rho^{init} + \frac{y-1}{Y-1}\left(\rho^{target} - \rho^{init}\right)
-$$
+\]
 
 The step \(\tau_y - \tau_{y-1}\) is then clamped to `[MIN_ANNUAL_INCREMENT, MAX_ANNUAL_INCREMENT]` (defaults 0.01 and 0.10). Because of the clamp, the path can end **below** `TARGET_RE_PENETRATION` (large gap, small maximum step) or **above** it (small gap, larger minimum step), but never above 100 %.
 
@@ -468,7 +468,7 @@ The representative-day cost is an estimate, so dispatch costs differ from it. If
 
 ## MGA and SPORES
 
-When `mga.enabled` is `true` (perfect foresight only), the solver first finds the cost-optimal solution $C^*$ and adds the constraint $Z \leq C^* \times (1 + \text{slack\_fraction})$. What it does next depends on `mga.method`:
+When `mga.enabled` is `true` (perfect foresight only), the solver first finds the cost-optimal solution \(C^*\) and adds the constraint \(Z \leq C^* \times (1 + \text{slack\_fraction})\). What it does next depends on `mga.method`:
 
 - **`method: mga`** (default): runs the **Hop-Skip-Jump (HSJ)** loop `num_alternatives` times. Each iteration maximises a single diversity objective weighted by a frequency score that penalises investment variables seen in earlier alternatives.
 - **`method: spores`**: runs the [SPORES](../api/config-schema.md#sporesobjective) sweep, solving one alternative per declared objective (`min_total_build`, `max_tech_equity`, `max_regional_equity`, `evolutionary_dist`). The alternative count equals `len(objectives)`; `num_alternatives` is ignored.

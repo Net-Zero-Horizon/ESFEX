@@ -324,7 +324,7 @@ struct MGAResult
 end
 ```
 
-`objective_labels[k]` matches the [`SporesObjective`](../api/config-schema.md#sporesobjective) value (`"hsj_diversity"`, `"min_total_build"`, `"max_tech_equity"`, `"max_regional_equity"`, `"evolutionary_dist"`) for the $k$-th non-optimal alternative. The cost-optimal seed is implicit at index 1 of `alternatives`.
+`objective_labels[k]` matches the [`SporesObjective`](../api/config-schema.md#sporesobjective) value (`"hsj_diversity"`, `"min_total_build"`, `"max_tech_equity"`, `"max_regional_equity"`, `"evolutionary_dist"`) for the \(k\)-th non-optimal alternative. The cost-optimal seed is implicit at index 1 of `alternatives`.
 
 ---
 
@@ -490,10 +490,10 @@ Types: `FuelConfig`, `FuelInfrastructureConfig`, `NonElectricDemandConfig`, `Fue
 |----------|-------------|
 | `run_spores(input; objectives::Vector{Symbol}, slack_fraction=0.05, use_representative_days=true, investment_threshold=0.1)` | Run the SPORES sweep — one alternative per entry in `objectives`. Returns an `MGAResult` whose `objective_labels[k]` matches `String(objectives[k])`. |
 | `apply_spores_objective!(model, vars, input, objective::Symbol; frequency_scores, reference_solution)` | Dispatcher. Routes a SPORES objective `Symbol` to the matching `set_*_objective!`. Cleans up aux variables from the previous objective via `_clear_spores_aux!` before installing the new one. |
-| `set_min_build_objective!(model, vars, input)` | $\min \sum I^{tech} + \sum I^{bat,P} + \sum I^{tr}$ — see [SPORES-1](../formulation/capacity-expansion.md#1510-minimum-total-build-objective). |
-| `set_tech_equity_objective!(model, vars, input)` | $\min M$ s.t. $\sum_{n,y} I^{tech}_{y,t,n}/\bar{I}_{t,n} \leq M$ $\forall t$ — see [SPORES-2](../formulation/capacity-expansion.md#1511-technology-equity-objective). Adds one auxiliary variable $M$ and $|\mathcal T|$ constraints. |
-| `set_regional_equity_objective!(model, vars, input)` | $\min M$ s.t. $\sum_{t,y} I^{tech}_{y,t,n}/\bar{I}_{t,n} + \sum_{b,y} I^{bat,P}_{y,b,n}/\bar{I}^P_{b,n} \leq M$ $\forall n$ — see [SPORES-3](../formulation/capacity-expansion.md#1512-regional-equity-objective). The spatially-explicit objective at the heart of the SPORES name. |
-| `set_evolutionary_distance_objective!(model, vars, input, reference_solution)` | $\max \sum \|I - I^{ref}\|/\bar{I}$ via L1 linearisation with positive/negative deviation aux variables — see [SPORES-4](../formulation/capacity-expansion.md#1513-evolutionary-distance-objective). Typically called with the cost-optimal solution as the reference. |
+| `set_min_build_objective!(model, vars, input)` | \(\min \sum I^{tech} + \sum I^{bat,P} + \sum I^{tr}\) — see [SPORES-1](../formulation/capacity-expansion.md#1510-minimum-total-build-objective). |
+| `set_tech_equity_objective!(model, vars, input)` | \(\min M\) s.t. \(\sum_{n,y} I^{tech}_{y,t,n}/\bar{I}_{t,n} \leq M\) \(\forall t\) — see [SPORES-2](../formulation/capacity-expansion.md#1511-technology-equity-objective). Adds one auxiliary variable \(M\) and $|\mathcal T|$ constraints. |
+| `set_regional_equity_objective!(model, vars, input)` | \(\min M\) s.t. \(\sum_{t,y} I^{tech}_{y,t,n}/\bar{I}_{t,n} + \sum_{b,y} I^{bat,P}_{y,b,n}/\bar{I}^P_{b,n} \leq M\) \(\forall n\) — see [SPORES-3](../formulation/capacity-expansion.md#1512-regional-equity-objective). The spatially-explicit objective at the heart of the SPORES name. |
+| `set_evolutionary_distance_objective!(model, vars, input, reference_solution)` | \(\max \sum \|I - I^{ref}\|/\bar{I}\) via L1 linearisation with positive/negative deviation aux variables — see [SPORES-4](../formulation/capacity-expansion.md#1513-evolutionary-distance-objective). Typically called with the cost-optimal solution as the reference. |
 
 Auxiliary variables and constraints installed by any of the above are tracked in `model[:_spores_objective_aux]` and deleted by `_clear_spores_aux!(model)` at the start of the next `apply_spores_objective!` call, so a sweep loop can reuse one JuMP model across all objectives without unbounded growth.
 

@@ -483,7 +483,7 @@ class SporesObjective(str, Enum):
     EVOLUTIONARY_DIST   = "evolutionary_dist"
 ```
 
-The lowercase snake_case values match the Julia `Symbol` keys used by `apply_spores_objective!` in `mga.jl` (e.g. `"min_total_build"` $\leftrightarrow$ `:min_total_build`) so round-tripping through YAML, the Pydantic schema, and the bridge layer is lossless. See [Capacity Expansion §15.10–§15.13](../formulation/capacity-expansion.md#1510-minimum-total-build-objective) for the LP formulation of each objective.
+The lowercase snake_case values match the Julia `Symbol` keys used by `apply_spores_objective!` in `mga.jl` (e.g. `"min_total_build"` \(\leftrightarrow\) `:min_total_build`) so round-tripping through YAML, the Pydantic schema, and the bridge layer is lossless. See [Capacity Expansion §15.10–§15.13](../formulation/capacity-expansion.md#1510-minimum-total-build-objective) for the LP formulation of each objective.
 
 ---
 

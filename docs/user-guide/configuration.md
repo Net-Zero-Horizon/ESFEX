@@ -177,7 +177,7 @@ master_problem:
 
 These are the defaults. Planning modes, Benders, TSAM and the RE trajectory are explained in [Master Problem](master-problem.md).
 
-ESFEX offers two near-optimal exploration methods. Both share the cost-slack envelope $Z \leq (1+\varepsilon) C^*$ but differ in how alternatives are produced:
+ESFEX offers two near-optimal exploration methods. Both share the cost-slack envelope \(Z \leq (1+\varepsilon) C^*\) but differ in how alternatives are produced:
 
 - **`method: mga`** (default) runs the Hop-Skip-Jump (HSJ) loop `num_alternatives` times. Each iteration maximises a diversity objective that penalises investment variables used in earlier alternatives.
 - **`method: spores`** solves one alternative per declared objective (see [SporesObjective](../api/config-schema.md#sporesobjective)). The alternative count equals `len(objectives)`; `num_alternatives` is ignored.

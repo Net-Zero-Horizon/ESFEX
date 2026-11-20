@@ -460,9 +460,9 @@ Each SPORES objective replaces the cost objective (and any previous SPORES objec
 
 | Label Pattern | Family | Description |
 |---------------|--------|-------------|
-| `min sum(I)` | SPORES-1 | Minimum total build: $\min \sum_{y,t,n} I^{tech} + \sum_{y,b,n} I^{bat,P} + \sum_{y,(i,j)} I^{tr}$. No auxiliary variables. Implemented by `set_min_build_objective!` |
-| `min M, sum(I_t/I_max) <= M ∀ t` | SPORES-2 | Technology equity (min-max over per-tech totals). Adds 1 auxiliary scalar $M$ and $|\mathcal T|$ constraints. Implemented by `set_tech_equity_objective!` |
-| `min M, sum(I_n/I_max) <= M ∀ n` | SPORES-3 | Regional equity (min-max over per-node totals). Adds 1 auxiliary scalar $M$ and $|\mathcal N|$ constraints. The spatially-explicit objective from which SPORES gets its name. Implemented by `set_regional_equity_objective!` |
+| `min sum(I)` | SPORES-1 | Minimum total build: \(\min \sum_{y,t,n} I^{tech} + \sum_{y,b,n} I^{bat,P} + \sum_{y,(i,j)} I^{tr}\). No auxiliary variables. Implemented by `set_min_build_objective!` |
+| `min M, sum(I_t/I_max) <= M ∀ t` | SPORES-2 | Technology equity (min-max over per-tech totals). Adds 1 auxiliary scalar \(M\) and $|\mathcal T|$ constraints. Implemented by `set_tech_equity_objective!` |
+| `min M, sum(I_n/I_max) <= M ∀ n` | SPORES-3 | Regional equity (min-max over per-node totals). Adds 1 auxiliary scalar \(M\) and $|\mathcal N|$ constraints. The spatially-explicit objective from which SPORES gets its name. Implemented by `set_regional_equity_objective!` |
 | `I - I_ref = d_pos - d_neg; max sum((d_pos + d_neg)/I_max)` | SPORES-4 | Evolutionary distance (L1 from a reference solution, typically the cost-optimal). Adds 2 auxiliary variables and 1 constraint per technology and battery-power investment variable (battery energy and transmission are not included). Implemented by `set_evolutionary_distance_objective!` |
 
 ---
