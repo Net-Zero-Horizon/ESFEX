@@ -4996,7 +4996,10 @@
         "subtitle": "各時刻に系統価格を決める技術",
         "axis_hour": "時刻",
         "axis_technology": "技術",
-        "axis_hours_marginal": "限界となった時間数"
+        "axis_hours_marginal": "限界となった時間数",
+        "legend_title": "色 = 限界技術",
+        "panel_timeline": "各時間の限界技術",
+        "panel_hours": "各技術が価格を決定した時間数"
       },
       "uc_storage_soc": {
         "no_data": "この実行には蓄電池がありません",

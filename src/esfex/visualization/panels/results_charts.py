@@ -9593,13 +9593,7 @@ class UCDispatchStackChart(QWidget):
             palette, default_color = {}, "#95A5A6"
         tech_colors = {}
         for tech in tech_series:
-            tl = tech.lower()
-            picked = default_color
-            for key, clr in palette.items():
-                if key.lower() in tl:
-                    picked = clr
-                    break
-            tech_colors[tech] = picked
+            tech_colors[tech] = _bucket_color(tech, palette, default_color)
 
         return {
             "year": int(year),
@@ -9666,6 +9660,29 @@ def _tech_bucket_for_gen(cfg: dict, gen_name: str) -> str:
         if kw in nl:
             return label
     return "Other"
+
+
+# Palette entry of the buckets whose name is not a palette key
+# ("Gas" would otherwise miss "Gas turbine" and fall to the grey of
+# "Other").
+_BUCKET_PALETTE_KEY = {
+    "Gas": "Gas turbine",
+    "Fuel oil": "Fuel Oil",
+    "Hydrogen": "Hydrogen_FuelCell",
+}
+
+
+def _bucket_color(bucket: str, palette: dict[str, str], default: str) -> str:
+    """Colour of a :func:`_tech_bucket_for_gen` bucket, the same in every
+    UC chart."""
+    key = _BUCKET_PALETTE_KEY.get(bucket, bucket)
+    if key in palette:
+        return palette[key]
+    bl = bucket.lower()
+    for k, clr in palette.items():
+        if k.lower() in bl:
+            return clr
+    return default
 
 
 class UCLoadShedCurtailmentChart(QWidget):
@@ -9980,13 +9997,7 @@ class UCMarginalTechChart(QWidget):
             if lbl == SHED:
                 tech_colors.append("#E74C3C")
                 continue
-            ll = lbl.lower()
-            picked = default_color
-            for key, clr in palette.items():
-                if key.lower() in ll:
-                    picked = clr
-                    break
-            tech_colors.append(picked)
+            tech_colors.append(_bucket_color(lbl, palette, default_color))
 
         # Per-hour: find marginal gen.
         marginal_idx = np.full(n_hours, label_to_idx[SHED], dtype=int)
@@ -10475,13 +10486,7 @@ class UCRampDistributionChart(QWidget):
             palette, default_color = {}, "#95A5A6"
         tech_colors = {}
         for tech in techs_sorted:
-            tl = tech.lower()
-            picked = default_color
-            for key, clr in palette.items():
-                if key.lower() in tl:
-                    picked = clr
-                    break
-            tech_colors[tech] = picked
+            tech_colors[tech] = _bucket_color(tech, palette, default_color)
 
         return {
             "year": int(year),

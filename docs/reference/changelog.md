@@ -4,6 +4,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Marginal Technology chart says what its colours mean.** A legend
+  names the technology of each colour, and each panel has a title. The
+  hourly strip was painted with Plotly's default colours instead of the
+  technology colours. Gas and hydrogen now have their own palette colours
+  instead of the grey of "Other" in the UC charts.
+
 ## [0.4.0] — 2026-11-20
 
 ### Highlights

@@ -6,6 +6,7 @@
  *           tech palette. Optionally tagged with the LMP via hover.
  *   Bottom: Bar chart of "hours marginal" — how many hours each
  *           tech set the system price.
+ *   A shared legend names the colours of both panels.
  *
  * Marginal tech is computed Python-side via merit-order ex-post:
  *   1. For every hour, list ON committed gens (gen_status > 0.5).
@@ -78,15 +79,14 @@ function renderMarginal(data) {
     resetLabelFits();
     const x = data.hours;
     const N = data.tech_labels.length;
-    // Build a discrete colorscale from the per-tech palette. Plotly's
-    // colorscale expects [normalised_pos, color] pairs; for N techs we
-    // emit (N) plateaus.
+    // Build a discrete colorscale from the per-tech palette: N plateaus
+    // of [normalised_pos, color] pairs. Each step repeats its boundary
+    // position, so the scale runs exactly from 0 to 1 (Plotly drops a
+    // scale that does not end at 1 and paints its default instead).
     const colorscale = [];
     for (let i = 0; i < N; i++) {
-        const left  = (N === 1) ? 0 : i / N;
-        const right = (N === 1) ? 1 : (i + 1) / N;
-        colorscale.push([left, data.tech_colors[i]]);
-        colorscale.push([right - 1e-6, data.tech_colors[i]]);
+        colorscale.push([i / N, data.tech_colors[i]]);
+        colorscale.push([(i + 1) / N, data.tech_colors[i]]);
     }
 
     // Single-row heatmap of the marginal tech index over the horizon.
@@ -106,43 +106,58 @@ function renderMarginal(data) {
         xaxis: "x", yaxis: "y",
     };
 
-    // Bar chart of hours-marginal per tech, ordered by frequency.
+    // Bar chart of hours-marginal per tech, ordered by frequency: one
+    // trace per tech that was marginal at least one hour, so the legend
+    // names the colours of both panels.
     const techByCount = Object.entries(data.hours_marginal || {})
+        .filter(([, c]) => c > 0)
         .sort((a, b) => b[1] - a[1]);
     const barX = techByCount.map(([t]) => t);
-    const barY = techByCount.map(([, c]) => c);
-    const barColors = barX.map(t => {
+    const bars = techByCount.map(([t, c]) => {
         const idx = data.tech_labels.indexOf(t);
-        return idx >= 0 ? data.tech_colors[idx] : "#95A5A6";
+        return {
+            x: [t], y: [c], type: "bar", name: t,
+            marker: { color: idx >= 0 ? data.tech_colors[idx] : "#95A5A6", opacity: 0.9 },
+            hovertemplate: "%{x}: %{y} h<extra></extra>",
+            xaxis: "x2", yaxis: "y2",
+        };
     });
-    const bar = {
-        x: barX, y: barY, type: "bar",
-        marker: { color: barColors, opacity: 0.9 },
-        hovertemplate: "%{x}: %{y} h<extra></extra>",
-        xaxis: "x2", yaxis: "y2",
-        showlegend: false,
-    };
 
+    const panelTitle = (text, y) => ({
+        text: "<b>" + text + "</b>", x: 0, xref: "paper", xanchor: "left",
+        y: y, yref: "paper", yanchor: "bottom", showarrow: false,
+        font: { size: 12, color: "#2C3E50" },
+    });
     const layout = {
-        margin: { t: 80, r: 30, b: 20, l: 80 },
+        margin: { t: 90, r: 30, b: 20, l: 80 },
         grid: { rows: 2, columns: 1, pattern: "independent", roworder: "top to bottom" },
+        barmode: "overlay",
+        showlegend: true,
+        // The legend explains the colours; toggling a trace would only
+        // hide a bar, not its hours in the timeline.
+        legend: { orientation: "h", x: 0.5, xanchor: "center",
+                  y: 1.02, yanchor: "bottom",
+                  itemclick: false, itemdoubleclick: false,
+                  title: { text: _t("web.charts.uc_marginal_tech.legend_title") + ":" } },
         annotations: [
             { text: _t("web.charts.uc_marginal_tech.subtitle"),
               x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.08, yref: "paper", yanchor: "bottom",
+              y: 1.12, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 11, color: "#5D6D7E" } },
+            panelTitle(_t("web.charts.uc_marginal_tech.panel_timeline"), 0.955),
+            panelTitle(_t("web.charts.uc_marginal_tech.panel_hours"), 0.49),
         ],
         xaxis:  { domain: [0, 1], anchor: "y", title: "<b>" + _t("web.charts.uc_marginal_tech.axis_hour") + "</b>" },
-        yaxis:  { domain: [0.65, 0.95], showticklabels: false },
+        yaxis:  { domain: [0.65, 0.95], showticklabels: false, ticks: "" },
         xaxis2: Object.assign({ domain: [0, 1], anchor: "y2",
                   title: "<b>" + _t("web.charts.uc_marginal_tech.axis_technology") + "</b>" },
             labelAxis({ axis: "xaxis2", labels: barX, fontSize: 11,
                         fraction: 0.25, maxChars: 24, angle: -25 })),
-        yaxis2: { domain: [0.0, 0.55], title: "<b>" + _t("web.charts.uc_marginal_tech.axis_hours_marginal") + "</b>",
+        yaxis2: { domain: [0.0, 0.47], title: "<b>" + _t("web.charts.uc_marginal_tech.axis_hours_marginal") + "</b>",
                   rangemode: "tozero" },
     };
     Plotly.purge("plot");
-    Plotly.newPlot("plot", [heatmap, bar], layout, {
+    Plotly.newPlot("plot", [heatmap, ...bars], layout, {
         responsive: true,
         displaylogo: false,
         modeBarButtonsToRemove: ["lasso2d", "select2d"],
