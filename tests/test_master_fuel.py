@@ -151,8 +151,8 @@ def test_master_builds_the_electrolyzer_the_dispatch_runs(tmp_path):
     orch, results = _hydrogen_plan(tmp_path, "base")
     year = results[0].year
     built = orch._master_fuel_by_year[year]["electrolyzer"]["elz"][0]
-    # 0.1 t/h of hydrogen at 13 kg/MWh, 80 % of it reaching the tank
-    assert built == pytest.approx(0.1 / (13.0 / 1000 * 0.8), rel=1e-3)
+    # 0.1 t/h of hydrogen at 13 kg/MWh
+    assert built == pytest.approx(0.1 / (13.0 / 1000), rel=1e-3)
     # The dispatch runs it: hydrogen made, none short
     assert results[0].electrolyzer_h2 is not None
     assert float(np.sum(results[0].electrolyzer_power)) > 0
@@ -170,14 +170,14 @@ def test_master_builds_the_electrolyzer_the_dispatch_runs(tmp_path):
 def test_myopic_master_builds_the_electrolyzer(tmp_path):
     orch, results = _hydrogen_plan(tmp_path, "myopic", myopic=True)
     built = orch._master_fuel_by_year[results[0].year]["electrolyzer"]["elz"][0]
-    assert built == pytest.approx(0.1 / (13.0 / 1000 * 0.8), rel=1e-3)
+    assert built == pytest.approx(0.1 / (13.0 / 1000), rel=1e-3)
 
 
 @pytest.mark.julia
 def test_myopic_electrolyzer_retires_like_perfect_foresight(tmp_path):
     """A one-year electrolyzer built in year 1 is gone in year 2: the
     myopic master must rebuild, within what the build limit has left."""
-    need = 0.1 / (13.0 / 1000 * 0.8)
+    need = 0.1 / (13.0 / 1000)
     elz = _electrolyzer(0.0, 15.0).model_copy(update={"life_time": [1]})
     orch, results = _hydrogen_plan(tmp_path, "myopic_life", myopic=True, years=2, elz=elz)
     y1, y2 = (r.year for r in results)

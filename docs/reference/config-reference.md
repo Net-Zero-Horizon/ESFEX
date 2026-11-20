@@ -905,7 +905,7 @@ Keys are matched case-insensitively (`LOSS_OF_LOAD`, `CO2_cost` and `loss_of_loa
 | `co2_budget_violation` | float | `500` | $/tCO2 over budget |
 | `fre_penetration_loss` | float | `100` | $/MWh RE shortfall. In the master problem, each MWh of renewable energy a system misses from its annual RE target costs this much (100 $/MWh when it is 0 or less); in the dispatch, the shortfall over a window |
 | `ev_loss` | float | = `loss_of_load` | $/MWh EV driving energy the fleet cannot supply. Omitted, it takes the value of `loss_of_load`; a lower value lets the dispatch leave EVs uncharged whenever generating costs more (a warning is logged). |
-| `loss_of_fuel_supply` | float | `100` | $/unit fuel deficit |
+| `loss_of_fuel_supply` | float | `100` | $/unit fuel deficit (at least 10 × the fuel's price plus its largest import cost) and excess supply |
 | `non_electric_demand_loss` | float | `100` | $/unit of non-electric (sectoral) fuel demand left unmet, per sector, node and period |
 | `soc_violation` | float | `1000000` | $/MWh SOC limit violation. |
 

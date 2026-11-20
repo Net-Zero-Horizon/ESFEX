@@ -187,7 +187,7 @@ received = 100 * (1 - 0.005 * 150 / 100) = 100 * 0.9925 = 99.25 tonnes
       transport_pipelines: {}
 ```
 
-`efficiency` (default 0.8 when a fuel has no entry) applies in every mode. The investment fields (`investment_cost`, `expansion_limit`) are used by the master problem, which builds fuel storage and route capacity on its representative days in `simulation_mode: development`; each dispatch year then uses what was built as existing capacity. A run without a master (`economic_dispatch`, `unit_commitment`) builds none. `expansion_limit: 2.0` means new capacity may reach twice the existing capacity, so the total cannot exceed 3x the original. Built capacity does not retire within the horizon; the master charges it as annuities over `lifetime` (defaults 30 years for storage, 20 for routes).
+`efficiency` (default 1, no loss, when a fuel has none) applies in every mode, to all fuel that enters a node's tank: what is bought there and what arrives by route. The investment fields (`investment_cost`, `expansion_limit`) are used by the master problem, which builds fuel storage and route capacity on its representative days in `simulation_mode: development`; each dispatch year then uses what was built as existing capacity. A run without a master (`economic_dispatch`, `unit_commitment`) builds none. `expansion_limit: 2.0` means new capacity may reach twice the existing capacity, so the total cannot exceed 3x the original. Built capacity does not retire within the horizon; the master charges it as annuities over `lifetime` (defaults 30 years for storage, 20 for routes).
 
 ---
 
@@ -398,10 +398,10 @@ systems:
       max_curtailment_ratio: 0.05
       fre_penetration_loss: 100.0
       co2_cost: 10.0
-      loss_of_fuel_supply: 2000.0       # keep above the dearest delivered fuel price
+      loss_of_fuel_supply: 100.0        # a shortfall costs at least 10 x the fuel bought
 ```
 
-`loss_of_fuel_supply` should stay well above the dearest `price_base + import_cost`; otherwise the run warns that the optimizer may prefer an unsupplied fuel penalty to buying fuel.
+A unit of fuel missing at a node costs `loss_of_fuel_supply`, or ten times the fuel's dearest unit bought (`price_base` in the year plus the largest `import_cost`) when that is higher, so a shortfall is never cheaper than buying the fuel. Set `loss_of_fuel_supply` higher to make shortfalls dearer still; `loss_of_fuel_supply` is also the price of excess supply.
 
 ---
 
@@ -473,7 +473,7 @@ with h5py.File(path, "r") as f:
 
 3. **Calibrate transport costs**: Transport costs affect which node's generators run. Too-cheap transport makes all generation draw on the cheapest fuel node; too-expensive transport pushes generation to local fuel.
 
-4. **Penalties**: Keep `loss_of_fuel_supply` above the delivered fuel price, or the optimizer pays the penalty instead of buying fuel. The same penalty applies to unmet non-electric demand.
+4. **Penalties**: A fuel shortfall costs at least ten times the fuel's price plus import cost, whatever `loss_of_fuel_supply` says; unmet non-electric demand costs `non_electric_demand_loss`.
 
 5. **Emission factors**: `emission_factor` is per MWh of fuel energy (IPCC-style values such as 0.202 for natural gas); the dispatch divides generator output by its `eff_at_rated`.
 

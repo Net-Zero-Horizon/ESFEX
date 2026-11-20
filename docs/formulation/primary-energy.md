@@ -156,7 +156,7 @@ V^{hr}_{f,n,t+1} = V^{hr}_{f,n,t} + \eta^{stor}_f \left( s^{in}_{f,n,t} + \text{
 \tag{PE-4}
 \]
 
-where \(\eta^{stor}_f\) is the storage efficiency (`efficiency` in `fuel_infrastructure.storage_facilities`, default 0.8), applied to inflows only; stored fuel does not decay. Constraint `hr_storage_balance_{fuel}_{n}_{t}`. The tank of the fuel named `Hydrogen` also receives the hydrogen of the dispatch electrolyzers at its node, as another inflow (see [Power System Coupling](#power-system-coupling)).
+where \(\eta^{stor}_f\) is the storage efficiency (`efficiency` in `fuel_infrastructure.storage_facilities`, default 1), applied to inflows only; stored fuel does not decay. Constraint `hr_storage_balance_{fuel}_{n}_{t}`. The tank of the fuel named `Hydrogen` also receives the hydrogen of the dispatch electrolyzers at its node, as another inflow (see [Power System Coupling](#power-system-coupling)).
 
 The local supply of a period is delivered into the tank over its steps, freely within the period:
 
@@ -216,7 +216,7 @@ where \(\xi^{stor}_f\) and \(\xi^{trans}_f\) are the `expansion_limit` of the fu
 
 ### Hourly Fuel Use
 
-Each step, the fuel drawn from the node's tank must cover the fuel burnt by generators and the non-electric consumption of that step; any gap is a shortfall \(L^{hr}_{f,n,t}\), penalized at `penalties.loss_of_fuel_supply`:
+Each step, the fuel drawn from the node's tank must cover the fuel burnt by generators and the non-electric consumption of that step; any gap is a shortfall \(L^{hr}_{f,n,t}\), priced at \(c^{short}_f\) (see [Penalty Costs](#penalty-costs)):
 
 \[
 s^{out}_{f,n,t} + L^{hr}_{f,n,t} \geq \sum_{g \in \mathcal{G}_f} W^{elec}_{g,n,t} + \sum_s W^{ne,hr}_{f,s,n,t}
@@ -316,11 +316,17 @@ with \(c^{stor,inv}_f\) and \(c^{trans,inv}_f\) the `investment_cost` of the fue
 
 ### Penalty Costs
 
-Fuel shortfalls and excess supply are penalized at \(c^{pen}\) = `penalties.loss_of_fuel_supply` and unmet non-electric demand at \(c^{ne}\) = `penalties.non_electric_demand_loss`:
+Excess supply is penalized at \(c^{pen}\) = `penalties.loss_of_fuel_supply`, fuel shortfalls at \(c^{short}_f\) and unmet non-electric demand at \(c^{ne}\) = `penalties.non_electric_demand_loss`:
 
 \[
-C^{penalty} = c^{pen} \left( \sum_{f,n,p} X^{supply}_{f,n,p} + \sum_{f,n,t} L^{hr}_{f,n,t} \right) + c^{ne} \sum_{f,s,n,p} U^{ne}_{f,s,n,p}
+C^{penalty} = c^{pen} \sum_{f,n,p} X^{supply}_{f,n,p} + \sum_{f} c^{short}_f \sum_{n,t} L^{hr}_{f,n,t} + c^{ne} \sum_{f,s,n,p} U^{ne}_{f,s,n,p}
 \]
+
+\[
+c^{short}_f = \max\left(c^{pen},\; 10 \left(c^{price}_{f,y} + \max_n c^{imp}_{f,n}\right)\right)
+\]
+
+with \(c^{price}_{f,y}\) the fuel's price in the year and \(c^{imp}_{f,n}\) its import cost at node \(n\) (`fuel_shortage_penalty`). The fuel a generator burns is covered by the tank plus the shortfall, so a shortfall priced below the fuel would be a cheaper fuel: the units would run on it instead of buying fuel. At ten times the dearest unit bought, a shortfall happens only when the fuel cannot reach the node, and the results report it as `loss_of_supply`.
 
 When the block is coupled to the dispatch, the fuel a coupled generator burns is paid here (supply price); the dispatch then drops that generator's `fuel_cost` from its objective and cost breakdown, so the fuel is not charged twice. Generators with a cost curve keep it.
 
@@ -442,7 +448,7 @@ The primary energy model limits generator output by the fuel drawn for it, per g
 \tag{PE-COUPLE}
 \]
 
-where \(W^{elec}_{g,n,t}\) is the fuel for generator \(g\) at node \(n\) (`hr_fuel_power_gen{g}`, units per time step), \(\kappa_g = \bar{\eta}_g \cdot e_f\) is the electricity per fuel unit (MWh\(_e\)/unit: mean `eff_at_rated` of the generator times `energy_content` of its fuel), \(n(b)\) is the node of bus \(b\) and \(\Delta t\) the time step. Constraint `pe_coupling_gen{g}_n{n}_{t}`. The fuel then has to be drawn from the node's tank through PE-5e. Generators whose fuel is `Sun`, `Wind`, `Water`, `OTEC` or has no `energy_content` are not coupled. A generator at several buses of one node (for example the virtual unit of a technology built at two buses) burns the node's fuel once for its total output.
+where \(W^{elec}_{g,n,t}\) is the fuel for generator \(g\) at node \(n\) (`hr_fuel_power_gen{g}`, units per time step), \(\kappa_g = \bar{\eta}_g \cdot e_f\) is the electricity per fuel unit (MWh\(_e\)/unit: the generator's `eff_at_rated` times `energy_content` of its fuel; for a unit at several nodes, the mean of `eff_at_rated` over the nodes where it has rated power, weighted by that power), \(n(b)\) is the node of bus \(b\) and \(\Delta t\) the time step. Constraint `pe_coupling_gen{g}_n{n}_{t}`. The fuel then has to be drawn from the node's tank through PE-5e. Generators whose fuel is `Sun`, `Wind`, `Water`, `OTEC` or has no `energy_content` are not coupled. A generator at several buses of one node (for example the virtual unit of a technology built at two buses) burns the node's fuel once for its total output.
 
 **Electrolyzers.** The hydrogen of every dispatch electrolyzer \(e\) at bus \(b\) flows into the `Hydrogen` tank of node \(n(b)\), as an inflow of PE-4 (scaled by \(\eta^{stor}\) like the others):
 

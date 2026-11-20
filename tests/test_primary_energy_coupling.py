@@ -73,9 +73,9 @@ def test_fuel_in_transit_reaches_the_next_window():
             'JuMP.value(_pe_vars.ne_demand_shortfall_periodic[("Gas", "Industrial")][2, 1])')))
         levels = pe.get_final_storage_levels(step=24)
         arrivals = pe.get_in_transit_arrivals(step=24)
-        # 10 units reach node 2's tank (0.8 inflow efficiency) during the next day
+        # 10 units reach node 2's tank during the next day
         assert arrivals["Gas"].shape == (2, 24)
-        assert arrivals["Gas"].sum() == pytest.approx(10.0 / 0.8, abs=1e-6)
+        assert arrivals["Gas"].sum() == pytest.approx(10.0, abs=1e-6)
     assert short_day1[0] == pytest.approx(10.0, abs=1e-6)   # nothing on the way yet
     assert short_day1[1:] == pytest.approx([0.0] * 3, abs=1e-6)
 

@@ -3421,6 +3421,48 @@ import Ipopt
             @test coefficient(model.ext[:cost_expressions][:fuel_cost], v) ≈ 0.0 atol = 1e-15
         end
 
+        @testset "a fuel shortfall is never cheaper than the fuel" begin
+            # The fuel a unit burns is covered by the tank plus the shortfall
+            # (fuel_loss_of_supply_hourly). At the 100 $/unit default, below
+            # a 775 $/unit fuel, units ran on the shortfall instead of buying.
+            H = 2
+            gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0], [0.0],
+                        ones(H, 1); nb = 1, H = H)
+            bus = BusData(1, 1, 220.0, 50.0, "AC", "slack", "mixed", 1.0)
+            net = NetworkConfig(1, 1, [bus], [1], zeros(1, 1), zeros(1, 1),
+                                100.0, 0.4, 220.0, 0.5, 1, [0.0], [0.0],
+                                TransmissionLineData[], TransformerData[],
+                                ACDCConverterData[], FrequencyConverterData[], 0.1)
+            input = PowerSystemInput(
+                name = "pe", year = 2025, network = net, generators = [gen],
+                batteries = BatteryConfig[], demand = fill(50.0, H, 1),
+                temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+                loss_of_load_penalty = 1.0e6,
+                mode = "economic_dispatch", solver_name = "highs", verbose = false)
+            model, vars = create_power_system(input)
+            fuel = FuelConfig("Gas", 775.0, 0.0, 10.0, 0.0, [1.0e6], [0.0], [0.0], 0.0,
+                              [5.0], 0.0, 0.0, 0.0)
+            pe_in = PrimaryEnergyInput(2025, 2025, 1, H, [fuel],
+                Dict{String, FuelInfrastructureConfig}(), NonElectricDemandConfig[],
+                TransportRoute[], Dict(1 => ("Gas", 5.0, 10.0, 0.5)), 24, 8760, 0.05,
+                100.0, "economic_dispatch", Dict{String, Any}(), nothing,
+                Dict(1 => [100.0]))
+            @test ESFEX.fuel_shortage_penalty(pe_in, fuel, 775.0) ≈ 10 * (775.0 + 5.0)
+            pe_vars, temporal, prices = ESFEX.create_primary_energy_model(model, pe_in)
+            ESFEX.couple_primary_energy_to_power_system!(model, pe_vars, vars, pe_in;
+                generators = input.generators)
+            terms = ESFEX.get_primary_energy_objective_terms(pe_vars, pe_in, temporal, prices)
+            ESFEX.@objective(model, Min, objective_function(model) + sum(values(terms)))
+            optimize!(model)
+            @test string(termination_status(model)) == "OPTIMAL"
+            # 100 MWh at 5 MWh/unit: 20 units bought, none missing
+            @test sum(value.(pe_vars.fuel_loss_of_supply_hourly["Gas"])) ≈ 0.0 atol = 1e-6
+            @test sum(value.(pe_vars.fuel_supply_periodic["Gas"])) ≈ 20.0 atol = 1e-4
+            # A configured penalty above the floor is kept
+            high = ESFEX.with_fields(pe_in; loss_of_fuel_supply_penalty = 1.0e5)
+            @test ESFEX.fuel_shortage_penalty(high, fuel, 775.0) ≈ 1.0e5
+        end
+
         @testset "primary energy: one tank per node, shipments reach it" begin
             # Node 1 buys fuel and ships it 100 km to node 2 (no supply, no
             # tank) whose 10/day non-electric demand it serves. Shipped fuel
@@ -3550,14 +3592,13 @@ import Ipopt
             @test short ≈ 10.0 atol = 1e-6
 
             # Route outage (fuel_route): node 1 ships up to 15/day to node 2's
-            # 10/day demand (12 usable after the 0.8 inflow efficiency). At
-            # half capacity on day 1 only 7.5 × 0.8 = 6 arrive.
+            # 10/day demand. At half capacity on day 1 only 7.5 arrive.
             short, _ = pe_short(route_cap = 15.0)
             @test short ≈ 0.0 atol = 1e-6
             route = Dict{String, Any}("fuel_route" =>
                 Dict("r1" => vcat(fill(0.5, 24), ones(24))))
             short, _ = pe_short(route_cap = 15.0, masks = route)
-            @test short ≈ 4.0 atol = 1e-6
+            @test short ≈ 2.5 atol = 1e-6
         end
 
         @testset "primary energy: fuel in transit reaches the next window" begin
@@ -3595,9 +3636,8 @@ import Ipopt
             for w in 1:4
                 s, init2, arrivals = pe_window(init2, arrivals, (w - 1) * 24)
                 push!(short_day1, s)
-                # day 1's shipment is on the road at the commit point: 10
-                # units into the tank after its 0.8 inflow efficiency
-                @test sum(arrivals["Gas"]) ≈ 10.0 / 0.8 atol = 1e-6
+                # day 1's shipment is on the road at the commit point: 10 units
+                @test sum(arrivals["Gas"]) ≈ 10.0 atol = 1e-6
                 @test size(arrivals["Gas"]) == (2, 24)
             end
             @test short_day1[1] ≈ 10.0 atol = 1e-6       # nothing on the way yet
@@ -3639,8 +3679,8 @@ import Ipopt
             @test string(termination_status(model)) == "OPTIMAL"
             @test sum(value(vars.gen_output[1, b, 1]) for b in 1:2) ≈ 100.0 atol = 1e-6
             @test value(pe_vars.fuel_for_power_hourly[1][1, 1]) ≈ 20.0 atol = 1e-6
-            # 40 units burnt, bought through the tank's 0.8 inflow efficiency
-            @test sum(value.(pe_vars.fuel_supply_periodic["Gas"])) ≈ 40.0 / 0.8 atol = 1e-6
+            # 40 units burnt and bought (no tank efficiency given: no loss)
+            @test sum(value.(pe_vars.fuel_supply_periodic["Gas"])) ≈ 40.0 atol = 1e-6
         end
 
         @testset "electrolyzer hydrogen fills the Hydrogen tank" begin
@@ -3687,10 +3727,9 @@ import Ipopt
             @test sum(value.(vars.load_shed)) ≈ 0.0 atol = 1e-6
             @test sum(value.(pe_vars.fuel_loss_of_supply_hourly["Hydrogen"])) ≈ 0.0 atol = 1e-6
             @test sum(value.(pe_vars.fuel_excess_supply_periodic["Hydrogen"])) ≈ 0.0 atol = 1e-6
-            # 5 MWh / 16.65 = 0.3 t used, made in step 1 (the tank keeps 0.8
-            # of what enters)
+            # 5 MWh / 16.65 = 0.3 t used, made in step 1
             p1 = value(vars.electrolyzer_power[1, 1, 1])
-            @test p1 * 13.0 / 1000 * 0.8 ≥ 5.0 / 16.65 - 1e-6
+            @test p1 * 13.0 / 1000 ≥ 5.0 / 16.65 - 1e-6
             @test value(pe_vars.fuel_storage_level_hourly["Hydrogen"][1, 2]) ≥
                   5.0 / 16.65 - 1e-6
             # pe_electrolyzer_cost reports the electrolyzer cost charged (was 0)
@@ -3838,7 +3877,7 @@ import Ipopt
                 Pm = sum(value.(ps.electrolyzer_power))
                 Pd = sum(value.(dv.electrolyzer_power))
                 @test Pm ≈ Pd rtol = 1e-6
-                @test Pm * tres * 13.0 / 1000 * 0.8 ≈ 0.01 * 24 rtol = 1e-6
+                @test Pm * tres * 13.0 / 1000 ≈ 0.01 * 24 rtol = 1e-6
                 elz_m = tres * (2.0e-5 + 1.0e-7 * 13.0) * Pm
                 # Fixed O&M is $/MW·yr: the dispatch's bucket also holds the
                 # window's share (24 h of 8760) of the 30 MW's, the master
@@ -3896,7 +3935,7 @@ import Ipopt
             fi = extract_master_solution(model, mv, inp).fuel_investment
             # 50 MW + the electrolyzer burn gas shipped from node 2: the
             # route grows from 100 units/day to what is burnt
-            elz_mw = 0.01 / (13.0 / 1000 * 0.8)          # hydrogen demand / output
+            elz_mw = 0.01 / (13.0 / 1000)                # hydrogen demand / output
             gas_day = (50.0 + elz_mw) * 24 / 5.0
             @test fi["electrolyzer"][1][1][1] ≈ elz_mw rtol = 1e-6
             @test fi["transport"][1]["Gas"][1] ≈ gas_day - 100.0 rtol = 1e-6
@@ -3986,9 +4025,11 @@ import Ipopt
                 obj, _ = solve_with(ScenarioMultipliers(; kw...))
                 @test obj > obj0 + 1e-9
             end
-            # A cheaper fuel shortfall replaces the route expansion
+            # The penalty multiplier cannot make a shortfall cheaper than the
+            # fuel (10 × its price and import cost): the route still grows
+            # (it used to be replaced by the shortfall altogether)
             _, fi = solve_with(ScenarioMultipliers(penalty_loss_of_fuel_supply = 1.0e-6))
-            @test fi["transport"][1]["Gas"][1] ≈ 0.0 atol = 1e-6
+            @test fi["transport"][1]["Gas"][1] > 0.9 * fi0["transport"][1]["Gas"][1]
         end
 
         @testset "the dispatch builds no fuel infrastructure" begin

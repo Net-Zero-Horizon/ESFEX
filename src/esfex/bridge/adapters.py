@@ -565,6 +565,30 @@ def _custom_constraints_to_julia(specs: list[dict], jl) -> Any:
 _RENEWABLE_FUELS = {"Sun", "Wind", "Water", "OTEC", "None"}
 
 
+def _rated_efficiency(eff, rated=None, default: float = 0.35) -> float:
+    """Efficiency at rated power of a unit whose fields are per node: the
+    mean over the nodes where it has rated power, weighted by that power (over
+    the nodes with an efficiency when no rated power is given).
+
+    The plain mean over every node counted the nodes without the unit, whose
+    efficiency is 0: a unit at one of 136 nodes came out 136 times less
+    efficient and burnt 136 times the fuel. ``default`` when no node has an
+    efficiency.
+    """
+    if eff is None:
+        return default
+    if np.isscalar(eff):
+        return float(eff) if float(eff) > 1e-6 else default
+    eff = [float(e or 0.0) for e in eff]
+    rated = [float(r or 0.0) for r in (rated or [])]
+    pairs = [(e, rated[i]) for i, e in enumerate(eff)
+             if e > 1e-6 and i < len(rated) and rated[i] > 0]
+    if pairs:
+        return sum(e * r for e, r in pairs) / sum(r for _, r in pairs)
+    positive = [e for e in eff if e > 1e-6]
+    return sum(positive) / len(positive) if positive else default
+
+
 def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     """Haversine distance in km between two lat/lng points."""
     import math
@@ -1121,176 +1145,6 @@ def life_extension_invest_costs(sys) -> tuple[dict, dict]:
     return gen_costs, bat_costs
 
 
-def _compute_geographic_fuel_adjustments(
-    sys_config: "SystemConfig",
-) -> Dict[str, List[float]]:
-    """Compute fuel_cost adjustments based on geographic distance to nearest fuel storage.
-
-    For each fuel-consuming generator with known geographic position, find the
-    nearest fuel storage containing that fuel and adjust ``fuel_cost`` to account
-    for distance-based transport costs and losses.
-
-    Returns:
-        dict mapping gen_key → adjusted ``fuel_cost`` array (only keys that need
-        adjustment are included).
-    """
-    layout = sys_config.gui_layout
-    if not layout:
-        return {}
-    gen_positions = layout.get("generators", {})
-    storage_positions = layout.get("fuel_storages", {})
-    if not gen_positions or not storage_positions:
-        return {}
-
-    # --- Build fuel supply map: fuel_name → [(storage_id, lat, lng, node)] ---
-    storage_facilities = sys_config.fuel_infrastructure.storage_facilities
-    fuel_supply: Dict[str, List[tuple]] = {}
-    for sid, sdata in storage_facilities.items():
-        if sid not in storage_positions:
-            continue
-        slat, slng = storage_positions[sid]
-        snode = sdata.get("node", 0)
-        fuels_list = sdata.get("fuels", [])
-        if not fuels_list:
-            # Legacy single-fuel format
-            single_fuel = sdata.get("fuel", "")
-            if single_fuel:
-                fuels_list = [single_fuel]
-        for fname in fuels_list:
-            fuel_supply.setdefault(fname, []).append((sid, slat, slng, snode))
-
-    if not fuel_supply:
-        return {}
-
-    # --- Derive per-fuel per-km transport rates from existing routes ---
-    transport_pipelines = sys_config.fuel_infrastructure.transport_pipelines
-    fuel_cost_per_km: Dict[str, float] = {}
-    fuel_loss_per_km: Dict[str, float] = {}
-
-    if transport_pipelines:
-        # Accumulate (sum, count) for each fuel
-        cost_acc: Dict[str, List[float]] = {}
-        loss_acc: Dict[str, List[float]] = {}
-        for _route_id, rdata in transport_pipelines.items():
-            length_km = rdata.get("length_km", 0.0)
-            if length_km < 0.5:
-                # Skip very short routes (e.g. port connections < 500m)
-                continue
-            route_fuels = rdata.get("fuels", [])
-            if not route_fuels:
-                single = rdata.get("fuel", "")
-                if single:
-                    route_fuels = [single]
-            fuel_params = rdata.get("fuel_params", {})
-            for fname in route_fuels:
-                fp = fuel_params.get(fname, {})
-                cost = fp.get("transport_cost", rdata.get("transport_cost", 0))
-                losses = fp.get("losses_fraction", rdata.get("losses_fraction", 0))
-                cost_acc.setdefault(fname, []).append(cost / length_km)
-                loss_acc.setdefault(fname, []).append(losses / length_km)
-
-        for fname, vals in cost_acc.items():
-            fuel_cost_per_km[fname] = sum(vals) / len(vals)
-        for fname, vals in loss_acc.items():
-            fuel_loss_per_km[fname] = sum(vals) / len(vals)
-
-    # Fallback defaults
-    DEFAULT_COST_PER_KM = 0.5  # $/fuel_unit/km
-    DEFAULT_LOSS_PER_KM = 0.001  # fraction/km
-
-    # --- For each generator, compute adjusted fuel_cost ---
-    # gui_layout keys use canonical format: "{unit_key}_n{node_idx}"
-    # config generator keys are just "{unit_key}"
-    adjustments: Dict[str, List[float]] = {}
-    log_entries: List[str] = []
-
-    num_nodes = sys_config.nodes.num_nodes or 1
-
-    for gen_key, gen_cfg in sys_config.generators.items():
-        fuel = gen_cfg.fuel
-        if fuel in _RENEWABLE_FUELS:
-            continue
-        fuel_def = sys_config.fuels.get(fuel)
-        if not fuel_def or not fuel_def.energy_content:
-            continue
-
-        candidates = fuel_supply.get(fuel, [])
-        if not candidates:
-            continue
-
-        energy_content = fuel_def.energy_content
-        efficiency = float(np.mean(gen_cfg.eff_at_rated)) if gen_cfg.eff_at_rated else 0.35
-        if efficiency < 1e-6:
-            efficiency = 0.35
-
-        cpk = fuel_cost_per_km.get(fuel, DEFAULT_COST_PER_KM)
-        lpk = fuel_loss_per_km.get(fuel, DEFAULT_LOSS_PER_KM)
-
-        # Build per-node adjusted fuel_cost
-        adjusted = list(gen_cfg.fuel_cost)
-        any_adjusted = False
-
-        for node_idx in range(min(num_nodes, len(adjusted))):
-            # Look up position using canonical key format: {gen_key}_n{node_idx}
-            layout_key = f"{gen_key}_n{node_idx}"
-            if layout_key not in gen_positions:
-                continue
-            gen_lat, gen_lng = gen_positions[layout_key]
-
-            # Find nearest storage with matching fuel (prefer same node)
-            best_dist = float("inf")
-            best_sid = ""
-            for sid, slat, slng, snode in candidates:
-                d = _haversine_km(gen_lat, gen_lng, slat, slng)
-                if d < best_dist:
-                    best_dist = d
-                    best_sid = sid
-
-            if best_dist == float("inf") or best_dist < 0.01:
-                continue
-
-            # Transport cost: $/fuel_unit/km → $/MWh_e
-            transport_cost_mwhe = cpk * best_dist / (energy_content * efficiency)
-
-            # Transport losses: need more fuel due to losses
-            loss_factor = min(lpk * best_dist, 0.5)  # cap at 50%
-            loss_multiplier = 1.0 / (1.0 - loss_factor) if loss_factor < 1.0 else 1.0
-
-            adjusted[node_idx] = adjusted[node_idx] * loss_multiplier + transport_cost_mwhe
-            any_adjusted = True
-
-            # Log entry
-            storage_name = storage_facilities.get(best_sid, {}).get("name", best_sid)
-            orig_cost = gen_cfg.fuel_cost[node_idx]
-            new_cost = adjusted[node_idx]
-            log_entries.append(
-                f"  {gen_cfg.name:30s} (n{node_idx}) → {storage_name:25s}  "
-                f"dist={best_dist:6.1f}km  "
-                f"fuel_cost: {orig_cost:.2f} → {new_cost:.2f} $/MWh_e  "
-                f"(+{new_cost - orig_cost:.2f})"
-            )
-
-        if any_adjusted:
-            adjustments[gen_key] = adjusted
-
-    if log_entries:
-        logger.debug(
-            "Geographic fuel transport adjustments:\n%s",
-            "\n".join(log_entries),
-        )
-        # Summary at info level (only generator count + range)
-        costs = [a[0] for a in adjustments.values() if a]
-        orig = [sys_config.generators[k].fuel_cost[0] for k in adjustments if sys_config.generators[k].fuel_cost]
-        if costs and orig:
-            max_delta = max(c - o for c, o in zip(costs, orig))
-            logger.debug(
-                "Geographic fuel transport: %d generators adjusted, max delta=+%.2f $/MWh_e",
-                len(adjustments), max_delta,
-            )
-
-    return adjustments
-
-
 class TransmissionDCAdapter:
     """
     Python adapter for the Julia TransmissionDC model.
@@ -1665,8 +1519,6 @@ class PowerSystemAdapter:
             )
             sys = reduced_sys
 
-        # Pre-compute geographic fuel transport adjustments
-        fuel_adjustments = _compute_geographic_fuel_adjustments(sys)
 
         # Build bus_to_node mapping for per-node → per-bus expansion.
         # Converter functions expand per-node arrays to per-bus arrays
@@ -1782,11 +1634,6 @@ class PowerSystemAdapter:
                             gen_dict[f] = updated_data[f]
                     gen_to_convert = GeneratorConfig(**gen_dict)
 
-            # Apply geographic fuel transport cost adjustment
-            if key in fuel_adjustments:
-                gen_dict = gen_to_convert.model_dump()
-                gen_dict['fuel_cost'] = fuel_adjustments[key]
-                gen_to_convert = GeneratorConfig(**gen_dict)
             gen_to_convert = self._grown_fuel_cost(gen_to_convert)
 
             # Reservoir inflow profile
@@ -3377,8 +3224,6 @@ class MasterProblemAdapter:
             )
             sys = reduced_sys
 
-        # Pre-compute geographic fuel transport adjustments
-        fuel_adjustments = _compute_geographic_fuel_adjustments(sys)
 
         # Build bus_to_node mapping for per-node → per-bus expansion
         from esfex.config.schema import BusConfig
@@ -3416,12 +3261,7 @@ class MasterProblemAdapter:
             if availability is not None:
                 logger.debug(f"Availability for {gen.name}: shape={availability.shape}")
 
-            # Apply geographic fuel transport cost adjustment
             gen_to_convert = gen
-            if key in fuel_adjustments:
-                gen_dict = gen.model_dump()
-                gen_dict['fuel_cost'] = fuel_adjustments[key]
-                gen_to_convert = GeneratorConfig(**gen_dict)
 
             # Reservoir inflow (MW-eq, not clipped), same sources as above
             inflow = self._master_profile(
@@ -5208,7 +5048,9 @@ class PrimaryEnergyAdapter:
         self._jl_temporal = None
         self._adjusted_prices = None
 
-        # Warn if loss penalty is below max fuel cost (user should fix in config)
+        # A fuel shortfall below the fuel price would be a cheaper fuel; the
+        # model prices it at 10 × the fuel's price plus import cost at least
+        # (fuel_shortage_penalty in primary_energy.jl)
         loss_pen = float(self.penalties_config.get('loss_of_fuel_supply', 100.0))
         max_fuel_cost = 0.0
         for fuel_name, fuel_cfg in self.fuels_config.items():
@@ -5217,12 +5059,11 @@ class PrimaryEnergyAdapter:
             ic_list = fuel_cfg.get('import_cost', [0.0])
             max_ic = max(float(x) for x in ic_list) if ic_list else 0.0
             max_fuel_cost = max(max_fuel_cost, bp + max_ic)
-        if loss_pen < max_fuel_cost * 1.5:
-            logger.warning(
-                f"PE loss_of_fuel_supply penalty ({loss_pen}) is below max fuel cost ({max_fuel_cost:.1f}). "
-                f"The optimizer may prefer fuel loss over purchasing. "
-                f"Consider increasing penalties.loss_of_fuel_supply in config."
-            )
+        if loss_pen < max_fuel_cost:
+            logger.debug(
+                f"penalties.loss_of_fuel_supply ({loss_pen}) is below the dearest "
+                f"fuel ({max_fuel_cost:.1f} per unit); fuel shortfalls are priced "
+                f"at 10 x each fuel's price plus import cost instead")
 
         # Generator to fuel mapping (computed during initialization)
         self.generator_fuel_map = self._create_generator_fuel_map()
@@ -5248,8 +5089,8 @@ class PrimaryEnergyAdapter:
                 energy_content = fuel_def.get('energy_content', 0.0)
 
                 if energy_content > 1e-6:
-                    eff_rated = gen.get('eff_at_rated', [0.35])
-                    efficiency = np.mean(eff_rated) if isinstance(eff_rated, list) else eff_rated
+                    efficiency = _rated_efficiency(gen.get('eff_at_rated', [0.35]),
+                                                   gen.get('rated_power'))
 
                     # MWh_e per physical fuel unit
                     mwhe_per_unit = efficiency * energy_content
@@ -5335,7 +5176,7 @@ class PrimaryEnergyAdapter:
             for fuel_name, fp in fuel_params.items():
                 if fuel_name not in fuel_storage_cfg:
                     fuel_storage_cfg[fuel_name] = {
-                        'efficiency': float(fp.get('efficiency', fac_data.get('efficiency', 0.8))),
+                        'efficiency': float(fp.get('efficiency', fac_data.get('efficiency', 1.0))),
                         'investment_cost': float(fp.get('investment_cost', fac_data.get('investment_cost', 0.0))),
                         'expansion_limit': float(fp.get('expansion_limit', fac_data.get('expansion_limit', 1.0))),
                         'lifetime': float(fp.get('lifetime', fac_data.get('lifetime', 30.0))),
@@ -5368,7 +5209,7 @@ class PrimaryEnergyAdapter:
                 float(t_cfg.get('expansion_limit', 0.5)),
                 scale_cost(float(s_cfg.get('investment_cost', 0.0))),
                 float(s_cfg.get('expansion_limit', 1.0)),
-                float(s_cfg.get('efficiency', 0.8)),
+                float(s_cfg.get('efficiency', 1.0)),
                 float(t_cfg.get('lifetime', 20.0)),
                 float(s_cfg.get('lifetime', 30.0)),
                 float(s_cfg.get('max_hourly_dispatch_rate_fraction_of_capacity', -1.0)),
@@ -5649,17 +5490,27 @@ class PrimaryEnergyAdapter:
         pe_cost_terms = self.get_objective_terms()
         jl._pe_costs_dict = pe_cost_terms
         jl._ps_model = self._jl_model
+        # In a `let`: at top level the objective and @objective's
+        # temporaries became globals of Main, new ones every window, each
+        # holding its window's model (0.3 GB a window on Cuba: a year of
+        # rolling horizon ran out of memory)
+        jl.seval("using JuMP")
         jl.seval("""
-        using JuMP
-        pe_sum = isempty(_pe_costs_dict) ? AffExpr(0.0) : sum(values(_pe_costs_dict))
-        current_obj = objective_function(_ps_model)
-        @objective(_ps_model, Min, current_obj + pe_sum)
-        if haskey(_ps_model.ext, :cost_expressions)
-            for (k, v) in _pe_costs_dict
-                _ps_model.ext[:cost_expressions][k] = v
+        let pe_sum = isempty(_pe_costs_dict) ? JuMP.AffExpr(0.0) : sum(values(_pe_costs_dict))
+            current_obj = JuMP.objective_function(_ps_model)
+            JuMP.@objective(_ps_model, Min, current_obj + pe_sum)
+            if haskey(_ps_model.ext, :cost_expressions)
+                for (k, v) in _pe_costs_dict
+                    _ps_model.ext[:cost_expressions][k] = v
+                end
             end
         end
         """)
+        # The window's model is no longer needed from Main
+        jl.seval("global _pe_model = nothing; global _ps_model = nothing; "
+                 "global _pe_vars = nothing; global _ps_vars = nothing; "
+                 "global _pe_input = nothing; global _ps_input = nothing; "
+                 "global _pe_costs_dict = nothing")
 
         logger.debug("PrimaryEnergy integrated with PowerSystem")
 

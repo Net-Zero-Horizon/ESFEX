@@ -314,3 +314,38 @@ def test_cost_totals_are_in_dollars():
     supplied = sum(float(v.sum()) for v in res["total_fuel_supply"].values())
     assert supplied > 1.0
     assert res["total_fuel_cost"] == pytest.approx(supplied * 10.0)   # price_base 10 $/unit
+
+
+def test_mwh_per_fuel_unit_uses_the_units_own_nodes():
+    """A unit's fields are per node, 0 where it has no capacity. The MWh per
+    fuel unit took the mean efficiency over every node: a unit at one of 136
+    nodes came out 136 times less efficient and burnt 136 times the fuel."""
+    from esfex.bridge.adapters import PrimaryEnergyAdapter, _rated_efficiency
+
+    n = 136
+    eff = [0.0] * n
+    rated = [0.0] * n
+    eff[15], rated[15] = 0.31, 300.0
+    assert _rated_efficiency(eff, rated) == pytest.approx(0.31)
+    # Weighted by rated power over the unit's nodes
+    eff[20], rated[20] = 0.41, 100.0
+    assert _rated_efficiency(eff, rated) == pytest.approx((0.31 * 300 + 0.41 * 100) / 400)
+    # No rated power given: the nodes with an efficiency; none: the default
+    assert _rated_efficiency([0.0, 0.4, 0.0]) == pytest.approx(0.4)
+    assert _rated_efficiency([0.0, 0.0]) == pytest.approx(0.35)
+    assert _rated_efficiency(0.5) == pytest.approx(0.5)
+
+    eff1 = [0.0] * n
+    rated1 = [0.0] * n
+    eff1[15], rated1[15] = 0.31, 300.0
+    adapter = PrimaryEnergyAdapter(
+        year=2025, base_year=2025, hours=24, num_nodes=n,
+        fuels_config={}, non_electric_demand={}, infrastructure_config={},
+        transport_distances=None,
+        generators=[{"name": "cte", "fuel": "Crude", "eff_at_rated": eff1,
+                     "rated_power": rated1}],
+        fuels_definition={"Crude": {"price_base": 345.0, "energy_content": 11.1}},
+        penalties_config={}, primary_energy_resolution=24, mode="economic_dispatch")
+    fuel, mwhe, energy, efficiency = adapter.generator_fuel_map[0]
+    assert efficiency == pytest.approx(0.31)
+    assert mwhe == pytest.approx(0.31 * 11.1)
