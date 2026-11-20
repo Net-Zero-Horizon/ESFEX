@@ -174,7 +174,7 @@ TARGET_RE_PENETRATION: 1.00       # 100% RE (most expensive)
       annual_budget: 500000.0          # tonnes CO2/year (constant)
 ```
 
-The budget acts in the operational dispatch only: emissions above `annual_budget` cost `penalties.co2_budget_violation` per tonne. The master problem has no CO2 budget, but it does charge `co2_cost` on generator emissions, so a carbon price steers the investment plan.
+Emissions above `annual_budget` cost `penalties.co2_budget_violation` per tonne, in the operational dispatch and in the master problem, which holds each year's emissions within the budget when it plans. The master also charges `co2_cost` on generator emissions, so a carbon price steers the investment plan too.
 
 ### Budget and Carbon Price Scenarios
 

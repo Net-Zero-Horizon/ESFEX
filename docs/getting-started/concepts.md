@@ -112,7 +112,7 @@ The number of days (`master_problem.representative_days`, default 5) controls th
 Retirement is driven by age — no binary retirement decisions are introduced, preserving the LP structure.
 
 - **Existing units**: `age = initial_age + (year - 1)`. The unit runs at full capacity while `age < life_time`.
-- **Life extension**: once an existing unit reaches its `life_time`, the master problem may keep any part of its capacity online, as a continuous decision. Each MW kept costs `invest_cost × life_extension_cost_factor` per year (`life_extension_cost_factor` defaults to 0.2). With `invest_cost: 0` the extension is free, so set a realistic `invest_cost` on existing units.
+- **Life extension**: once an existing unit reaches its `life_time`, the master problem may keep any part of its capacity online, as a continuous decision. Each MW kept costs `invest_cost × life_extension_cost_factor` per year (`life_extension_cost_factor` defaults to 0.2). With `invest_cost: 0` the extension is priced at the cost of the unit's candidate technology, and is free only if there is none, so set a realistic `invest_cost` on existing units.
 - **New investments**: `age = year - investment_year`. The capacity is active while `age < lifetime`.
 
 Example: a diesel generator with `initial_age: 10` and `life_time: 30` reaches its lifetime in year 21 of the simulation (age = 30); from then on it runs only as far as the optimizer pays for life extension. An investment made in year 5 with `lifetime: 25` retires in year 30.
@@ -172,7 +172,7 @@ Curtailment is available renewable energy that goes unused because demand is alr
 curtailment over the year <= max_curtailment_ratio * renewable generation over the year
 ```
 
-Single days may curtail more, as long as the year stays within the limit. Curtailment above the limit costs 10⁴ $/MWh, so the master only goes over it when it cannot do otherwise (existing renewables that must curtail more), and the log warns when it does.
+Single days may curtail more, as long as the year stays within the limit. Curtailment above the limit costs at least 10⁴ $/MWh (100 times the RE shortfall or curtailment price when that is higher), so the master only goes over it when it cannot do otherwise (existing renewables that must curtail more), and the log warns when it does.
 
 `max_curtailment_ratio` is set under `penalties:` and defaults to 0.05 (5%). When the system approaches this limit, the optimizer has to invest in storage or other flexibility to absorb excess renewable production instead of overbuilding renewables. In addition, curtailed energy is charged at `penalties.curtailment_cost`.
 

@@ -1046,7 +1046,7 @@ Each scenario of the stochastic master has its own operation (demand, operating 
 | `electrolyzer_variable_cost` | float | `1` | Multiplier on electrolyzer `variable_cost` |
 | `electrolyzer_water_cost` | float | `1` | Multiplier on electrolyzer `water_cost` |
 
-Keys written by earlier Studio versions are translated on load: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. Keys that end up on the same field multiply, with a warning. Any other key is ignored with a warning, among them the electrolyzer, fuel import, fuel storage and transport investment and loss-of-fuel-supply keys of earlier Studio versions.
+Keys written by earlier Studio versions are translated on load: `gen_fuel_cost` and `fuel_price` → `fuel_cost`, `gen_maintenance_cost` → `maintenance_cost`, `transmission_invest_cost` → `invest_cost_transmission`, `fuel_price_growth_rate` → `fuel_price_growth`, `penalty_co2_cost` → `carbon_price`, and `gen_invest_cost` → both `invest_cost_renewables` and `invest_cost_conventional`. Keys that end up on the same field multiply, with a warning. Any other key is ignored with a warning.
 
 ---
 

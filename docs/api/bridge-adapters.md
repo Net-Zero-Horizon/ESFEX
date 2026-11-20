@@ -185,7 +185,7 @@ Extract all variable values from the solved model. Calls `ESFEX.extract_solution
 | `bat_charge`, `bat_discharge`, `bat_soc` | Battery dispatch, `(bat, bus, hour)` |
 | `curtailment`, `load_shed` | `(bus, hour)` MW |
 | `reserve_static`, `reserve_dynamic`, `loss_of_reserve_static`, `loss_of_reserve_dynamic` | Reserves and their shortfalls |
-| `co2_emissions` | `(bus, hour)` tonnes |
+| `co2_emissions` | `(bus, hour)` tCO2/h (× `resolution_hours` for tonnes per step) |
 | `voltage_angle` | `(bus, hour)` rad |
 | `voltage_magnitude`, `reactive_generation` | ACOPF modes only, otherwise `None` |
 | `energy_prices` | Balance-constraint duals, `(bus, hour)` USD/MWh (recovered by a fixed-commitment LP re-solve in UC mode) |
@@ -238,7 +238,7 @@ class MasterProblemAdapter:
         initial_re_penetration: float = 0.1,
         min_re_increment: float = 0.0,
         max_re_increment: float = 1.0,
-        life_extension_cost_factor: float = 0.3,
+        life_extension_cost_factor: Optional[float] = None,
         decommissioning_cost_factor: float = 0.1,
         temporal_resolution_hours: int = 24,
         representative_days_per_year: int = 12,
@@ -579,7 +579,7 @@ availability = resampled[start_idx : start_idx + hours]
 
 ## ElectrolyzerAdapter
 
-Wraps the electrolyzer model (`electrolyzer.jl`). Handles hydrogen production optimization coupled with the power system.
+Wraps the stand-alone electrolyzer model (`electrolyzer.jl`). The runner does not use it: a run dispatches electrolyzers in the operational model (`power_system.jl`) and builds them in the master (`master_fuel.jl`).
 
 ---
 

@@ -91,7 +91,7 @@ Generator and battery variables exist only for the (unit, bus) pairs with instal
 
 | Variable | Indices | Domain | Units | Description |
 |----------|---------|--------|-------|-------------|
-| \(\text{CO2}_{i,t}\) | \(i,t\) | \(\geq 0\) | tonnes | CO2 emissions at node and hour (`co2_emissions`) |
+| \(\text{CO2}_{i,t}\) | \(i,t\) | \(\geq 0\) | tCO2/h | CO2 emission rate at node and step (`co2_emissions`); × \(\Delta t\) for tonnes |
 | \(\xi^{\text{CO2}}\) | scalar (one per system in a multi-system run) | \(\geq 0\) | tonnes | CO2 budget violation slack (`co2_budget_violation`) |
 
 ### 2.7 EV Fleet Variables
@@ -1082,7 +1082,7 @@ Penalty coefficients and their YAML keys. Keys under `penalties:` belong to each
 | `create_power_system()` | Top-level model builder | `power_system.jl` |
 | `build_variables!()` | All variable creation | `power_system.jl` |
 | `build_objective!()` | Objective function | `power_system.jl` |
-| `add_generator_constraints!()` | GEN-1 through GEN-5 | `power_system.jl` |
+| `add_generator_constraints!()` | GEN-1 through GEN-6 | `power_system.jl` |
 | `add_battery_constraints!()` | BAT-1 through BAT-9 | `power_system.jl` |
 | `add_reserve_constraints!()` | RES-1 to RES-3 | `power_system.jl` |
 | `add_reservoir_constraints!()` | Reservoir hydro (see [Reservoir Hydropower](reservoir-hydro.md)) | `power_system.jl` |

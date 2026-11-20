@@ -68,9 +68,9 @@ Investment variables exist only for period-start years \(y \in \mathcal{Y}^{inv}
 | \(\rho_{\sigma,y}\) | \(\geq 0\) | -- | Renewable generation of system \(\sigma\) over its demand, the growth cap's link from one year to the next (RE-2b; not the RE share; an expression of the day variables except in the Benders master) | `re_energy_ratio[(σ,y)]` |
 | \(s^{re}_{\sigma,y}\) | \(\mathbb{R}_+\) | MWh/yr | Renewable energy missing from system \(\sigma\)'s RE target | `slack_re_target[(0,σ,y)]` (scenario \(\omega\): `[(ω,σ,y)]`) |
 | \(s^{grow}_{\sigma,y}\) | \(\mathbb{R}_+\) | MWh/yr | Renewable energy system \(\sigma\) uses above its growth cap (RE-3b) | `slack_re_cap_s{σ}_y{y}` (`model.ext[:re_cap_slack]`) |
-| \(Z_{\sigma,y}\) | \(\mathbb{R}_+\) | MWh/yr | Curtailment of system \(\sigma\) above its annual limit (CURT-1), at 10⁴ \$/MWh | `curtailment_excess_s{σ}_y{y}` (`model.ext[:curtailment_excess]`) |
+| \(Z_{\sigma,y}\) | \(\mathbb{R}_+\) | MWh/yr | Curtailment of system \(\sigma\) above its annual limit (CURT-1), at \(c^{CU,exc}\) | `curtailment_excess_s{σ}_y{y}` (`model.ext[:curtailment_excess]`) |
 | \(s^{cap}_{y,n}\) | \(\mathbb{R}_+\) | MW | Capacity adequacy shortfall per node | `slack_capacity[(y,n)]` |
-| \(s^{bud}_y\) | \(\mathbb{R}_+\) | \$ | Overnight investment over the annual budget | `slack_budget[y]` |
+| \(s^{bud}_y\) | \(\mathbb{R}_+\) | \$ | Spending over the annual budget (overnight investment; with `budget_scope: total`, plus the year's operating cost) | `slack_budget[y]` |
 
 Life-extension variables exist only for years in which the unit is past its lifetime.
 
@@ -267,7 +267,7 @@ C^{slack} = \sum_{y=1}^{Y} \frac{\pi^{bud} \, s^{bud}_y + \sum_{n \in \mathcal{N
 - **Capacity adequacy** (`adequacy_slack_penalty`): a MW missing at the peak is priced as load not served in each hour of the node's peak period \(\mathcal{T}^{peak}_{y,n}\), the steps CAP-1 takes as the peak (the top 10 % of the year's demand, about 876 hours). This is above the yearly cost of any firm capacity, so the slack is used only when no build can close the gap.
 - **RE target**: the shortfall \(s^{re}_{\sigma,y}\) is an operating cost of the year, at \(c^{fre}\) per MWh (RE-2).
 - **RE growth cap**: existing renewables above the cap are curtailed at `curtailment_cost` (RE-3c); what cannot be curtailed, \(s^{grow}_{\sigma,y}\), is an operating cost of the year at VOLL per MWh (RE-3b, `re_cap_penalty`).
-- **Curtailment limit**: curtailment above the annual limit, \(Z_{\sigma,y}\), is an operating cost of the year at 10⁴ \$/MWh (CURT-1).
+- **Curtailment limit**: curtailment above the annual limit, \(Z_{\sigma,y}\), is an operating cost of the year at \(c^{CU,exc}\) (CURT-1).
 
 No slack makes the master infeasible. In a stochastic master the budget and adequacy slacks are first-stage and are discounted at the base rate. Earlier versions priced the budget and adequacy slacks, and a redundant yearly RE-ratio slack, at a generic `slack_penalty` of 1 M\$ per unit: every \$ over the budget cost 1 \$, so the budget did not constrain the plan.
 
@@ -763,7 +763,7 @@ Supply limits and disruption windows use the day's absolute horizon hours, as in
 | Cost | Charged as | Where |
 |---|---|---|
 | Fuel storage | `investment_cost` of the `fuel_infrastructure` storage facility × units, as annuities over its `lifetime` | investment cost (§5.1) |
-| Route capacity | `transport_investment_cost` × km × units/day, as annuities over its `lifetime` | investment cost (§5.1) |
+| Route capacity | `investment_cost` of the fuel's `fuel_infrastructure` pipeline × km × units/day, as annuities over its `lifetime` | investment cost (§5.1) |
 | Electrolyzer power | `invest_cost` × MW, as annuities over its `life_time` | investment cost (§5.1) |
 | Electrolyzer fixed cost | `fixed_cost` (\$/MW·yr) × (rated + built and not yet retired) MW, once per year | existing-asset cost (§5.1b) |
 | Fuel bought, route transport, fuel shortfall and excess, unmet non-electric demand | as in the dispatch | day cost |
@@ -1011,6 +1011,7 @@ Each scenario \(\omega\) has:
 | `transmission_cost_per_mw_km` | Scales the flow cost of inter-system links (§8.3.9) |
 | `demand_growth` | Annual demand factor of the scenario's operation (demand × factor^(y−1)) |
 | `discount_rate` | Scenario-specific discount rate adjustment |
+| `fuel_import_cost`, `fuel_transport_cost`, `fuel_storage_invest_cost`, `penalty_loss_of_fuel_supply`, `electrolyzer_invest_cost`, `electrolyzer_fixed_cost`, `electrolyzer_variable_cost`, `electrolyzer_water_cost` | Scale the costs of the fuel block (§8.3.12); they need primary energy on |
 
 See [Stochastic Programming](stochastic-programming.md#22-scenario-multipliers) for the legacy keys the loader translates.
 

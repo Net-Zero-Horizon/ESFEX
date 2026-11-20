@@ -77,8 +77,8 @@ Investment costs are determined by the Master Problem. Operational and penalty c
 | Symbol | Units | Model | Description |
 |--------|-------|-------|-------------|
 | \(P_{g,n,t}\) | MW | Dispatch | Generator active power output |
-| \(u_{g,n,t}\) | \(\{0,1\}\) or 1 | Dispatch | Generator commitment status (binary in UC, fixed to 1 in ED) |
-| \(v_{g,n,t}\) | \([0,1]\) | Dispatch | Startup indicator (UC mode only) |
+| \(u_{g,n,t}\) | \(\{0,1\}\), \(\{0,\dots,N_{g,n}\}\) or 1 | Dispatch | Units online (binary in UC for a single-unit plant, integer 0..`num_units` for a plant of several units, see GEN-6; fixed to 1 in ED) |
+| \(v_{g,n,t}\) | \([0,N_{g,n}]\) | Dispatch | Units started (UC mode only) |
 | \(P^{ch}_{b,n,t}\) | MW | Dispatch | Battery charging power |
 | \(P^{dis}_{b,n,t}\) | MW | Dispatch | Battery discharging power |
 | \(E_{b,n,t}\) | MWh | Dispatch | Battery state of charge |
@@ -144,7 +144,7 @@ The Master Problem is a pure LP — continuous variables, with age-based retirem
 |------|-----------------|---------------------|----------|
 | `development` | Fixed = 1 (LP) | Present | Capacity planning and technology screening |
 | `economic_dispatch` | Fixed = 1 (LP) | Absent | Operational cost evaluation with a fixed fleet |
-| `unit_commitment` | Binary \(\{0,1\}\) (MIP) | Absent | Detailed operational analysis with startup/shutdown |
+| `unit_commitment` | Binary \(\{0,1\}\), integer for plants of several units (MIP) | Absent | Detailed operational analysis with startup/shutdown |
 
 In `development` mode, generator commitment is relaxed to continuous, keeping the full problem as an LP with investment variables. In `unit_commitment` mode, binary commitment variables introduce minimum up/down time constraints, startup costs, and minimum stable generation levels, yielding a MIP.
 
