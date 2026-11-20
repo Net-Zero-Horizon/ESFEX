@@ -486,7 +486,7 @@ esfex info [--json] [--probe/--no-probe]
 ### Example Output
 
 ```
-ESFEX version 0.3.0
+ESFEX version 0.4.0
 Python: 3.12.4 | packaged by conda-forge | (main, Jun 17 2024, 10:23:07) [GCC 12.3.0]
 Julia: Available via juliacall
 Sysimage: Not built

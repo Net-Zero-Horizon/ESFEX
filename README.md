@@ -424,7 +424,7 @@ If you use ESFEX in academic work, please cite:
   year    = {2026},
   url     = {https://github.com/Net-Zero-Horizon/ESFEX},
   doi     = {10.5281/zenodo.20504838},
-  version = {0.3.0},
+  version = {0.4.0},
   license = {Apache-2.0}
 }
 ```
