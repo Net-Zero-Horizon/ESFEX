@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Every configuration key ESFEX 0.3.0 accepts, generated from the Pydantic models in `esfex.config.schema` and checked against what `esfex.config.loader.load_config()` actually reads. For a guided introduction with examples, see the [Configuration Guide](../user-guide/configuration.md).
+Every configuration key ESFEX 0.4.0 accepts, generated from the Pydantic models in `esfex.config.schema` and checked against what `esfex.config.loader.load_config()` actually reads. For a guided introduction with examples, see the [Configuration Guide](../user-guide/configuration.md).
 
 **How to read the tables**
 

@@ -222,7 +222,7 @@ esfex info
 Expected output for a fresh installation:
 
 ```
-ESFEX version 0.3.0
+ESFEX version 0.4.0
 Python: 3.12.4 | packaged by conda-forge | (main, Jun 17 2024, 10:23:07) [GCC 12.3.0]
 Julia: Available via juliacall
 Sysimage: Not built
@@ -240,7 +240,7 @@ You can also check the installed version from Python:
 
 ```bash
 python -c "import esfex; print(esfex.__version__)"
-# Expected: 0.3.0
+# Expected: 0.4.0
 ```
 
 To check that a configuration file loads, use `esfex validate -c <file>`. It does not start Julia (see the [CLI reference](../user-guide/cli.md#esfex-validate)).

@@ -4,6 +4,51 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-20
+
+### Highlights
+
+- **A plan and its dispatch now agree.** The master problem models what the
+  dispatch runs: the CO2 budget, converters, links, the fuel chain and
+  electrolyzers, battery maintenance, reservoir inflows, critical days, line
+  losses and the RE target path of myopic planning. Each year's total cost
+  is the sum of its components, and the stochastic master is a real
+  two-stage model.
+- **ESFEX can be driven from scripts and agents.** `esfex validate`,
+  `esfex run`, `esfex summary` and `esfex info` print one JSON object with
+  `--json`, and their exit codes say how the run ended. Unknown
+  configuration keys are reported. A run ends with a summary of its warnings,
+  results files record what wrote them, and an interrupted myopic run can be
+  resumed.
+- **Why the master built something.** The results hold the binding
+  constraints of the master, their duals and the annuities paid for each
+  build. `esfex summary` reports them.
+- **Line losses.** The dispatch and the master model DC line losses and
+  repair their linearisation. The results record the losses and the bounds
+  of the repair.
+- **Unit modelling.** Clustered unit commitment (`num_units`), `unit_size`
+  on candidate technologies, NPV-based retirement of existing units, battery
+  ramp limits, and converter minimum power.
+- **The Studio in five languages.** The Studio, the Grid Builder and the web
+  views (map, single-line diagram, dashboard, charts) are translated into
+  Spanish, French, Portuguese and Japanese. The Validate dialog has a
+  realism check, and projects remember their results.
+- **HiGHS 1.16 (HiGHS.jl 1.27) is supported.**
+- **Results differ from 0.3.0.** Many costs were missing or counted twice,
+  and several units were read wrong: ramp limits are a fraction of capacity
+  per hour, CO2 factors are per MWh of fuel, reserves are headroom. See
+  *Changed* and *Fixed*. Configuration keys that were removed are reported
+  as unknown keys.
+
+### Known limitations (planned for 0.5)
+
+- The line-loss repair keeps the line directions of the first solve: the
+  check that releases them is implemented but off, because on a real case it
+  made the master 2.5 to 10 times slower.
+- On large LP master problems, HiGHS's interior-point solver can stop with
+  "ipm no progress". See the solver guide's section on large LP master
+  problems; a commercial barrier solver is the reliable choice there.
+
 ### Added
 
 - **Translations for the web views.** The map, the single-line diagram,

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "esfex"
-version = "0.3.0"
+version = "0.4.0"
 description = "ESFEX: Energy System Flexibility — Power System Optimization"
 readme = "README.md"
 # ESFEX code is Apache-2.0; the package also ships third-party JavaScript
