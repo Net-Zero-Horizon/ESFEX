@@ -4762,7 +4762,7 @@
         "hover_objective": "Objectif : {objective}",
         "hover_peak_re": "EnR max. : {pct} %",
         "trace_alternative": "Alternative",
-        "colorbar_cost": "Coût (G$)",
+        "colorbar_cost": "Coût (Md$)",
         "trace_optimal": "Optimum",
         "axis_pc1": "CP1  ({pct} % var.)",
         "axis_pc2": "CP2  ({pct} % var.)",
@@ -4793,7 +4793,7 @@
         "title_b": "b)  Robustesse des décisions",
         "subtitle_b": "MW investis min↔max par technologie sur l'ensemble MGA · triés par CV (indispensables en bas, interchangeables en haut)",
         "axis_distance": "Distance à l'optimum de coût (norm.)",
-        "axis_cost": "Coût du système (G$)"
+        "axis_cost": "Coût du système (Md$)"
       },
       "mga_spatial": {
         "no_data": "Aucune donnée de divergence spatiale.",
