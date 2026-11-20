@@ -214,7 +214,7 @@ A solve stopped by `time_limit` (or another limit) is used when the solver holds
 
 The solver stops when:
 
-$$\frac{|BestBound - BestSolution|}{|BestSolution|} \leq gap$$
+\[\frac{|BestBound - BestSolution|}{|BestSolution|} \leq gap\]
 
 | Gap Value | Meaning | Speed | Accuracy |
 |-----------|---------|-------|----------|

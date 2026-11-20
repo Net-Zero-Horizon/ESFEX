@@ -237,13 +237,13 @@ The master problem and the operational dispatch look up hours by their position 
 
 In operational dispatch, availability caps the output of every generator in every hour:
 
-$$P_{g,b,t} \leq \bar{P}_{g,b,y} \times \alpha_{g,t,n(b)}$$
+\[P_{g,b,t} \leq \bar{P}_{g,b,y} \times \alpha_{g,t,n(b)}\]
 
 where:
 
-- $P_{g,b,t}$: output of generator $g$ at bus $b$ in hour $t$
-- $\bar{P}_{g,b,y}$: its capacity in year $y$, as set by the master problem (existing capacity after retirement and degradation, or the capacity built for an `inv_<technology>` unit)
-- $\alpha_{g,t,n(b)}$: the profile value for hour $t$ at the bus's parent node $n(b)$, multiplied by any [scheduled interruption](scheduled-interruptions.md) factor
+- \(P_{g,b,t}\): output of generator \(g\) at bus \(b\) in hour \(t\)
+- \(\bar{P}_{g,b,y}\): its capacity in year \(y\), as set by the master problem (existing capacity after retirement and degradation, or the capacity built for an `inv_<technology>` unit)
+- \(\alpha_{g,t,n(b)}\): the profile value for hour \(t\) at the bus's parent node \(n(b)\), multiplied by any [scheduled interruption](scheduled-interruptions.md) factor
 
 The optimizer can produce less than the available amount (curtailment), but never more. In the master problem, the profiles cap existing generators and renewable technologies on the representative days. For capacity adequacy, a variable renewable (sun, wind, ocean, run-of-river hydro) counts with its minimum availability, and every other unit (thermal, biomass, reservoir hydro, storage) with its mean availability over the node's peak period, the top 10 % demand steps of the year.
 

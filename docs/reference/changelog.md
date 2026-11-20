@@ -3872,6 +3872,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ### Documentation
 
+- **Equations render in every page and in the Studio's documentation
+  viewer.** The glossary and 13 other pages wrote formulas between `$`
+  signs, which the Studio's viewer does not read, and on the website two
+  `$` of amounts such as "$/MWh" were sometimes taken as one formula, so
+  the text between them was set as math. Formulas use `\( \)` and `\[ \]`
+  only, and a `$` is always a currency sign.
+
 - **`max_annual_system_cost` is described as what it is.** The field had no
   description, and its name reads as a cap on the total annual system
   cost. It is the annual investment budget: in every master mode it limits

@@ -145,9 +145,9 @@ The reduction removes only passive buses: buses with role `connection` that have
 
 A cross-field validator enforces the method/objectives constraint when `enabled = true`:
 
-- `method = "spores"` with empty `objectives` $\to$ `ValueError`
-- `method = "mga"` with populated `objectives` $\to$ `ValueError` (probably meant to switch method)
-- `enabled = false` $\to$ the validator is bypassed (so YAML drafts can keep both fields populated)
+- `method = "spores"` with empty `objectives` \(\to\) `ValueError`
+- `method = "mga"` with populated `objectives` \(\to\) `ValueError` (probably meant to switch method)
+- `enabled = false` \(\to\) the validator is bypassed (so YAML drafts can keep both fields populated)
 
 ## SporesObjective
 
@@ -155,11 +155,11 @@ String enum of the SPORES objective menu. Each value names an LP objective insta
 
 | Value | Sense | Formulation tag | Description |
 |-------|-------|-----------------|-------------|
-| `"hsj_diversity"` | $\max$ | [MGA-4](../formulation/capacity-expansion.md#154-diversity-objective) | Classical Hop-Skip-Jump diversity score, retained for use inside a SPORES sweep |
-| `"min_total_build"` | $\min$ | [SPORES-1](../formulation/capacity-expansion.md#1510-minimum-total-build-objective) | Smallest near-optimal portfolio |
-| `"max_tech_equity"` | $\min$ (min-max) | [SPORES-2](../formulation/capacity-expansion.md#1511-technology-equity-objective) | Min-max over per-technology totals |
-| `"max_regional_equity"` | $\min$ (min-max) | [SPORES-3](../formulation/capacity-expansion.md#1512-regional-equity-objective) | Min-max over per-node totals (the spatially-explicit objective) |
-| `"evolutionary_dist"` | $\max$ | [SPORES-4](../formulation/capacity-expansion.md#1513-evolutionary-distance-objective) | L1 distance from cost-optimal plan |
+| `"hsj_diversity"` | \(\max\) | [MGA-4](../formulation/capacity-expansion.md#154-diversity-objective) | Classical Hop-Skip-Jump diversity score, retained for use inside a SPORES sweep |
+| `"min_total_build"` | \(\min\) | [SPORES-1](../formulation/capacity-expansion.md#1510-minimum-total-build-objective) | Smallest near-optimal portfolio |
+| `"max_tech_equity"` | \(\min\) (min-max) | [SPORES-2](../formulation/capacity-expansion.md#1511-technology-equity-objective) | Min-max over per-technology totals |
+| `"max_regional_equity"` | \(\min\) (min-max) | [SPORES-3](../formulation/capacity-expansion.md#1512-regional-equity-objective) | Min-max over per-node totals (the spatially-explicit objective) |
+| `"evolutionary_dist"` | \(\max\) | [SPORES-4](../formulation/capacity-expansion.md#1513-evolutionary-distance-objective) | L1 distance from cost-optimal plan |
 
 ---
 

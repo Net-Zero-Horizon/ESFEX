@@ -1180,10 +1180,10 @@ MGA (Modeling to Generate Alternatives) [**[8]**](../reference/bibliography.md#r
 
 ESFEX implements **both methods** as distinct paths through the same machinery:
 
-- **MGA** ($\S 15.2$–$\S 15.8$): the classical Hop-Skip-Jump (HSJ) loop. One diversity objective is applied $K$ times, each iteration penalising investment variables seen in the previous solutions.
-- **SPORES** ($\S 15.9$–$\S 15.15$): a *menu* of distinct objectives. Each declared objective produces one alternative under the shared cost-slack constraint; the alternative count equals `len(objectives)`.
+- **MGA** (\(\S 15.2\)–\(\S 15.8\)): the classical Hop-Skip-Jump (HSJ) loop. One diversity objective is applied \(K\) times, each iteration penalising investment variables seen in the previous solutions.
+- **SPORES** (\(\S 15.9\)–\(\S 15.15\)): a *menu* of distinct objectives. Each declared objective produces one alternative under the shared cost-slack constraint; the alternative count equals `len(objectives)`.
 
-Both share the near-optimal constraint $Z \leq (1+\varepsilon) C^*$ and the per-alternative cost recovery; only the objective family differs.
+Both share the near-optimal constraint \(Z \leq (1+\varepsilon) C^*\) and the per-alternative cost recovery; only the objective family differs.
 
 ### 15.1 Algorithm
 
@@ -1293,7 +1293,7 @@ run_mga_spores(input)
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `mga.enabled` | `false` | Enable MGA / SPORES |
-| `mga.method` | `"mga"` | Generation method: `"mga"` (HSJ loop, $\S 15.2$–$\S 15.7$) or `"spores"` (per-objective sweep, $\S 15.9$–$\S 15.15$) |
+| `mga.method` | `"mga"` | Generation method: `"mga"` (HSJ loop, \(\S 15.2\)–\(\S 15.7\)) or `"spores"` (per-objective sweep, \(\S 15.9\)–\(\S 15.15\)) |
 | `mga.num_alternatives` | 10 | Number of diversity alternatives \(K\). **Used only when `method = "mga"`** — ignored under SPORES (the count equals `len(objectives)`) |
 | `mga.slack_fraction` | 0.05 | Near-optimal slack \(\varepsilon\) — shared by both methods |
 | `mga.investment_threshold` | 0.1 MW | Threshold \(\tau\) for frequency counting. Used by HSJ and by the SPORES `hsj_diversity` objective; ignored by the other SPORES objectives |

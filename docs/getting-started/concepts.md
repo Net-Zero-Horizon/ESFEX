@@ -231,17 +231,17 @@ The primary energy module operates at a coarser temporal resolution than electri
 
 ## NPV Minimization
 
-$$
+\[
 \min \sum_{y=1}^{Y} \frac{1}{(1+r)^{y-1}} \left[ C^{inv}_y + C^{op}_y + C^{penalty}_y \right]
-$$
+\]
 
 where:
 
-- $Y$ is the number of planning years
-- $r$ is the discount rate (typically 5--10%)
-- $C^{inv}_y$ are investment costs in year $y$ (capital expenditure for new generators, batteries, and transmission)
-- $C^{op}_y$ are operational costs in year $y$ estimated from representative days (fuel, O&M, start-up costs)
-- $C^{penalty}_y$ are soft constraint violation penalties (unserved demand, RE shortfall, CO2 excess)
+- \(Y\) is the number of planning years
+- \(r\) is the discount rate (typically 5--10%)
+- \(C^{inv}_y\) are investment costs in year \(y\) (capital expenditure for new generators, batteries, and transmission)
+- \(C^{op}_y\) are operational costs in year \(y\) estimated from representative days (fuel, O&M, start-up costs)
+- \(C^{penalty}_y\) are soft constraint violation penalties (unserved demand, RE shortfall, CO2 excess)
 
 The discount rate reflects the time value of money: higher rates favor deferring investment; lower rates favor early investment. The choice of discount rate significantly affects the optimal investment schedule, particularly for capital-intensive renewable technologies.
 
@@ -257,11 +257,11 @@ In power system planning, multiple investment portfolios often achieve nearly th
 
 The classical formulation, due to DeCarolis [**[8]**](../reference/bibliography.md#ref8):
 
-1. Solve the cost-optimal master problem $\to$ $C^*$, $x_0^*$.
-2. Add the slack constraint $Z \leq (1+\varepsilon) \cdot C^*$.
-3. For $k = 1, \ldots, K$: maximise a single **Hop-Skip-Jump** diversity objective that penalises investment variables seen in $\{x_0^*, \ldots, x_{k-1}^*\}$, then solve.
+1. Solve the cost-optimal master problem \(\to\) \(C^*\), \(x_0^*\).
+2. Add the slack constraint \(Z \leq (1+\varepsilon) \cdot C^*\).
+3. For \(k = 1, \ldots, K\): maximise a single **Hop-Skip-Jump** diversity objective that penalises investment variables seen in \(\{x_0^*, \ldots, x_{k-1}^*\}\), then solve.
 
-Every alternative optimises the same diversity score $\sigma = 1 - 2 \cdot \mathrm{freq}$; the score history is the only thing that changes between iterations. Configuration: `master_problem.mga.method = "mga"`, `num_alternatives`, `slack_fraction`.
+Every alternative optimises the same diversity score \(\sigma = 1 - 2 \cdot \mathrm{freq}\); the score history is the only thing that changes between iterations. Configuration: `master_problem.mga.method = "mga"`, `num_alternatives`, `slack_fraction`.
 
 ### SPORES — Spatially-explicit Practically Optimal Results
 
@@ -269,10 +269,10 @@ Introduced by Lombardi et al. (2020) [**[7]**](../reference/bibliography.md#ref7
 
 | Objective | LP form | Question it answers |
 |-----------|---------|---------------------|
-| `min_total_build` | $\min \sum I$ | What is the *smallest* near-optimal portfolio? |
+| `min_total_build` | \(\min \sum I\) | What is the *smallest* near-optimal portfolio? |
 | `max_tech_equity` | min-max over per-tech totals | Can the portfolio be technology-diversified? |
 | `max_regional_equity` | min-max over per-node totals | Can investments be spatially spread? |
-| `evolutionary_dist` | $\max$ L1 distance from $x_0^*$ | What is the *maximally different* feasible plan? |
+| `evolutionary_dist` | \(\max\) L1 distance from \(x_0^*\) | What is the *maximally different* feasible plan? |
 
 Configuration: `master_problem.mga.method = "spores"`, `objectives = [...]`. The alternative count equals `len(objectives)`.
 

@@ -45,17 +45,17 @@ Parameters: reservoir capacity \(C\), turbine efficiency \(\eta\), pump efficien
 
 The reservoir level evolves by inflow (natural + cascade), turbining, pumping, spillage and evaporation:
 
-$$
+\[
 L_{g,b,t+1} = L_{g,b,t}\,(1-\rho) + W_{g,b,t} + \Phi_{g,b,t} - \frac{P_{g,b,t}}{\eta} + \eta_p\,U_{g,b,t} - S_{g,b,t}
-$$
+\]
 
 where \(\Phi_{g,b,t}\) is the cascade inflow (RES-5, zero for a unit with no upstream feeders). Constraint `res_dynamics_g{g}_b{b}_t{t}`.
 
 ### RES-2: Level band
 
-$$
+\[
 \ell^{\min} C \le L_{g,b,t+1} \le \ell^{\max} C
-$$
+\]
 
 Pumping is bounded by the pump capacity, and spillage is forced to zero when `reservoir_spillage_allowed` is false. Constraints `res_min_level_*`, `res_max_level_*`, `res_pump_limit_*` / `res_no_pump_*`, `res_no_spill_*`. In the dispatch's `development` mode the capacity \(C\) in the level band includes a reservoir investment variable bounded by `reservoir_invest_max` (`res_invest_limit_*`). In the master, \(C\) includes the reservoir capacity built up to that year (§4).
 
@@ -63,9 +63,9 @@ Pumping is bounded by the pump capacity, and spillage is forced to zero when `re
 
 The starting level is fixed, and each period is **cyclic**: the end level returns to the start, within `soc_end_tolerance` \(\epsilon\):
 
-$$
+\[
 L_{g,b,1} = L^{0}_{g,b}, \qquad (1-\epsilon)\,L^{0}_{g,b} \le L_{g,b,H+1} \le (1+\epsilon)\,L^{0}_{g,b}
-$$
+\]
 
 \(L^0_{g,b} = \ell^0 C\) in the first window of a year and in the master problem. In rolling-horizon dispatch, later windows start from the level at the end of the previous window's last kept hour, and the end condition is relative to that level, so over a year the level can drift by up to \(\epsilon\) per window. Constraints `res_initial_*`, `res_end_lower_*`, `res_end_upper_*`.
 
@@ -75,9 +75,9 @@ With **seasonal storage** enabled (see §4), the cyclic closure is replaced: the
 
 When `reservoir_min_release` \(R^{\min} > 0\), the water leaving the reservoir (turbined and/or spilled) must meet the mandatory downstream flow:
 
-$$
+\[
 \frac{P_{g,b,t}}{\eta} + S_{g,b,t} \ge R^{\min}
-$$
+\]
 
 Constraint `res_min_release_g{g}_b{b}_t{t}`.
 
@@ -85,9 +85,9 @@ Constraint `res_min_release_g{g}_b{b}_t{t}`.
 
 Let \(\mathcal{U}(g)\) be the reservoirs that discharge into \(g\), each with travel delay \(\tau_u\). The cascade inflow injected into \(g\)'s primary node is the upstream release (turbined + spilled), shifted by the delay:
 
-$$
+\[
 \Phi_{g,b,t} = \sum_{u \in \mathcal{U}(g)} \left( \frac{P_{u,t-\tau_u}}{\eta_u} + S_{u,t-\tau_u} \right), \qquad t - \tau_u \ge 1
-$$
+\]
 
 Releases scheduled before the period start (\(t - \tau_u < 1\)) are outside the window and not carried in.
 
@@ -95,9 +95,9 @@ Releases scheduled before the period start (\(t - \tau_u < 1\)) are outside the 
 
 When `reservoir_head_min_factor` \(\phi < 1\), a low reservoir has low head and cannot reach nameplate power. The available output scales linearly with the fill level, from \(\phi\,\bar P\) at the minimum level to \(\bar P\) at the maximum:
 
-$$
+\[
 P_{g,b,t} \le \bar P\left( \phi + (1-\phi)\,\frac{L_{g,b,t} - \ell^{\min} C}{(\ell^{\max} - \ell^{\min})\,C} \right)
-$$
+\]
 
 Constraint `res_head_limit_g{g}_b{b}_t{t}`. Evaluated at the start-of-step level \(L_{g,b,t}\), this bound is linear in the level variable — the tractable piecewise-linear treatment of head dependence. In the master, \(C\) in the numerator (the minimum level) is the in-service capacity, existing plus built; the span in the denominator keeps the existing capacity, since a built capacity there would make the bound nonlinear. The fraction is then exact at the minimum level of an enlarged reservoir and overstates the head above it (it reaches 1 before the top, where \(\bar P\) binds anyway). The dispatch receives the master's builds as existing capacity, so its span is the in-service one.
 

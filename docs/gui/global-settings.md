@@ -108,8 +108,8 @@ Part of the Master Problem group. Generates a set of investment portfolios near 
 | Field | Default | Description |
 |-------|---------|-------------|
 | Enable MGA | Off | Master toggle for the near-optimal sub-section |
-| Method | `MGA (HSJ loop)` | `MGA (HSJ loop)` runs the classical loop $K$ times; `SPORES (per-objective)` solves one alternative per declared objective |
-| Alternatives | 10 | Number of alternatives $K$ for the HSJ loop. **Hidden when Method = SPORES** (the count equals the number of checked objectives) |
+| Method | `MGA (HSJ loop)` | `MGA (HSJ loop)` runs the classical loop \(K\) times; `SPORES (per-objective)` solves one alternative per declared objective |
+| Alternatives | 10 | Number of alternatives \(K\) for the HSJ loop. **Hidden when Method = SPORES** (the count equals the number of checked objectives) |
 | SPORES Objectives | (none checked) | Multi-select checklist: `HSJ diversity`, `Min total build`, `Tech equity`, `Regional equity`, `Evolutionary distance`. **Hidden when Method = MGA**. Required when Method = SPORES — saving with the method set but no objectives selected will trigger a validation error at run time |
 | Cost Slack (fraction) | 0.05 | Maximum cost increase allowed (0.05 = alternatives can cost up to 105% of optimal), from 0 to 0.5. Shared by both methods |
 | Invest. Threshold (MW) | 0.1 | Minimum investment to count as "selected" by HSJ frequency scoring. Used by `method = mga` and by the SPORES `hsj_diversity` objective; the other SPORES objectives ignore it |
