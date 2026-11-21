@@ -10,10 +10,10 @@ Open points are marked `TODO(licence)`.
 
 ## Demand density model (`src/esfex/assets/models/`)
 
-The demand density model is the final model of the article *Global map of electricity
-demand sensitivity to warming learned from observed hourly load* (Nature Communications,
-revision R1). `scripts/demand_model/README.md` describes how each
-file was produced.
+The demand density model is the final model of the article *The asymmetric burden of
+climate change revealed by sub-national mapping of electricity-demand sensitivity and
+inequity* (Nature Communications, revision R1). `scripts/demand_model/README.md` describes
+how each file was produced.
 
 | File | Content | Sources | Licence |
 |---|---|---|---|
