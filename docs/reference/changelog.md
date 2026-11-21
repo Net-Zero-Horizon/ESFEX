@@ -37,6 +37,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   times the fuel, the fuel price is the one configured, a unit's fuel use
   follows its own efficiency, tanks lose fuel only when a loss is given,
   and a year of dispatch no longer runs out of memory.
+- **The ESFEX article is published.** Soto Calvo M, Lee HS. *SoftwareX*
+  2026;36:103244, [doi:10.1016/j.softx.2026.103244](https://doi.org/10.1016/j.softx.2026.103244).
+  `CITATION.cff`, the README and the documentation cite it.
 - **HiGHS 1.16 (HiGHS.jl 1.27) is supported.**
 - **Results differ from 0.3.0.** Many costs were missing or counted twice,
   and several units were read wrong: ramp limits are a fraction of capacity

@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use ESFEX in academic work, please cite it as below."
+message: "If you use ESFEX in academic work, please cite the article below."
 title: "ESFEX: Energy System Flexibility — Power System Optimization"
 abstract: >-
   ESFEX (Energy System Flexibility) is an open-source hybrid Python/Julia
@@ -34,3 +34,25 @@ keywords:
   - sector coupling
   - optimal power flow
   - JuMP
+preferred-citation:
+  type: article
+  title: "ESFEX: an open-source framework for multi-model power-system optimization and energy-flexibility analysis"
+  authors:
+    - family-names: "Soto Calvo"
+      given-names: "Manuel"
+      affiliation: "Hiroshima University"
+      orcid: "https://orcid.org/0000-0003-4312-6300"
+    - family-names: "Lee"
+      given-names: "Han Soo"
+      affiliation: "Hiroshima University"
+      orcid: "https://orcid.org/0000-0001-7749-0317"
+  journal: "SoftwareX"
+  volume: 36
+  start: 103244
+  year: 2026
+  month: 12
+  issn: "2352-7110"
+  publisher:
+    name: "Elsevier"
+  doi: "10.1016/j.softx.2026.103244"
+  url: "https://doi.org/10.1016/j.softx.2026.103244"

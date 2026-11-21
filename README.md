@@ -18,6 +18,9 @@
   <a href="https://esfex.readthedocs.io/">
     <img src="https://readthedocs.org/projects/esfex/badge/?version=latest" alt="Documentation">
   </a>
+  <a href="https://doi.org/10.1016/j.softx.2026.103244">
+    <img src="https://img.shields.io/badge/SoftwareX-10.1016%2Fj.softx.2026.103244-blue.svg" alt="Article">
+  </a>
   <a href="https://doi.org/10.5281/zenodo.20504838">
     <img src="https://zenodo.org/badge/DOI/10.5281/zenodo.20504838.svg" alt="DOI">
   </a>
@@ -415,7 +418,22 @@ mkdocs serve
 
 ## Citation
 
-If you use ESFEX in academic work, please cite:
+If you use ESFEX in academic work, please cite the article:
+
+```bibtex
+@article{sotocalvo2026esfex,
+  title   = {{ESFEX}: an open-source framework for multi-model power-system
+             optimization and energy-flexibility analysis},
+  author  = {Soto Calvo, Manuel and Lee, Han Soo},
+  journal = {SoftwareX},
+  volume  = {36},
+  pages   = {103244},
+  year    = {2026},
+  doi     = {10.1016/j.softx.2026.103244}
+}
+```
+
+To cite the software of a given release, use its Zenodo record:
 
 ```bibtex
 @software{esfex2026,

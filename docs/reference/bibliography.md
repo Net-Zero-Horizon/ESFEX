@@ -37,6 +37,8 @@ This section provides the full bibliography for the ESFEX documentation. Referen
 
 <a id="ref47"></a>**[47]** Thurner L, Scheidler A, Schäfer F, Menke JH, Dollichon J, Meier F, Meinecke S, Braun M. pandapower — an Open-Source Python Tool for Convenient Modeling, Analysis, and Optimization of Electric Power Systems. *IEEE Transactions on Power Systems* 2018;33(6):6510–6521. [doi:10.1109/TPWRS.2018.2829021](https://doi.org/10.1109/TPWRS.2018.2829021). Repository: [github.com/e2nIEE/pandapower](https://github.com/e2nIEE/pandapower)
 
+<a id="ref86"></a>**[86]** Soto Calvo M, Lee HS. ESFEX: an open-source framework for multi-model power-system optimization and energy-flexibility analysis. *SoftwareX* 2026;36:103244. [doi:10.1016/j.softx.2026.103244](https://doi.org/10.1016/j.softx.2026.103244). Repository: [github.com/Net-Zero-Horizon/ESFEX](https://github.com/Net-Zero-Horizon/ESFEX)
+
 ## Power Systems Analysis and Optimization
 
 <a id="ref5"></a>**[5]** Kundur P. *Power System Stability and Control*. New York: McGraw-Hill; 1994.
