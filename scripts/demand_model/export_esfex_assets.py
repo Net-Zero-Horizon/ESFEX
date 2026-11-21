@@ -37,8 +37,8 @@ import pandas as pd
 
 SPEC = "level_geo_two_shallow"
 STEM = "demand_density_v2"
-ARTICLE = ("Global map of electricity demand sensitivity to warming learned from "
-           "observed hourly load (Nature Communications, revision R1)")
+ARTICLE = ("The asymmetric burden of climate change revealed by sub-national mapping "
+           "of electricity-demand sensitivity and inequity (Nature Communications, revision R1)")
 # The article grid: NEX-GDDP-CMIP6 0.25 degree, 600 x 1440, lat -59.875.., lon -179.875..
 LAT0, LON0, RES, NLAT, NLON = -59.875, -179.875, 0.25, 600, 1440
 # s03c_dataset.CONTEXT_FROM and s03a_series.TZ_ISO2 / HOLIDAY_ISO2

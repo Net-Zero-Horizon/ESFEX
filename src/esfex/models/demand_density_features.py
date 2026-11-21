@@ -1,9 +1,9 @@
 """Predictors of the demand density model, built as its training table built them.
 
-The shipped model (``demand_density_v2``, the final model of the article
-"Global map of electricity demand sensitivity to warming learned from observed
-hourly load") was trained on demand series audited onto UTC. Its 26 predictors
-are, per location and hour:
+The shipped model (``demand_density_v2``, the final model of the article "The
+asymmetric burden of climate change revealed by sub-national mapping of
+electricity-demand sensitivity and inequity") was trained on demand series
+audited onto UTC. Its 26 predictors are, per location and hour:
 
 - ``log_pop_density``, ``log_gdp_density``, ``log_gdp_per_cap``, ``latitude``,
   ``longitude``: the place;

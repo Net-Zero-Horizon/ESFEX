@@ -1,6 +1,6 @@
 # Demand Density Model
 
-The Grid Builder and the Demand Forecast workflow predict hourly demand per 0.25° cell with an XGBoost model of demand density, `log10(MW/km²)` of land. The model shipped with ESFEX (`src/esfex/assets/models/demand_density_v2.*`) is the final model of the article *Global map of electricity demand sensitivity to warming learned from observed hourly load* (Nature Communications, revision R1; specification `level_geo_two_shallow`). It was fitted by the article's pipeline and is shipped unchanged; this page describes it and how ESFEX builds its inputs. Where each shipped file comes from, and the script that produces them, is in `scripts/demand_model/README.md`.
+The Grid Builder and the Demand Forecast workflow predict hourly demand per 0.25° cell with an XGBoost model of demand density, `log10(MW/km²)` of land. The model shipped with ESFEX (`src/esfex/assets/models/demand_density_v2.*`) is the final model of the article *The asymmetric burden of climate change revealed by sub-national mapping of electricity-demand sensitivity and inequity* (Nature Communications, revision R1; specification `level_geo_two_shallow`). It was fitted by the article's pipeline and is shipped unchanged; this page describes it and how ESFEX builds its inputs. Where each shipped file comes from, and the script that produces them, is in `scripts/demand_model/README.md`.
 
 ## The model
 

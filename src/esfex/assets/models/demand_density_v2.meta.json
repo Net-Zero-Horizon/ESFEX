@@ -145,7 +145,7 @@
   }
  },
  "provenance": {
-  "article": "Global map of electricity demand sensitivity to warming learned from observed hourly load (Nature Communications, revision R1)",
+  "article": "The asymmetric burden of climate change revealed by sub-national mapping of electricity-demand sensitivity and inequity (Nature Communications, revision R1)",
   "spec": "level_geo_two_shallow",
   "fitted": "2026-11-17T17:53:40+09:00",
   "fitted_on": "GPU (device=cuda); ESFEX predicts on the CPU",
