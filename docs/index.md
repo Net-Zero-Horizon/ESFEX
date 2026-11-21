@@ -193,7 +193,22 @@ for year in results:
 
 ## Citation
 
-If you use ESFEX in academic work, please cite:
+If you use ESFEX in academic work, please cite the article:
+
+```bibtex
+@article{sotocalvo2026esfex,
+  title   = {{ESFEX}: an open-source framework for multi-model power-system
+             optimization and energy-flexibility analysis},
+  author  = {Soto Calvo, Manuel and Lee, Han Soo},
+  journal = {SoftwareX},
+  volume  = {36},
+  pages   = {103244},
+  year    = {2026},
+  doi     = {10.1016/j.softx.2026.103244}
+}
+```
+
+To cite the software of a given release, use its Zenodo record:
 
 ```bibtex
 @software{esfex2026,

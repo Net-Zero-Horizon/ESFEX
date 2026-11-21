@@ -119,6 +119,7 @@ esfex-studio = "esfex.cli:_studio_entrypoint"
 Homepage = "https://github.com/Net-Zero-Horizon/ESFEX"
 Documentation = "https://github.com/Net-Zero-Horizon/ESFEX#readme"
 Repository = "https://github.com/Net-Zero-Horizon/ESFEX"
+Paper = "https://doi.org/10.1016/j.softx.2026.103244"
 
 [tool.setuptools.packages.find]
 where = ["src"]
