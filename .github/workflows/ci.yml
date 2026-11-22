@@ -36,6 +36,50 @@ jobs:
       - run: ruff check --output-format=github --exit-zero src tests
 
   # ------------------------------------------------------------------ #
+  # Attribution — no commit or PR names an AI tool as author or        #
+  # co-author (see CLAUDE.md). Every commit reachable from HEAD is     #
+  # checked, so a rewritten or force-pushed history is checked whole.  #
+  # ------------------------------------------------------------------ #
+  attribution:
+    name: No AI attribution
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Commits name no AI tool as author or co-author
+        shell: python
+        run: |
+          import re, subprocess, sys
+          log = subprocess.run(
+              ["git", "log", "-z", "--format=%H%n%ae%n%ce%n%B", "HEAD"],
+              capture_output=True, text=True, check=True,
+          ).stdout
+          trailer = re.compile(
+              r"^co-authored-by:.*(claude|anthropic)|generated with .*claude code",
+              re.I | re.M,
+          )
+          bad = []
+          for entry in filter(str.strip, log.split("\0")):
+              sha, author, committer, body = (entry.lstrip("\n").split("\n", 3) + [""])[:4]
+              if "anthropic.com" in (author + committer).lower() or trailer.search(body):
+                  bad.append(sha)
+          if bad:
+              print("::error::These commits name an AI tool as author or co-author (see CLAUDE.md):")
+              print("\n".join(bad))
+              sys.exit(1)
+      - name: PR description has no AI footer
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if printf '%s' "$PR_BODY" | grep -qiE 'generated with.*claude|co-authored-by:.*(claude|anthropic)'; then
+            echo "::error::The PR description carries an AI attribution line (see CLAUDE.md)."
+            exit 1
+          fi
+
+  # ------------------------------------------------------------------ #
   # Test matrix — Python-side suite across 3.10–3.12.                   #
   # Julia-backed optimization tests are deselected (`-m "not julia"`):  #
   # juliacall auto-provisions its private Julia on import, so the       #
