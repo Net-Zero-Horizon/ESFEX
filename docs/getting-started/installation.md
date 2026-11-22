@@ -45,7 +45,7 @@ All runtime functionality ships as **core dependencies**; there are no feature e
 | windrex, solarex, rooftex, evrex, otex | Companion packages for wind, solar PV, rooftop solar, EV and OTEC workflows |
 | pvlib, geopandas, rasterio, atlite, duckdb, shapely, osmium, overpy, xarray, gcsfs, zarr, scikit-learn | Resource-assessment and grid-mapping workflows |
 | pypsa, pandapower, pypower, matpower | Benchmarking and AC power-flow analysis |
-| xgboost | Demand-estimation models |
+| xgboost, holidays | Demand-estimation models |
 
 The full list is in `pyproject.toml`. Because of the GIS stack and Qt WebEngine, the installation is large.
 

@@ -35,7 +35,8 @@ class QtWindAnalyzer(QThread):
 
     def run(self):
         try:
-            from windrex import TurbineSpec, WindAnalyzer, WindConfig
+            from windrex import WindAnalyzer
+            from windrex.config import TurbineSpec, WindConfig
 
             fat = self._wind_config
             if hasattr(fat, "bounds") and hasattr(fat, "mcda"):

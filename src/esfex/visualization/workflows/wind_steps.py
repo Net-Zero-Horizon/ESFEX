@@ -31,10 +31,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from windrex import (
-    TurbineSpec,
-    load_turbine_database,
-)
+# From their modules: windrex 0.1.1 (PyPI) does not re-export them at the top.
+from windrex.config import TurbineSpec
+from windrex.data.turbine_db import load_turbine_database
 
 # esfex's own fat wind config (turbine as a key string, hub_height, installation,
 # effective_workers, …) — matches what esfex's analyzer/wizard read. windrex's

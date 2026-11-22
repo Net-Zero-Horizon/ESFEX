@@ -343,7 +343,7 @@ class _AvailabilityDialogImpl:
     def _load_turbines(self):
         """Populate turbine combo from atlite database (lazy)."""
         try:
-            from windrex import load_turbine_database
+            from windrex.data.turbine_db import load_turbine_database
 
             turbines = load_turbine_database()
             self._turbine_combo.clear()
