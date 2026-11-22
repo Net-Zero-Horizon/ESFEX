@@ -2566,3 +2566,70 @@ class TestVoltagesFromTheData:
         text = res.summary()
         assert "Voltage decisions" in text and "isolated grid" in text
         assert "Isle: 2 bus(es) at 34.5 kV" in text
+
+
+class TestUntaggedBusOfSeveralVoltages:
+    """An untagged bus whose lines run at several voltages gets a bus per
+    voltage, and the substation's transformer joins them. Rebuilding Cuba
+    left Boca de Jaruco (an untagged substation with 220 and 110 kV lines)
+    and TE Nuevitas (a chain of untagged buses between a 220 and a 110 kV
+    line) with 110 kV lines on a 220 kV bus and no transformer."""
+
+    @staticmethod
+    def _state():
+        from esfex.visualization.data.gui_model import EndpointRef, GuiTransmissionLine
+        st = GuiSystemState(name="S")
+        st.nodes = [GuiNode(index=0, name="N0")]
+        st.buses = {
+            "hv": GuiBus(bus_id="hv", parent_node=0, voltage_kv=220.0,
+                         latitude=22.0, longitude=-80.0),
+            "lv": GuiBus(bus_id="lv", parent_node=0, voltage_kv=110.0,
+                         latitude=22.0, longitude=-79.5),
+            "sub": GuiBus(bus_id="sub", name="Boca", parent_node=0, voltage_kv=0.0,
+                          latitude=22.2, longitude=-79.7),
+            # Untagged chain: t1 (220 kV line) -- t2 (110 kV line)
+            "t1": GuiBus(bus_id="t1", parent_node=0, voltage_kv=0.0,
+                         latitude=22.4, longitude=-79.7),
+            "t2": GuiBus(bus_id="t2", parent_node=0, voltage_kv=0.0,
+                         latitude=22.401, longitude=-79.7),
+        }
+        st.transmission_lines = [
+            GuiTransmissionLine(line_id="a", from_bus="hv", to_bus="sub", voltage_kv=220.0,
+                                length_km=30, from_endpoint=EndpointRef("bus", "hv"),
+                                to_endpoint=EndpointRef("bus", "sub")),
+            GuiTransmissionLine(line_id="b", from_bus="sub", to_bus="lv", voltage_kv=110.0,
+                                length_km=25, from_endpoint=EndpointRef("bus", "sub"),
+                                to_endpoint=EndpointRef("bus", "lv")),
+            GuiTransmissionLine(line_id="c", from_bus="hv", to_bus="t1", voltage_kv=220.0,
+                                length_km=45),
+            GuiTransmissionLine(line_id="d", from_bus="t1", to_bus="t2", voltage_kv=0.0,
+                                length_km=0.1),
+            GuiTransmissionLine(line_id="e", from_bus="t2", to_bus="lv", voltage_kv=110.0,
+                                length_km=45),
+        ]
+        st.transformers, st.generators, st.batteries = [], {}, {}
+        return st
+
+    def test_no_line_joins_two_voltages(self):
+        st = self._state()
+        decisions: list = []
+        gmb._propagate_voltage(st, decisions=decisions)
+        buses = st.buses
+        for ln in st.transmission_lines:
+            assert buses[ln.from_bus].voltage_kv == buses[ln.to_bus].voltage_kv == ln.voltage_kv, ln.line_id
+            for end, ep in ((ln.from_bus, ln.from_endpoint), (ln.to_bus, ln.to_endpoint)):
+                assert ep is None or ep.element_id == end
+        # The 110 kV line left the untagged substation for a 110 kV bus at its place
+        b = next(ln for ln in st.transmission_lines if ln.line_id == "b")
+        assert b.from_bus != "sub" and buses[b.from_bus].voltage_kv == 110.0
+        assert (buses[b.from_bus].latitude, buses[b.from_bus].longitude) == (22.2, -79.7)
+        assert buses[b.from_bus].name == "Boca 110 kV"
+        assert sum(1 for d in decisions if d["rule"] == "split_by_line_voltage") == 2
+
+    def test_the_levels_get_their_transformer(self):
+        st = self._state()
+        gmb._propagate_voltage(st)
+        added = gmb._connect_colocated_voltage_levels(st, ParseResult(), 1.0)
+        assert added == 2
+        assert {frozenset((st.buses[t.from_bus].voltage_kv, st.buses[t.to_bus].voltage_kv))
+                for t in st.transformers} == {frozenset((220.0, 110.0))}

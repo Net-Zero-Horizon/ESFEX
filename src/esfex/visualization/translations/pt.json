@@ -3606,6 +3606,7 @@
     "voltage_rule_decimal_slip": "Nível que nenhuma linha transporta, casa decimal mal colocada corrigida",
     "voltage_rule_isolated_mv": "Sem ligação a nenhuma tensão etiquetada (rede isolada ou elemento solto), definida como MT; mantida abaixo do limiar mínimo",
     "voltage_rule_unreached_mv": "Sob uma rede etiquetada, mas nenhuma linha etiquetada lá chega; definida como MT",
+    "voltage_rule_split_by_line_voltage": "Estação sem etiqueta alcançada por linhas de várias tensões: um barramento por cada tensão adicional",
     "voltage_detail_line_consensus": "{count} linha(s) a {kv} kV terminam aqui",
     "voltage_detail_name_level": "nenhuma linha dos dados transporta este nível; o nome da estação indica {kv} kV",
     "voltage_detail_decimal_slip_role": "casa decimal mal colocada: {kv} kV é um nível normalizado presente nos dados; etiquetada substation={role}",

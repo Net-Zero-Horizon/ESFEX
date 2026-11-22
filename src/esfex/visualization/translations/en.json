@@ -3606,6 +3606,7 @@
     "voltage_rule_decimal_slip": "Level no line carries, misplaced decimal corrected",
     "voltage_rule_isolated_mv": "Not connected to any tagged voltage (isolated grid or loose element), set to MV; kept below the floor",
     "voltage_rule_unreached_mv": "Under a tagged grid but no tagged line reaches it, set to MV",
+    "voltage_rule_split_by_line_voltage": "Untagged station reached by lines of several voltages: a bus for each other voltage",
     "voltage_detail_line_consensus": "{count} line(s) at {kv} kV end here",
     "voltage_detail_name_level": "no line in the data carries this level; the station's name gives {kv} kV",
     "voltage_detail_decimal_slip_role": "misplaced decimal: {kv} kV is a standard level the data uses; tagged substation={role}",

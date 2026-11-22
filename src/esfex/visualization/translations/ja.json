@@ -3606,6 +3606,7 @@
     "voltage_rule_decimal_slip": "どの送電線にもない電圧階級、小数点の位置を修正",
     "voltage_rule_isolated_mv": "タグ付き電圧に未接続（孤立系統または単独要素）、中圧に設定; 下限電圧未満でも保持",
     "voltage_rule_unreached_mv": "タグ付き系統の配下だがタグ付き送電線が到達しない、中圧に設定",
+    "voltage_rule_split_by_line_voltage": "タグなしの変電所に複数電圧の送電線が接続：追加の電圧ごとに母線を作成",
     "voltage_detail_line_consensus": "{kv} kV の送電線 {count} 本がここで終端",
     "voltage_detail_name_level": "データ中にこの電圧階級の送電線がない; 変電所名は {kv} kV を示す",
     "voltage_detail_decimal_slip_role": "小数点の位置誤り: {kv} kV はデータ中で使われている標準電圧; タグ substation={role}",

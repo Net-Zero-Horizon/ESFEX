@@ -3606,6 +3606,7 @@
     "voltage_rule_decimal_slip": "Niveau porté par aucune ligne, décimale mal placée corrigée",
     "voltage_rule_isolated_mv": "Non relié à une tension étiquetée (réseau isolé ou élément détaché), fixé en MT ; conservé sous le seuil minimal",
     "voltage_rule_unreached_mv": "Sous un réseau étiqueté, mais aucune ligne étiquetée ne l'atteint ; fixé en MT",
+    "voltage_rule_split_by_line_voltage": "Poste sans étiquette atteint par des lignes de plusieurs tensions : un jeu de barres par tension supplémentaire",
     "voltage_detail_line_consensus": "{count} ligne(s) à {kv} kV aboutissent ici",
     "voltage_detail_name_level": "aucune ligne des données ne porte ce niveau ; le nom du poste indique {kv} kV",
     "voltage_detail_decimal_slip_role": "décimale mal placée : {kv} kV est un niveau normalisé présent dans les données ; étiqueté substation={role}",
