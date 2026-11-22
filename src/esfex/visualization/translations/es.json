@@ -1436,7 +1436,7 @@
     "log_iteration": "── Iteración {n} ──",
     "log_converged": "Convergió tras {n} iteración(es)",
     "log_max_iterations": "Se alcanzó el máximo de iteraciones ({n})",
-    "log_reduction": "Reducción a red equivalente (estilo PyPSA): {buses} barras → malla de {nodes} nodos con {branches} rama(s) equivalente(s); generación + demanda agrupadas por nodo.",
+    "log_reduction": "Reducción a red equivalente (estilo PyPSA): {buses} barras → {reduced} barras (una por nodo y nivel de tensión, {nodes} nodos) con {branches} rama(s) equivalente(s) y {transformers} transformador(es).",
     "log_reduction_failed": "La reducción a red equivalente falló: {error}",
     "log_rebuilt_wires": "Se reconstruyeron {n} línea(s) visual(es) de conexión",
     "log_final_ok": "Validación final: OK",

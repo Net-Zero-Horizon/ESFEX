@@ -374,8 +374,9 @@ def build_elk_graph(
         tg = bus_to_group.get(tb)
         if not sg or not tg:
             continue
-        if group_meta[sg]["parent_node"] != group_meta[tg]["parent_node"]:
-            continue
+        # A transformer whose ends sit in two nodes is drawn too (a link
+        # between their blocks): leaving it out cut the network in the
+        # diagram wherever a node boundary crosses a substation.
         _add_edge(sg, tg, "transformer", 0.0, xf.rated_power_mva or 0, i)
     for i, conv in enumerate(state.acdc_converters):
         if (conv.from_bus not in valid_bus_ids

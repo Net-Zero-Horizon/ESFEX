@@ -22,6 +22,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   capacity alone (Cuba: 1,200 MW instead of 4,200 MW), so the master planned
   with a weaker network than the dispatch runs. This affects every case whose
   node boundaries cross a transformer, at any simplification level.
+- **The single-line diagram draws the transformers between nodes.** It left
+  out every transformer whose two ends sit in different nodes, which cut
+  the drawn network wherever a node boundary crosses a substation (the
+  reduced Cuba case lost 10 of its 38 transformers). They are drawn as
+  links between the two blocks.
+
+### Changed
+
+- **Simplification level 2 keeps the voltage levels.** The node-mesh
+  reduction collapsed each node to one bus and dropped every transformer:
+  220 and 110 kV lines met on the same bus, and the single-line diagram of a
+  reduced case showed no transformer. Each node now keeps one bus per
+  voltage level that carries lines, joined by its own transformers
+  (combined in parallel per level pair). A bus at a level without lines,
+  such as a generator terminal, joins the nearest kept level; a level the
+  data does not connect to the rest joins the node's highest one, and no
+  transformer is invented. The single-line diagram draws each node as one
+  substation with its voltage levels and transformers. On the Cuba case (10 nodes) the dispatch network
+  grows from 10 to 35 buses and 40 transformers. The dispatch takes about
+  20 % longer and sees the congestion and losses inside the nodes. The
+  master is unchanged.
 
 ## [0.4.0] — 2026-11-20
 

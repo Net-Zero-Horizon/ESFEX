@@ -1436,7 +1436,7 @@
     "log_iteration": "── Iteration {n} ──",
     "log_converged": "Converged after {n} iteration(s)",
     "log_max_iterations": "Reached max iterations ({n})",
-    "log_reduction": "Equivalent-network reduction (PyPSA-style): {buses} buses → {nodes}-node mesh with {branches} equivalent branch(es); generation + demand co-located per node.",
+    "log_reduction": "Equivalent-network reduction (PyPSA-style): {buses} buses → {reduced} buses (one per node and voltage level, {nodes} nodes) with {branches} equivalent branch(es) and {transformers} transformer(s).",
     "log_reduction_failed": "Equivalent-network reduction failed: {error}",
     "log_rebuilt_wires": "Rebuilt {n} visual wire-line(s)",
     "log_final_ok": "Final validation: OK",

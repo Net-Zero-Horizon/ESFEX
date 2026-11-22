@@ -1436,7 +1436,7 @@
     "log_iteration": "── 反復 {n} ──",
     "log_converged": "{n} 回の反復で収束しました",
     "log_max_iterations": "最大反復回数 ({n}) に達しました",
-    "log_reduction": "等価ネットワーク縮約 (PyPSA 方式): 母線 {buses} 個 → {nodes} ノードのメッシュ (等価ブランチ {branches} 本)。発電と需要はノードごとに集約。",
+    "log_reduction": "等価ネットワーク縮約 (PyPSA 方式): 母線 {buses} 個 → 母線 {reduced} 個 (ノード・電圧階級ごとに 1 個、{nodes} ノード)、等価ブランチ {branches} 本、変圧器 {transformers} 台。",
     "log_reduction_failed": "等価ネットワーク縮約に失敗しました: {error}",
     "log_rebuilt_wires": "表示用の結線 {n} 本を再構築しました",
     "log_final_ok": "最終検証: OK",
