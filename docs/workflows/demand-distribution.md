@@ -121,6 +121,8 @@ The results table lists **Node**, **Bus**, **Buildings** (building count for the
 - writes each node's forecast hourly series (all forecast years) to `demand_<node>.csv` under `<config_dir>/demand/` (or `./demand/` when no configuration file is loaded) and attaches it to the node, so it is exported as the system's demand path. The forecast is in each node's local civil time; the files are converted to the [model clock](../user-guide/configuration.md#model-clock), from each node's own time zone with its daylight saving time. When the clock is still `auto`, it becomes the standard time of the zone with the most forecast demand and is recorded in the project's global settings; the chart under **View Demand…** shows the forecast in local time;
 - sets each bus's `demand_fraction`. A bus with role `connection` that receives a non-zero share is promoted to `load`; a `connection` bus with a zero share is left unchanged.
 
+Writing the files takes a while on a large case (about 45 s for 136 nodes and 25 forecast years). It runs in the background: the bar beside the button shows the nodes written, and the window stays responsive. Back and Close wait until it ends; Cancel stops it, and nothing is applied. Earlier versions wrote the files on the interface thread, which froze the window with no progress shown.
+
 **Tips:**
 
 - Prefer spatial demand. It uses the forecast's own spatial detail and respects substation capacities.

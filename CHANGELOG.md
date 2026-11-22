@@ -1795,6 +1795,34 @@ Per-release notes are also published on the
   between buses of different voltages, drawn red and dashed, have their
   own legend row.
 
+- **The Grid Builder gives a transformer to every voltage a station's lines
+  run at.** A line end snaps to a bus of its own voltage or to an untagged
+  one, so an untagged substation collected its 220 and 110 kV lines on one
+  bus (Boca de Jaruco, Cuba), and a chain of untagged buses between a 220 kV
+  and a 110 kV line ended on a bus with both (TE Nuevitas). The bus took
+  the highest voltage and the other lines joined two voltages with no
+  transformer. Each other voltage now gets a bus at the same place and the
+  substation's transformer; the build report lists them.
+
+- **The level-2 reduction draws no line between two voltages.** A voltage
+  that only lines between buses of different voltages reach (a mistagged
+  bus, a generator terminal wired to its bus by a line) no longer makes a
+  level, and a level the data leaves unconnected joins the main level of
+  the nearest voltage, the main levels being those on the largest
+  connected network. A stray 500 kV fragment of a few buses had absorbed a
+  node's whole 275–77 kV network (Chubu, Japan).
+
+- **The Grid Builder's Min voltage takes decimals.** It was a whole-number
+  field, so a floor at a standard level such as 13.8 or 34.5 kV could not
+  be entered.
+
+- **Apply Demand & Fractions runs in the background.** Writing every
+  node's multi-year demand (about 45 s for 136 nodes and 25 years) ran on
+  the interface thread: the Grid Builder froze, with no sign of progress,
+  while the bar followed only the quick distribution. It runs on a worker
+  thread with its own progress bar; Back and Close wait for it and Cancel
+  stops it. Its result message is translated.
+
 - **A year of dispatch with primary energy no longer runs out of memory.**
   Each rolling-horizon window added the primary-energy cost to the
   objective with code run at the top level of Julia's `Main`, where the

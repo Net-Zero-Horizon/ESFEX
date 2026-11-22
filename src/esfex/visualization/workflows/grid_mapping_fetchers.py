@@ -1312,7 +1312,7 @@ class OSMGridFetcher(QThread):
             )
 
         self.progress.emit(90, tr("grid_builder.progress_filtering_voltage",
-                                  kv=self.min_voltage_kv))
+                                  kv=f"{self.min_voltage_kv:g}"))
         features = self._apply_filters(features)
 
         # Best-effort fuel-routing roads: a SEPARATE, bounded pass that runs
