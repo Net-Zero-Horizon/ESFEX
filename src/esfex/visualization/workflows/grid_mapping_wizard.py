@@ -153,6 +153,7 @@ class GridMappingWizard(QDialog):
         # Connect step signals
         self._step_source_fetch.fetchFinished.connect(self._on_fetch_finished)
         self._step_build.buildFinished.connect(self._on_build_finished)
+        self._step_demand.busyChanged.connect(self._on_demand_busy)
 
     # ------------------------------------------------------------------
     # Navigation
@@ -244,6 +245,12 @@ class GridMappingWizard(QDialog):
     def _on_build_finished(self):
         """Update button after network is built."""
         self._btn_next.setEnabled(True)
+
+    def _on_demand_busy(self, busy: bool):
+        """Hold Back and Close while the demand step applies its demand
+        (Cancel stays: it stops the apply)."""
+        self._btn_back.setEnabled(not busy and self._current_step > 0)
+        self._btn_next.setEnabled(not busy)
 
     # ------------------------------------------------------------------
     # Cleanup

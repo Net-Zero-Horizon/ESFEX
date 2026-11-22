@@ -3794,6 +3794,22 @@ def write_forecast_demand_csvs(nodes, result, out_dir: Path,
                                start_year: Optional[int] = None) -> int:
     """Persist a demand forecast onto the model's nodes.
 
+    :func:`forecast_node_demands` followed by storing each node's
+    :class:`GuiNodeDemand`; see there. Returns the number of nodes that
+    received demand.
+    """
+    demands = forecast_node_demands(nodes, result, out_dir, model_clock,
+                                    start_year)
+    for i, demand in demands:
+        nodes[i].demand = demand
+    return len(demands)
+
+
+def forecast_node_demands(nodes, result, out_dir: Path, model_clock=None,
+                          start_year: Optional[int] = None, progress=None,
+                          cancelled=None) -> list:
+    """Each node's demand of a forecast, written to CSV; the nodes untouched.
+
     Writes each node's hourly series (the full multi-year forecast when
     available, otherwise the single representative year — the same choice the
     standalone demand wizard's export makes) to ``out_dir/demand_<node>.csv``
@@ -3809,6 +3825,11 @@ def write_forecast_demand_csvs(nodes, result, out_dir: Path,
     from its own time zone (from its centroid, DST-aware) onto that clock;
     *start_year* (default: the forecast's base year) is the calendar year of
     the first 8760 h.
+
+    Returns ``[(node index, GuiNodeDemand)]``. It touches no model state, so
+    it can run off the GUI thread: *progress* ``(done, total)`` is called
+    after each node, and a true *cancelled* ``()`` stops it, returning what
+    was done so far.
     """
     import re
 
@@ -3818,7 +3839,7 @@ def write_forecast_demand_csvs(nodes, result, out_dir: Path,
     if series is None:
         series = getattr(result, "demand", None)
     if series is None:
-        return 0
+        return []
 
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -3830,10 +3851,11 @@ def write_forecast_demand_csvs(nodes, result, out_dir: Path,
                                           start_year)
     peak_list = list(getattr(result, "peak_mw", []) or [])
     ncols = series.shape[1] if series.ndim > 1 else 1
+    total = min(ncols, len(nodes))
     used: set[str] = set()
-    applied = 0
+    out: list = []
     for i, node in enumerate(nodes):
-        if i >= ncols:
+        if i >= ncols or (cancelled is not None and cancelled()):
             break
         col = series[:, i] if series.ndim > 1 else series
         safe = re.sub(
@@ -3851,16 +3873,17 @@ def write_forecast_demand_csvs(nodes, result, out_dir: Path,
             csv_path = str(path)
         except Exception:
             pass  # keep the series in memory even if the write fails
-        node.demand = GuiNodeDemand(
+        out.append((i, GuiNodeDemand(
             csv_path=csv_path,
             data=data_list,
             num_hours=len(data_list),
             peak_mw=(peak_list[i] if i < len(peak_list)
                      else float(max(data_list, default=0.0))),
             total_mwh=float(sum(data_list)),
-        )
-        applied += 1
-    return applied
+        )))
+        if progress is not None:
+            progress(len(out), total)
+    return out
 
 
 def _forecast_on_model_clock(series, nodes, clock, result, start_year):
@@ -3905,11 +3928,14 @@ class GridMappingDemandStep(QWidget):
     # touch Qt widgets directly; they emit their UI updates through this signal,
     # which Qt delivers as a queued call on the main thread.
     _ui_call = Signal(object)
+    # True while Apply Demand Fractions runs (the wizard holds its navigation).
+    busyChanged = Signal(bool)
 
     def __init__(self, model=None, all_states=None, map_widget=None,
                  parent=None):
         super().__init__(parent)
         self._ui_call.connect(self._on_ui_call)
+        self._apply_cancel = None   # threading.Event of a running apply
         self._model = model
         self._all_states = all_states or {}
         self._map_widget = map_widget
@@ -4268,7 +4294,12 @@ class GridMappingDemandStep(QWidget):
         self._btn_apply.setEnabled(False)
         self._btn_apply.clicked.connect(self._apply_all)
         apply_row.addWidget(self._btn_apply)
-        apply_row.addStretch()
+        # Writing every node's multi-year demand takes a while (~45 s for
+        # 136 nodes x 25 years): its own bar, beside its own button.
+        self._apply_progress = QProgressBar()
+        self._apply_progress.setRange(0, 100)
+        self._apply_progress.setValue(0)
+        apply_row.addWidget(self._apply_progress, 1)
         dg.addLayout(apply_row)
 
         self._lbl_apply_status = QLabel("")
@@ -5488,19 +5519,24 @@ class GridMappingDemandStep(QWidget):
                single=n_single, cells=len(res.cell_lats)))
 
     def _apply_all(self):
-        """Apply forecast demand to nodes + bus fractions to model."""
-        if not self._model:
-            return
+        """Apply forecast demand to nodes + bus fractions to model.
 
-        state = self._model.state
-        applied_fracs = 0
-        applied_demand = 0
+        Writing each node's hourly series to CSV is the slow part (~45 s for
+        136 nodes x 25 years): it runs on a worker thread with its progress on
+        the bar beside the button, and the GUI stays responsive. The model is
+        changed on the GUI thread only, once the files are written. It ran
+        entirely on the GUI thread, which froze the wizard with no sign of
+        progress.
+        """
+        if not self._model or self._apply_cancel is not None:
+            return
+        import threading
 
         # Apply forecast demand to nodes (if forecast was run). Each node's
         # hourly series is written to a CSV and a full GuiNodeDemand is stored
         # (csv_path + data + stats), so the serializer emits ``demand_paths``
-        # and the runner finds the files. (Previously only the summary stats
-        # were stashed on a SimpleNamespace, leaving demand_paths empty.)
+        # and the runner finds the files.
+        job = None
         if self._forecast_result is not None:
             # Output dir: alongside the loaded YAML if known (same convention as
             # availability profiles), else the working directory.
@@ -5516,8 +5552,79 @@ class GridMappingDemandStep(QWidget):
                 g.model_clock, nodes,
                 weights=list(getattr(self._forecast_result, "annual_gwh", []) or []))
             g.model_clock = clock.zone
-            applied_demand += write_forecast_demand_csvs(
-                nodes, self._forecast_result, out_dir, model_clock=clock)
+            job = (nodes, self._forecast_result, out_dir, clock)
+
+        cancel = threading.Event()
+        self._apply_cancel = cancel
+        self._set_applying(True)
+        if job is None:
+            self._finish_apply(None, [], cancel)
+            return
+
+        nodes, result, out_dir, clock = job
+
+        def _progress(done, total):
+            self._ui_call.emit(lambda d=done, t=total: (
+                self._apply_progress.setValue(int(95 * d / max(t, 1))),
+                self._lbl_apply_status.setText(
+                    tr("grid_builder.apply_progress_demand", done=d, total=t)),
+            ))
+
+        def _do_apply():
+            try:
+                demands = forecast_node_demands(
+                    nodes, result, out_dir, model_clock=clock,
+                    progress=_progress, cancelled=cancel.is_set)
+            except Exception as exc:
+                logger.exception("Applying the demand forecast failed")
+                self._ui_call.emit(lambda e=exc: self._fail_apply(e, cancel))
+                return
+            self._ui_call.emit(
+                lambda: self._finish_apply(nodes, demands, cancel))
+
+        threading.Thread(target=_do_apply, daemon=True).start()
+
+    def _set_applying(self, busy: bool):
+        """Hold the step's actions (and, via busyChanged, the wizard's
+        navigation) while an apply runs."""
+        btns = [b for b in (self._btn_apply, self._btn_fetch_bld,
+                            getattr(self, "_btn_fetch_forecast", None))
+                if b is not None]
+        if busy:
+            # Restored as they were: a button that was off stays off.
+            self._apply_held = [(b, b.isEnabled()) for b in btns]
+            for b in btns:
+                b.setEnabled(False)
+        else:
+            for b, was in getattr(self, "_apply_held", []):
+                b.setEnabled(was)
+            self._apply_held = []
+        if busy:
+            self._apply_progress.setValue(0)
+            self._lbl_apply_status.setStyleSheet("padding: 4px;")
+            self._lbl_apply_status.setText(
+                tr("grid_builder.apply_progress_start"))
+        self.busyChanged.emit(busy)
+
+    def _fail_apply(self, exc, cancel):
+        if cancel is not self._apply_cancel:
+            return
+        self._apply_cancel = None
+        self._set_applying(False)
+        self._apply_progress.setValue(0)
+        self._lbl_apply_status.setText(tr("grid_builder.apply_error", error=exc))
+        self._lbl_apply_status.setStyleSheet(
+            "color: #c0392b; font-weight: bold; padding: 4px;")
+
+    def _finish_apply(self, nodes, demands, cancel):
+        """Store the written demand and the bus fractions (GUI thread)."""
+        if cancel is not self._apply_cancel or cancel.is_set():
+            return
+        self._apply_cancel = None
+        state = self._model.state
+        for i, demand in demands:
+            nodes[i].demand = demand
+        applied_demand = len(demands)
 
         # Apply bus fractions, in one batch (one undo step, no per-bus redraw).
         skipped_connection = 0
@@ -5539,7 +5646,8 @@ class GridMappingDemandStep(QWidget):
                     skipped_connection += 1
                     continue
             fractions[bus_id] = new_frac
-        applied_fracs = self._model.set_demand_fractions(fractions, roles)
+        applied_fracs = (self._model.set_demand_fractions(fractions, roles)
+                         if fractions else 0)
         if skipped_connection:
             # Expected, not an error: HV connection busbars (grid junctions) get
             # a zero demand share, so they stay demand-free. Node demand is fully
@@ -5550,16 +5658,19 @@ class GridMappingDemandStep(QWidget):
                 skipped_connection,
             )
 
+        self._set_applying(False)
         self._btn_apply.setEnabled(False)
-        parts = []
-        if applied_demand > 0:
-            parts.append(f"demand to {applied_demand} node(s)")
-        if applied_fracs > 0:
-            parts.append(f"fractions to {applied_fracs} bus(es)")
-        self._lbl_apply_status.setText(
-            f"Applied {' and '.join(parts)}."
-            if parts else "Nothing to apply."
-        )
+        self._apply_progress.setValue(100)
+        if applied_demand and applied_fracs:
+            text = tr("grid_builder.apply_done_both", nodes=applied_demand,
+                      buses=applied_fracs)
+        elif applied_demand:
+            text = tr("grid_builder.apply_done_demand", nodes=applied_demand)
+        elif applied_fracs:
+            text = tr("grid_builder.apply_done_fractions", buses=applied_fracs)
+        else:
+            text = tr("grid_builder.apply_nothing")
+        self._lbl_apply_status.setText(text)
         self._lbl_apply_status.setStyleSheet(
             "color: #27ae60; font-weight: bold; padding: 4px;"
         )
@@ -5585,3 +5696,8 @@ class GridMappingDemandStep(QWidget):
         from esfex.visualization.workflows._wizard_utils import stop_thread
         stop_thread(getattr(self, "_fetcher", None))
         stop_thread(getattr(self, "_classify_worker", None))
+        # An apply in progress stops after its current node; nothing of it is
+        # stored on the model.
+        if getattr(self, "_apply_cancel", None) is not None:
+            self._apply_cancel.set()
+            self._apply_cancel = None
