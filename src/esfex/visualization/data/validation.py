@@ -5271,15 +5271,16 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
             out.append([B[bid] for bid in comp])
         return out
 
-    # Voltage levels a reduced bus keeps: those that carry lines.
+    # Voltage levels a reduced bus keeps: those that carry lines, i.e. lines
+    # whose two buses are at that voltage.
     line_kv: set = set()
     for ln in state.transmission_lines:
         if getattr(ln, "decorative", False):
             continue
-        for bid in (ln.from_bus, ln.to_bus):
-            b = B.get(bid)
-            if b is not None and (b.voltage_kv or 0) > 0:
-                line_kv.add(float(b.voltage_kv))
+        a, b = B.get(ln.from_bus), B.get(ln.to_bus)
+        if (a is not None and b is not None and (a.voltage_kv or 0) > 0
+                and float(a.voltage_kv) == float(b.voltage_kv or 0)):
+            line_kv.add(float(a.voltage_kv))
 
     def _kept(b) -> Optional[float]:
         v = float(b.voltage_kv or 0.0)
@@ -5331,9 +5332,9 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
             island_levels.append((i, max(set(freqs), key=freqs.count),
                                   _levels(island)))
 
-    # A level joins the island's highest one when the data does not connect
-    # it to that level, inside the node or through the rest of the network
-    # (OSM often lacks the transformer): kept apart it would be an island of
+    # A level the data does not connect to the node's main levels, inside the
+    # node or through the rest of the network (OSM often lacks the
+    # transformer), joins one of them: kept apart it would be an island of
     # its own. The data's branches decide; no transformer is invented.
     lvl_of: dict[str, tuple[int, int]] = {}
     for a, (_, _, levels) in enumerate(island_levels):
@@ -5362,13 +5363,23 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
     grp_v: list[float] = []
     # Frequency of the island (the levels of one island share it).
     grp_freq: list[float] = []
+    # Buses reached by each connected set of levels, network-wide.
+    reach: dict = defaultdict(int)
+    for key in lvl_of.values():
+        reach[_find(key)] += 1
     for a, (i, freq, levels) in enumerate(island_levels):
-        top = _find((a, 0))
+        # The node's levels on the largest connected network anchor it (the
+        # highest on a tie); a level off that network joins the anchored level
+        # of the nearest voltage. Anchoring on the highest level instead
+        # merged a whole node into a stray 500 kV fragment of a few buses.
+        anchor = max((_find((a, k)) for k in range(len(levels))),
+                     key=lambda r: reach[r])
         kept = [(v, list(m)) for k, (v, m) in enumerate(levels)
-                if k == 0 or _find((a, k)) == top]
-        for k, (_, m) in enumerate(levels):
-            if k and _find((a, k)) != top:
-                kept[0][1].extend(m)
+                if _find((a, k)) == anchor]
+        for k, (v, m) in enumerate(levels):
+            if _find((a, k)) != anchor:
+                nearest = min(kept, key=lambda km: (abs(km[0] - v), -km[0]))
+                nearest[1].extend(m)
         for v, members in kept:
             g = len(group_members)
             group_members.append(members)

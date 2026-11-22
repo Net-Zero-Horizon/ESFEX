@@ -199,3 +199,42 @@ def test_a_node_is_drawn_as_one_substation():
     assert lv.length_km == pytest.approx(_haversine_km(21.1, -80.0, 21.8, -80.0))
     groups = build_elk_graph(st)["nodeGroups"]
     assert sorted(len(g["busIds"]) for g in groups) == [2, 2]
+
+
+def test_a_voltage_only_mismatched_lines_reach_is_not_a_level():
+    """A generator terminal wired to its 34.5 kV bus by a "line", and a bus
+    tagged 138 kV whose only line is a 110 kV line (an OSM tag error): no
+    line runs between two buses of that voltage, so it is not a level. The
+    bus joins the level it is wired to, and the reduced network has no line
+    between buses of different voltages."""
+    buses = [_bus("a34", 0, 34.5, df=1.0), _bus("gen", 0, 3.3),
+             _bus("a110", 0, 110.0), _bus("x138", 0, 138.0),
+             _bus("b110", 1, 110.0, df=1.0, lat=21.5), _bus("b34", 1, 34.5, lat=21.5)]
+    st = _state(buses,
+                [_line("gsu", "gen", "a34", 3.3), _line("tag", "a110", "x138", 110.0),
+                 _line("lv", "a110", "b110", 110.0), _line("mv", "a34", "b34", 34.5)],
+                [_tr("T", "a110", "a34", 100.0)])
+    validation.reduce_to_node_mesh(st)
+    assert {b.voltage_kv for b in st.buses.values() if b.parent_node == 0} == {110.0, 34.5}
+    assert all(st.buses[ln.from_bus].voltage_kv == st.buses[ln.to_bus].voltage_kv
+               for ln in _lines(st).values())
+
+
+def test_a_stray_fragment_does_not_anchor_the_node():
+    """Node T holds the main network's 275 and 77 kV levels and a 500 kV
+    fragment of two buses that no transformer reaches. The fragment joins the
+    nearest anchored level (275 kV); the node was merged into its highest
+    level, the fragment, and every 275 kV line left became a 500/275 one."""
+    buses = [_bus("t500", 0, 500.0), _bus("u500", 0, 500.0),
+             _bus("t275", 0, 275.0), _bus("t77", 0, 77.0, df=1.0),
+             _bus("x275", 1, 275.0, df=1.0, lat=21.5), _bus("y275", 1, 275.0, lat=21.5),
+             _bus("x77", 1, 77.0, lat=21.5)]
+    st = _state(buses,
+                [_line("frag", "t500", "u500", 500.0), _line("hv", "t275", "x275", 275.0),
+                 _line("hv2", "t275", "y275", 275.0), _line("x", "x275", "y275", 275.0),
+                 _line("mv", "t77", "x77", 77.0)],
+                [_tr("T", "t275", "t77", 200.0), _tr("X", "x275", "x77", 200.0)])
+    validation.reduce_to_node_mesh(st)
+    assert sorted(b.voltage_kv for b in st.buses.values() if b.parent_node == 0) == [77.0, 275.0]
+    assert all(st.buses[ln.from_bus].voltage_kv == st.buses[ln.to_bus].voltage_kv
+               for ln in _lines(st).values())

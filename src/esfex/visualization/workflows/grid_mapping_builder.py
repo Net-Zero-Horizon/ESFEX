@@ -429,7 +429,7 @@ def _enforce_min_voltage(state, min_voltage_kv: float, result,
     if not hv:
         result.warnings.append(_tr(
             "grid_builder.report_min_voltage_no_bus",
-            kv=f"{min_voltage_kv:.0f}"))
+            kv=f"{min_voltage_kv:g}"))
         return {}
 
     def _nearest_hv(lat, lng):
@@ -739,7 +739,7 @@ def build_grid_from_features(
         if mv.get("buses_removed"):
             result.warnings.append(_tr(
                 "grid_builder.report_voltage_floor_collapsed",
-                kv=f"{min_voltage_kv:.0f}", buses=mv["buses_removed"],
+                kv=f"{min_voltage_kv:g}", buses=mv["buses_removed"],
                 generators=mv["generators_moved"],
                 batteries=mv["batteries_moved"], lines=mv["lines_removed"],
                 transformers=mv["transformers_removed"]))
@@ -1222,6 +1222,7 @@ def _propagate_voltage(state, mv_level_kv: float = 0.0,
     # Fixed-point relaxation: an untagged bus takes the highest voltage among
     # the elements it touches (line's own voltage, else the neighbour bus).
     changed = 0
+    inferred: set = set()
     for _ in range(len(buses) + 1):
         progressed = False
         for bid, b in buses.items():
@@ -1236,6 +1237,7 @@ def _propagate_voltage(state, mv_level_kv: float = 0.0,
                     nv.append(v)
             if nv:
                 b.voltage_kv = max(nv)
+                inferred.add(bid)
                 _note(bid, b.voltage_kv, "inferred_from_lines")
                 changed += 1
                 progressed = True
@@ -1298,6 +1300,8 @@ def _propagate_voltage(state, mv_level_kv: float = 0.0,
                 system_base_mva(state))
         changed += 1
 
+    changed += _split_buses_by_line_voltage(state, inc, inferred, _note)
+
     # Transformer and converter ratings follow the buses they now sit on.
     for tr in state.transformers:
         for side, attr in (("from_bus", "from_voltage_kv"),
@@ -1313,6 +1317,57 @@ def _propagate_voltage(state, mv_level_kv: float = 0.0,
             cv.dc_voltage_kv = (dc.voltage_kv if dc is not None
                                 else cv.from_voltage_kv)
     return changed
+
+
+def _split_buses_by_line_voltage(state, inc, inferred, note) -> int:
+    """Give each voltage of the lines on an untagged bus a bus of its own.
+
+    A line endpoint snaps to a bus of its own voltage or to one OSM left
+    untagged, so an untagged substation (Boca de Jaruco) collects its 220 kV
+    and its 110 kV lines on one bus, and a chain of untagged buses between a
+    220 and a 110 kV line (TE Nuevitas) ends with a bus whose lines run at
+    two voltages. The bus took the highest one, which left the other lines
+    joining two voltages with no transformer. Each other voltage now gets a
+    bus at the same place, in the same node, and its lines move onto it;
+    _connect_colocated_voltage_levels then adds the substation's transformer
+    between the levels. Returns the number of buses added.
+    """
+    import dataclasses
+
+    from esfex.visualization.data.gui_model import EndpointRef
+
+    buses = state.buses
+    added = 0
+    for bid in sorted(inferred):
+        b = buses.get(bid)
+        if b is None:
+            continue
+        by_v: dict[float, list] = {}
+        for ln in inc.get(bid, ()):
+            v = float(ln.voltage_kv or 0)
+            if v > 0 and v != float(b.voltage_kv or 0):
+                by_v.setdefault(v, []).append(ln)
+        for v, lines in sorted(by_v.items(), reverse=True):
+            nid = f"bus_{state._next_bus_id}"
+            while nid in buses:
+                state._next_bus_id += 1
+                nid = f"bus_{state._next_bus_id}"
+            state._next_bus_id += 1
+            buses[nid] = dataclasses.replace(
+                b, bus_id=nid, name=f"{b.name} {v:g} kV" if b.name else nid,
+                voltage_kv=v, role="connection", demand_fraction=0.0,
+                style=dataclasses.replace(b.style))
+            for ln in lines:
+                for end, ep in (("from_bus", "from_endpoint"), ("to_bus", "to_endpoint")):
+                    if getattr(ln, end) == bid:
+                        setattr(ln, end, nid)
+                        ref = getattr(ln, ep, None)
+                        if ref is not None and ref.element_type == "bus" \
+                                and ref.element_id == bid:
+                            setattr(ln, ep, EndpointRef("bus", nid))
+            note(nid, v, "split_by_line_voltage", b.name or bid)
+            added += 1
+    return added
 
 
 # ── Phase 1: Substation → Buses ──────────────────────────────────────
