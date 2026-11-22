@@ -136,6 +136,9 @@ esfex = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The repository root, so tests can import shared helpers as ``tests.<module>``
+# under a bare ``pytest`` as well as ``python -m pytest``.
+pythonpath = ["."]
 python_files = ["test_*.py"]
 addopts = "-v --tb=short"
 markers = [
