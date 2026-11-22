@@ -209,13 +209,16 @@ class GridMappingSourceFetchStep(QWidget):
         filter_form = QFormLayout(filter_widget)
         filter_form.setContentsMargins(0, 0, 0, 0)
 
-        self._spin_min_voltage = QSpinBox()
-        self._spin_min_voltage.setRange(10, 750)
+        # Decimal: standard levels such as 13.8 and 34.5 kV are not whole
+        # numbers, so a whole-kV field could not sit just at or above them.
+        self._spin_min_voltage = QDoubleSpinBox()
+        self._spin_min_voltage.setRange(10.0, 750.0)
+        self._spin_min_voltage.setDecimals(1)
         # 66 kV keeps the subtransmission that holds regional grids together.
         # Higher levels drop it: e.g. Japan's Hokkaido cohesion lives at 66 kV,
         # so a >100 kV filter shatters it into disconnected islands. Users who
         # deliberately raise this accept that reduced connectivity.
-        self._spin_min_voltage.setValue(66)
+        self._spin_min_voltage.setValue(66.0)
         self._spin_min_voltage.setSuffix(" kV")
         self._spin_min_voltage.setToolTip(
             tr("grid_builder.minimum_voltage_for_substations_and_lines")
@@ -400,7 +403,7 @@ class GridMappingSourceFetchStep(QWidget):
         """
         self._min_cap_user_edited = True
 
-    def _on_min_voltage_changed(self, kv: int):
+    def _on_min_voltage_changed(self, kv: float):
         """Track the capacity floor to the voltage floor unless pinned."""
         if self._min_cap_user_edited:
             return

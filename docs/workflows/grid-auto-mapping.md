@@ -43,7 +43,7 @@ All four sources are enabled by default. Combining them (OSM topology, plant dat
 
 | Parameter | Range | Default | Description |
 |-----------|-------|---------|-------------|
-| Min voltage | 10 -- 750 kV | 66 kV | Substations and lines with a known voltage below this value are excluded at fetch time, as are substations tagged `substation=distribution` without a voltage when the floor is above 60 kV. After the build, buses that ended up below the floor are collapsed into the nearest bus at or above it (see [Build pipeline](#build-pipeline)). The 66 kV default keeps the sub-transmission layer that holds regional grids together; a higher floor can split a regional grid into disconnected islands. |
+| Min voltage | 10 -- 750 kV, in steps of 0.1 kV | 66 kV | Substations and lines with a known voltage below this value are excluded at fetch time, as are substations tagged `substation=distribution` without a voltage when the floor is above 60 kV. After the build, buses that ended up below the floor are collapsed into the nearest bus at or above it (see [Build pipeline](#build-pipeline)). The 66 kV default keeps the sub-transmission layer that holds regional grids together; a higher floor can split a regional grid into disconnected islands. |
 | Min gen capacity | 0 -- 10,000 MW | 0.3 MW per kV of Min voltage (20 MW at 66 kV) | Generator capacity floor. The default follows Min voltage (0.3 MW/kV, rounded) until you edit the value by hand, which pins it. When the value is above 0, the build drops every generator below it, **including generators with unknown capacity** (0 MW in the source). Set it to 0 to include every generator. |
 
 **Element types to import:**
