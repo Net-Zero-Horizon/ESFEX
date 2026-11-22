@@ -5179,9 +5179,13 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
     original's power transfer. A proper reduction computes those equivalents.
 
     Each node (the Grid Builder cluster carried by ``bus.parent_node``) becomes
-    a single bus carrying that node's aggregated generation and demand. Nodes
-    are wired to their neighbours by ONE equivalent branch per node-pair,
-    combining every original cross-boundary line/transformer in parallel:
+    one bus per voltage level that carries lines, joined by the node's own
+    transformers (combined in parallel per level pair, HV to LV). A bus at a
+    level without lines (a generator terminal, an unknown voltage) joins the
+    nearest kept level, and a level the data does not connect to the rest
+    joins the node's highest one: no transformer is invented. The reduced
+    buses are wired by ONE equivalent branch per bus pair, combining every
+    original line (and same-level transformer) between them in parallel:
     thermal capacity summed, ``1/x_eq = Σ 1/x_i``, the loss-equivalent
     ``r_eq = x_eq² Σ r_i/x_i²`` and ``b_eq = Σ b_i``, over the same branches
     (a line without R or X gets them from its length and voltage, see
@@ -5191,12 +5195,12 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
     result is a genuine mesh (not a hub-and-spoke star) and preserves the
     network's transfer capability by construction.
 
-    Mutates ``state`` in place; returns the node-bus count.
+    Mutates ``state`` in place; returns the reduced-bus count.
     """
     from collections import defaultdict
 
     from esfex.visualization.data.gui_model import (
-        EndpointRef, GeoPoint, GuiBus, GuiTransmissionLine,
+        EndpointRef, GeoPoint, GuiBus, GuiTransformer, GuiTransmissionLine,
     )
 
     B = state.buses
@@ -5238,32 +5242,21 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
         and node_of[c.from_bus] == node_of[c.to_bus]
     }
 
-    group_of: dict[str, int] = {}      # bus_id -> reduced-bus index
-    group_members: list[list] = []     # reduced-bus index -> [GuiBus]
-    group_node: list[int] = []         # reduced-bus index -> parent node
-    for i in range(NN):
-        nb = buses_of_node.get(i, [])
-        if not nb:
+    # AC adjacency inside each node (lines and transformers; converters are
+    # deliberately not edges, they are the separators being preserved).
+    adj_in: dict[str, set] = {bid: set() for bid in B}
+    for br in list(state.transmission_lines) + list(state.transformers):
+        if getattr(br, "decorative", False):
             continue
-        if i not in split_nodes:
-            g = len(group_members)
-            group_members.append(list(nb))
-            group_node.append(i)
-            for b in nb:
-                group_of[b.bus_id] = g
-            continue
-        # AC adjacency *inside* this node. Converters are deliberately not
-        # edges here — they are the separators being preserved.
+        u, v = getattr(br, "from_bus", None), getattr(br, "to_bus", None)
+        if u in B and v in B and u != v and node_of[u] == node_of[v]:
+            adj_in[u].add(v)
+            adj_in[v].add(u)
+
+    def _islands(nb):
         ids = {b.bus_id for b in nb}
-        adj_in: dict[str, set] = {bid: set() for bid in ids}
-        for br in list(state.transmission_lines) + list(state.transformers):
-            if getattr(br, "decorative", False):
-                continue
-            u, v = getattr(br, "from_bus", None), getattr(br, "to_bus", None)
-            if u in ids and v in ids and u != v:
-                adj_in[u].add(v)
-                adj_in[v].add(u)
         seen: set = set()
+        out = []
         for b in nb:
             if b.bus_id in seen:
                 continue
@@ -5274,25 +5267,122 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
                     continue
                 seen.add(x)
                 comp.append(x)
-                stack.extend(adj_in[x] - seen)
-            g = len(group_members)
-            group_members.append([B[bid] for bid in comp])
-            group_node.append(i)
-            for bid in comp:
-                group_of[bid] = g
-    NG = len(group_members)
+                stack.extend((adj_in[x] & ids) - seen)
+            out.append([B[bid] for bid in comp])
+        return out
 
-    # Representative voltage / frequency per reduced bus.
+    # Voltage levels a reduced bus keeps: those that carry lines.
+    line_kv: set = set()
+    for ln in state.transmission_lines:
+        if getattr(ln, "decorative", False):
+            continue
+        for bid in (ln.from_bus, ln.to_bus):
+            b = B.get(bid)
+            if b is not None and (b.voltage_kv or 0) > 0:
+                line_kv.add(float(b.voltage_kv))
+
+    def _kept(b) -> Optional[float]:
+        v = float(b.voltage_kv or 0.0)
+        return v if v > 0 and v in line_kv else None
+
+    def _levels(island) -> list[tuple[float, list]]:
+        """The island's buses grouped by voltage level, highest first. A bus
+        at a level that is not kept (a generator terminal, an unknown
+        voltage) joins the nearest kept level through the island's own
+        transformers and lines."""
+        ids = {b.bus_id for b in island}
+        level: dict[str, float] = {}
+        for b in island:
+            v = _kept(b)
+            if v is not None:
+                level[b.bus_id] = v
+        if not level:
+            return [(max((b.voltage_kv for b in island), default=500.0), island)]
+        for b in island:
+            if b.bus_id in level:
+                continue
+            seen, frontier, found = {b.bus_id}, [b.bus_id], None
+            while frontier and found is None:
+                nxt = []
+                for x in frontier:
+                    for y in adj_in[x] & ids:
+                        if y in seen:
+                            continue
+                        if _kept(B[y]) is not None:
+                            found = max(found or 0.0, _kept(B[y]))
+                        seen.add(y)
+                        nxt.append(y)
+                frontier = nxt
+            level[b.bus_id] = found if found is not None else max(level.values())
+        by_v: dict[float, list] = defaultdict(list)
+        for b in island:
+            by_v[level[b.bus_id]].append(b)
+        return sorted(by_v.items(), key=lambda kv: -kv[0])
+
+    # (node, frequency, [(voltage, members), ...]) per island.
+    island_levels: list[tuple[int, float, list]] = []
+    for i in range(NN):
+        nb = buses_of_node.get(i, [])
+        if not nb:
+            continue
+        islands = _islands(nb) if i in split_nodes else [list(nb)]
+        for island in islands:
+            freqs = [getattr(b, "frequency_hz", 50.0) or 50.0 for b in island]
+            island_levels.append((i, max(set(freqs), key=freqs.count),
+                                  _levels(island)))
+
+    # A level joins the island's highest one when the data does not connect
+    # it to that level, inside the node or through the rest of the network
+    # (OSM often lacks the transformer): kept apart it would be an island of
+    # its own. The data's branches decide; no transformer is invented.
+    lvl_of: dict[str, tuple[int, int]] = {}
+    for a, (_, _, levels) in enumerate(island_levels):
+        for k, (_, members) in enumerate(levels):
+            for b in members:
+                lvl_of[b.bus_id] = (a, k)
+    parent = {key: key for key in set(lvl_of.values())}
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for br in (list(state.transmission_lines) + list(state.transformers)
+               + list(_all_converters())):
+        if getattr(br, "decorative", False):
+            continue
+        u = lvl_of.get(getattr(br, "from_bus", None))
+        v = lvl_of.get(getattr(br, "to_bus", None))
+        if u is not None and v is not None:
+            parent[_find(u)] = _find(v)
+
+    group_of: dict[str, int] = {}      # bus_id -> reduced-bus index
+    group_members: list[list] = []     # reduced-bus index -> [GuiBus]
+    group_node: list[int] = []         # reduced-bus index -> parent node
     grp_v: list[float] = []
+    # Frequency of the island (the levels of one island share it).
     grp_freq: list[float] = []
-    for members in group_members:
-        grp_v.append(max((b.voltage_kv for b in members), default=500.0))
-        freqs = [getattr(b, "frequency_hz", 50.0) or 50.0 for b in members]
-        grp_freq.append(max(set(freqs), key=freqs.count) if freqs else 50.0)
+    for a, (i, freq, levels) in enumerate(island_levels):
+        top = _find((a, 0))
+        kept = [(v, list(m)) for k, (v, m) in enumerate(levels)
+                if k == 0 or _find((a, k)) == top]
+        for k, (_, m) in enumerate(levels):
+            if k and _find((a, k)) != top:
+                kept[0][1].extend(m)
+        for v, members in kept:
+            g = len(group_members)
+            group_members.append(members)
+            group_node.append(i)
+            grp_v.append(v)
+            grp_freq.append(freq)
+            for b in members:
+                group_of[b.bus_id] = g
+    NG = len(group_members)
 
     # Cross-boundary lines and transformers per reduced-bus pair; combined in
     # parallel once the reduced buses (and the distance between them) exist.
     crossing: dict[tuple[int, int], list] = defaultdict(list)
+    tr_crossing: dict[tuple[int, int], list] = defaultdict(list)
     for is_line, brs in ((True, state.transmission_lines),
                          (False, state.transformers)):
         for br in brs:
@@ -5301,7 +5391,11 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
             gi, gj = group_of.get(br.from_bus), group_of.get(br.to_bus)
             if gi is None or gj is None or gi == gj:
                 continue
-            crossing[(min(gi, gj), max(gi, gj))].append((is_line, br))
+            # Between two voltage levels a transformer stays a transformer.
+            if not is_line and grp_v[gi] != grp_v[gj]:
+                tr_crossing[(min(gi, gj), max(gi, gj))].append(br)
+            else:
+                crossing[(min(gi, gj), max(gi, gj))].append((is_line, br))
 
     # One reduced bus per group. The node's demand is shared between its
     # groups in proportion to the demand its member buses already carried, so
@@ -5313,6 +5407,20 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
     for i, gs in groups_of_node.items():
         for k, g in enumerate(gs):
             grp_bus_id[g] = f"node_{i}" if k == 0 else f"node_{i}_b{k}"
+
+    # Where each group's members are (their mean, else the node centroid):
+    # the length of the branches between groups. Every bus of a node is drawn
+    # at its first group's position, so the node reads as one substation (the
+    # single-line diagram groups buses by site) with its transformers inside.
+    grp_pos: list[tuple[float, float]] = [(0.0, 0.0)] * NG
+    for i, gs in groups_of_node.items():
+        nd = nodes[i]
+        for g in gs:
+            pts = [(b.latitude, b.longitude) for b in group_members[g]
+                   if b.latitude or b.longitude]
+            grp_pos[g] = ((sum(p[0] for p in pts) / len(pts),
+                           sum(p[1] for p in pts) / len(pts)) if pts
+                          else (nd.centroid_lat, nd.centroid_lng))
 
     new_buses: dict[str, GuiBus] = {}
     for i, gs in groups_of_node.items():
@@ -5326,20 +5434,23 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
             weights = [0.0] * len(gs)
             weights[max(range(len(gs)), key=lambda k: len(group_members[gs[k]]))] = 1.0
             total_w = 1.0
+        lat, lng = grp_pos[gs[0]]
         for k, g in enumerate(gs):
-            members = group_members[g]
-            lats = [b.latitude for b in members if b.latitude or b.longitude]
-            lngs = [b.longitude for b in members if b.latitude or b.longitude]
             share = weights[k] / total_w
+            base = nd.name or f"node_{i}"
+            tags = []
+            if len({grp_v[x] for x in gs}) > 1:
+                tags.append(f"{grp_v[g]:g} kV")
+            if grp_freq[g] != grp_freq[gs[0]]:
+                tags.append(f"{grp_freq[g]:.0f} Hz")
             new_buses[grp_bus_id[g]] = GuiBus(
                 bus_id=grp_bus_id[g],
                 name=(nd.name or grp_bus_id[g]) if k == 0
-                else f"{nd.name or f'node_{i}'} ({grp_freq[g]:.0f} Hz)",
+                else f"{base} ({', '.join(tags) or f'{grp_freq[g]:.0f} Hz'})",
                 parent_node=i, voltage_kv=grp_v[g], frequency_hz=grp_freq[g],
                 role="load" if share > 0 else "connection",
                 demand_fraction=share,
-                latitude=(sum(lats) / len(lats)) if lats else nd.centroid_lat,
-                longitude=(sum(lngs) / len(lngs)) if lngs else nd.centroid_lng)
+                latitude=lat, longitude=lng)
 
     # Equivalent branches as transmission lines.
     try:
@@ -5378,8 +5489,7 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
     new_lines: list = []
     for (gi, gj), branches in sorted(crossing.items()):
         bi, bj = new_buses[grp_bus_id[gi]], new_buses[grp_bus_id[gj]]
-        length = _haversine_km(bi.latitude, bi.longitude,
-                               bj.latitude, bj.longitude)
+        length = _haversine_km(*grp_pos[gi], *grp_pos[gj])
         # Every branch whose capacity is summed also enters the impedance:
         # X in parallel, R loss-equivalent, B summed (_parallel_equivalent).
         # Each p.u. value is on its own voltage base, as the model reads it.
@@ -5444,10 +5554,34 @@ def reduce_to_node_mesh(state: GuiSystemState) -> int:
     if hasattr(state, "freq_converters"):
         state.freq_converters = _remap_convs(state.freq_converters)
 
-    # Swap in the reduced network (transformers are absorbed into the branches).
+    # Transformers between voltage levels: the ones of each pair of reduced
+    # buses in parallel (MVA summed, impedance as for the lines).
+    new_trs: list = []
+    for (gi, gj), trs in sorted(tr_crossing.items()):
+        hi, lo = (gi, gj) if grp_v[gi] >= grp_v[gj] else (gj, gi)
+        rx = []
+        for t in trs:
+            z = float(getattr(t, "impedance_pu", 0.0) or 0.05)
+            r = float(getattr(t, "losses_fraction", 0.0) or 0.0) * z
+            rx.append((r, max(z * z - r * r, 1e-12) ** 0.5, 0.0))
+        req, xeq, _ = _parallel_equivalent(rx)
+        zeq = (req * req + xeq * xeq) ** 0.5
+        bh = new_buses[grp_bus_id[hi]]
+        name = trs[0].name if len(trs) == 1 else (
+            f"{bh.name} {grp_v[hi]:g}/{grp_v[lo]:g} kV")
+        new_trs.append(GuiTransformer(
+            name=name, from_bus=grp_bus_id[hi], to_bus=grp_bus_id[lo],
+            from_node=group_node[hi], to_node=group_node[lo],
+            from_voltage_kv=grp_v[hi], to_voltage_kv=grp_v[lo],
+            rated_power_mva=sum(max(float(t.rated_power_mva or 0.0), 0.0)
+                                for t in trs),
+            impedance_pu=zeq, losses_fraction=(req / zeq) if zeq > 0 else 0.0,
+            latitude=bh.latitude, longitude=bh.longitude))
+
+    # Swap in the reduced network.
     state.buses = new_buses
     state.transmission_lines = new_lines
-    state.transformers = []
+    state.transformers = new_trs
     return len(new_buses)
 
 
@@ -5609,11 +5743,12 @@ def apply_simplification_level(
     if _reduce:
         try:
             nb_before = len(state.buses)
-            n_nodes = reduce_to_node_mesh(state)
+            n_reduced = reduce_to_node_mesh(state)
             repair_network(state)
             all_log.append(tr("validation.log_reduction", buses=nb_before,
-                              nodes=n_nodes,
-                              branches=len(state.transmission_lines)))
+                              reduced=n_reduced, nodes=len(state.nodes),
+                              branches=len(state.transmission_lines),
+                              transformers=len(state.transformers)))
         except Exception as exc:
             all_log.append(tr("validation.log_reduction_failed", error=exc))
 
