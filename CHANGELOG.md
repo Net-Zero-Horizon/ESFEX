@@ -56,6 +56,12 @@ Per-release notes are also published on the
 - **The Grid Builder's Min voltage takes decimals.** It was a whole-number
   field, so a floor at a standard level such as 13.8 or 34.5 kV could not
   be entered.
+- **Apply Demand & Fractions runs in the background.** Writing every
+  node's multi-year demand (about 45 s for 136 nodes and 25 years) ran on
+  the interface thread: the Grid Builder froze, with no sign of progress,
+  while the bar followed only the quick distribution. It runs on a worker
+  thread with its own progress bar; Back and Close wait for it and Cancel
+  stops it. Its result message is translated.
 
 ### Changed
 
