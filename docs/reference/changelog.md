@@ -11,6 +11,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   hourly strip was painted with Plotly's default colours instead of the
   technology colours. Gas and hydrogen now have their own palette colours
   instead of the grey of "Other" in the UC charts.
+- **MGA and SPORES run with a curtailment limit.** With
+  `max_curtailment_ratio` below 1 and two or more systems or years with
+  renewables, MGA and SPORES stopped with `OptimizeNotCalled` right after the
+  cost-optimal plan: holding the first curtailment excess changed the model,
+  which discarded the solution the next one was read from.
 
 ## [0.4.0] — 2026-11-20
 
