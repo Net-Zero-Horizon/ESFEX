@@ -429,7 +429,7 @@ def _enforce_min_voltage(state, min_voltage_kv: float, result,
     if not hv:
         result.warnings.append(_tr(
             "grid_builder.report_min_voltage_no_bus",
-            kv=f"{min_voltage_kv:.0f}"))
+            kv=f"{min_voltage_kv:g}"))
         return {}
 
     def _nearest_hv(lat, lng):
@@ -739,7 +739,7 @@ def build_grid_from_features(
         if mv.get("buses_removed"):
             result.warnings.append(_tr(
                 "grid_builder.report_voltage_floor_collapsed",
-                kv=f"{min_voltage_kv:.0f}", buses=mv["buses_removed"],
+                kv=f"{min_voltage_kv:g}", buses=mv["buses_removed"],
                 generators=mv["generators_moved"],
                 batteries=mv["batteries_moved"], lines=mv["lines_removed"],
                 transformers=mv["transformers_removed"]))

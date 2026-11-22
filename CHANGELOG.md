@@ -53,6 +53,9 @@ Per-release notes are also published on the
   the nearest voltage, the main levels being those on the largest
   connected network. A stray 500 kV fragment of a few buses had absorbed a
   node's whole 275–77 kV network (Chubu, Japan).
+- **The Grid Builder's Min voltage takes decimals.** It was a whole-number
+  field, so a floor at a standard level such as 13.8 or 34.5 kV could not
+  be entered.
 
 ### Changed
 

@@ -121,7 +121,7 @@ class GeofabrikGridFetcher(OSMGridFetcher):
 
         feats = self._prune_roads(feats)
         self.progress.emit(92, tr("grid_builder.progress_filtering_voltage",
-                                  kv=self.min_voltage_kv))
+                                  kv=f"{self.min_voltage_kv:g}"))
         feats = self._apply_filters(feats)
         self.progress.emit(100, tr("grid_builder.progress_osm_found",
                                    count=len(feats)))
