@@ -16,6 +16,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   renewables, MGA and SPORES stopped with `OptimizeNotCalled` right after the
   cost-optimal plan: holding the first curtailment excess changed the model,
   which discarded the solution the next one was read from.
+- **The master counts the transformers between nodes.** A node link took its
+  capacity and impedance from the lines between the two nodes only. A pair of
+  nodes joined by a 220/110 kV transformer and a 110 kV line got the line's
+  capacity alone (Cuba: 1,200 MW instead of 4,200 MW), so the master planned
+  with a weaker network than the dispatch runs. This affects every case whose
+  node boundaries cross a transformer, at any simplification level.
 
 ## [0.4.0] — 2026-11-20
 
