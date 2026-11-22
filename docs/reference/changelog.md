@@ -41,6 +41,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   the highest voltage and the other lines joined two voltages with no
   transformer. Each other voltage now gets a bus at the same place and the
   substation's transformer; the build report lists them.
+- **The level-2 reduction draws no line between two voltages.** A voltage
+  that only lines between buses of different voltages reach (a mistagged
+  bus, a generator terminal wired to its bus by a line) no longer makes a
+  level, and a level the data leaves unconnected joins the main level of
+  the nearest voltage, the main levels being those on the largest
+  connected network. A stray 500 kV fragment of a few buses had absorbed a
+  node's whole 275–77 kV network (Chubu, Japan).
 
 ### Changed
 
