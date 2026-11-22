@@ -2136,9 +2136,13 @@ only as far as the cost-optimal plan has to, as under a hard limit, rather
 than buy curtailment above it with the cost slack.
 """
 function hold_curtailment_excess!(model::Model)
-    for e in get(model.ext, :curtailment_excess, CurtailmentExcess[])
-        set_upper_bound(e.excess, max(value(e.excess), 0.0) +
-                                  curtailment_tolerance(value(e.re) * e.smax))
+    excess = get(model.ext, :curtailment_excess, CurtailmentExcess[])
+    # Every value is read before the first bound is set: a change to the
+    # model discards its solution (OptimizeNotCalled on the next value).
+    bounds = [max(value(e.excess), 0.0) + curtailment_tolerance(value(e.re) * e.smax)
+              for e in excess]
+    for (e, ub) in zip(excess, bounds)
+        set_upper_bound(e.excess, ub)
     end
     return
 end

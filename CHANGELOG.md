@@ -656,6 +656,20 @@ Per-release notes are also published on the
 
 ### Changed
 
+- **Simplification level 2 keeps the voltage levels.** The node-mesh
+  reduction collapsed each node to one bus and dropped every transformer:
+  220 and 110 kV lines met on the same bus, and the single-line diagram of a
+  reduced case showed no transformer. Each node now keeps one bus per
+  voltage level that carries lines, joined by its own transformers
+  (combined in parallel per level pair). A bus at a level without lines,
+  such as a generator terminal, joins the nearest kept level; a level the
+  data does not connect to the rest joins the node's highest one, and no
+  transformer is invented. The single-line diagram draws each node as one
+  substation with its voltage levels and transformers. On the Cuba case (10 nodes) the dispatch network
+  grows from 10 to 35 buses and 40 transformers. The dispatch takes about
+  20 % longer and sees the congestion and losses inside the nodes. The
+  master is unchanged.
+
 - **The old master fuel-infrastructure variables are replaced.** The
   master's fuel storage and transport investment variables had a cost but no
   effect (no constraint used them and the adapter passed no routes). They are
@@ -1754,6 +1768,32 @@ Per-release notes are also published on the
   hourly strip was painted with Plotly's default colours instead of the
   technology colours. Gas and hydrogen now have their own palette colours
   instead of the grey of "Other" in the UC charts.
+
+- **MGA and SPORES run with a curtailment limit.** With
+  `max_curtailment_ratio` below 1 and two or more systems or years with
+  renewables, MGA and SPORES stopped with `OptimizeNotCalled` right after the
+  cost-optimal plan: holding the first curtailment excess changed the model,
+  which discarded the solution the next one was read from.
+
+- **The master counts the transformers between nodes.** A node link took its
+  capacity and impedance from the lines between the two nodes only. A pair of
+  nodes joined by a 220/110 kV transformer and a 110 kV line got the line's
+  capacity alone (Cuba: 1,200 MW instead of 4,200 MW), so the master planned
+  with a weaker network than the dispatch runs. This affects every case whose
+  node boundaries cross a transformer, at any simplification level.
+
+- **The single-line diagram draws the transformers between nodes.** It left
+  out every transformer whose two ends sit in different nodes, which cut
+  the drawn network wherever a node boundary crosses a substation (the
+  reduced Cuba case lost 10 of its 38 transformers). They are drawn as
+  links between the two blocks.
+
+- **The single-line diagram's legend shows a neutral line.** The
+  Transmission Line sample took the colour of the first line drawn (red
+  on Hokkaido, where that line joins buses of different voltages); lines
+  take the colour of their voltage, given under Voltage Levels. Lines
+  between buses of different voltages, drawn red and dashed, have their
+  own legend row.
 
 - **A year of dispatch with primary energy no longer runs out of memory.**
   Each rolling-horizon window added the primary-energy cost to the
