@@ -54,6 +54,28 @@ def qapp():
     return app
 
 
+def pytest_sessionfinish(session, exitstatus):
+    session.config._esfex_exitstatus = int(exitstatus)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure(config):
+    """On CI, end the process without the interpreter's shutdown.
+
+    Since November 2026 the CI runners segfault after the test summary and
+    the coverage report, while Python tears down Qt and the other extension
+    modules (exit code 139 with every test passed, on 0.3.0's code too).
+    Everything is written by then, so pytest's own exit status is returned.
+    """
+    import os
+    import sys
+    if not os.environ.get("CI") or not hasattr(config, "_esfex_exitstatus"):
+        return
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(config._esfex_exitstatus)
+
+
 @pytest.fixture(autouse=True)
 def _studio_language_back_to_english():
     """Every test starts in English: a test that switches the Studio's
