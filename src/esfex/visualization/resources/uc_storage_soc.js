@@ -33,11 +33,11 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { _ucClearPlot(); showStatus("Bad payload: " + e.message, true); return; }
-        if (!data || data.error) { _ucClearPlot(); showStatus(data && data.error ? data.error : "No data", false); return; }
-        if (!data.batteries || !data.batteries.length) { _ucClearPlot(); showStatus("No batteries in this run", false); return; }
+        catch (e) { _ucClearPlot(); showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
+        if (!data || data.error) { _ucClearPlot(); showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return; }
+        if (!data.batteries || !data.batteries.length) { _ucClearPlot(); showStatus(_t("web.charts.uc_storage_soc.no_data"), false); return; }
         try { renderSOC(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 function showStatus(t, e) { const s = document.getElementById("status"); s.textContent = t; s.style.display = "block"; s.style.color = e ? "#c0392b" : "#7F8C8D"; }
@@ -53,14 +53,14 @@ function renderSOC(data) {
             x: data.hours, y: data.soc_pct[bname],
             type: "scatter", mode: "lines",
             name: bname, line: { color: c, width: 2 },
-            hovertemplate: "Hour %{x}: %{y:.1f}% SOC<extra>" + bname + "</extra>",
+            hovertemplate: _t("web.charts.uc_storage_soc.hover_soc") + "<extra>" + bname + "</extra>",
             xaxis: "x", yaxis: "y",
         });
         traces.push({
             x: data.days, y: data.daily_cycles[bname],
-            type: "bar", name: bname + " (cycles)",
+            type: "bar", name: _t("web.charts.uc_storage_soc.cycles_name", { battery: bname }),
             marker: { color: c, opacity: 0.75 },
-            hovertemplate: "Day %{x}: %{y:.2f} cycles<extra>" + bname + "</extra>",
+            hovertemplate: _t("web.charts.uc_storage_soc.hover_cycles") + "<extra>" + bname + "</extra>",
             xaxis: "x2", yaxis: "y2",
             showlegend: false,
         });
@@ -72,18 +72,14 @@ function renderSOC(data) {
         const discharge = t.discharge_mwh || 0;
         const cap = t.capacity_mwh || 0;
         const ratio = (cap > 0) ? (discharge / cap).toFixed(2) : "—";
-        return `${bname}: ${ratio} eq. full cycles total`;
+        return _t("web.charts.uc_storage_soc.cycles_total", { battery: bname, ratio: ratio });
     }).join(" &nbsp;|&nbsp; ");
 
     const layout = {
-        margin: { t: 110, r: 30, b: 60, l: 70 },
+        margin: { t: 80, r: 30, b: 60, l: 70 },
         grid: { rows: 2, columns: 1, pattern: "independent", roworder: "top to bottom" },
         showlegend: true,
         annotations: [
-            { text: `<b>Storage SOC &amp; Cycles — Year ${data.year}</b>`,
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.16, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: parts,
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.08, yref: "paper", yanchor: "bottom",
@@ -94,10 +90,10 @@ function renderSOC(data) {
             y: 1.02, yanchor: "bottom", font: { size: 10 },
             bgcolor: "rgba(255,255,255,0.85)", bordercolor: "rgba(0,0,0,0.1)", borderwidth: 1,
         },
-        xaxis:  { title: "<b>Hour</b>", domain: [0, 1], anchor: "y" },
-        yaxis:  { title: "<b>SOC (%)</b>", domain: [0.55, 1.0], range: [0, 100] },
-        xaxis2: { title: "<b>Day</b>", domain: [0, 1], anchor: "y2" },
-        yaxis2: { title: "<b>Eq. full cycles / day</b>", domain: [0.0, 0.45], rangemode: "tozero" },
+        xaxis:  { title: "<b>" + _t("web.charts.uc_storage_soc.axis_hour") + "</b>", domain: [0, 1], anchor: "y" },
+        yaxis:  { title: "<b>" + _t("web.charts.uc_storage_soc.axis_soc") + "</b>", domain: [0.55, 1.0], range: [0, 100] },
+        xaxis2: { title: "<b>" + _t("web.charts.uc_storage_soc.axis_day") + "</b>", domain: [0, 1], anchor: "y2" },
+        yaxis2: { title: "<b>" + _t("web.charts.uc_storage_soc.axis_cycles") + "</b>", domain: [0.0, 0.45], rangemode: "tozero" },
         barmode: "group",
     };
     Plotly.purge("plot");

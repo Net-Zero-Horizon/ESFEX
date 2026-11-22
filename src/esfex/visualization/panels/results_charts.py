@@ -13,7 +13,11 @@ from typing import Optional
 import h5py
 import numpy as np
 
-from esfex.utils.temporal import HOURS_STD_YEAR
+from esfex.io.exporter import demand_is_step_major, demand_node_hours
+from esfex.models.financial_analysis import (
+    _index_configs_by_name, _lookup_config, power_in_service,
+)
+from esfex.utils.temporal import HOURS_STD_YEAR, model_time_index
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from matplotlib.figure import Figure
 
@@ -366,6 +370,7 @@ _SLICE_AXIS0_DATASETS = frozenset({
     "demand",
     "CO2_emissions",
     "EV_V2G", "EV_charging", "EV_loss", "EV_soc",
+    "line_losses",
     "loss_load",
     "loss_of_reserve_dynamic", "loss_of_reserve_static",
     "nodal_electricity_prices",
@@ -382,7 +387,7 @@ _SLICE_BOTH_AXES_DATASETS = frozenset({"power_flow"})
 # ``[N, T]`` arrays. Member keys are filtered to system-owned
 # techs (prefix match on system name).
 _TECH_GROUPS = frozenset({
-    "generation",
+    "generation", "gen_status", "gen_startup",
     "capacity_factor", "lcoe", "vallcoe",
     "battery_capacity_factor", "battery_charge", "battery_discharge",
     "battery_lcoe", "battery_soc", "battery_vallcoe",
@@ -410,6 +415,45 @@ def orient_to_node_hours(arr: "np.ndarray", n_hours: Optional[int]) -> "np.ndarr
             and arr.shape[1] != n_hours and arr.shape[0] == n_hours):
         return arr.T
     return arr
+
+
+def _scenario_hours(sc) -> Optional[int]:
+    """Number of time-steps in a scenario, read from an unambiguous series.
+
+    Needed to orient ``demand`` — persisted ``(hours, nodes)`` while every
+    per-node result array is ``(nodes, hours)``. A 1-D price series gives the
+    hour count with no axis ambiguity; a per-node 2-D result array is the
+    fallback (its last axis is always time).
+    """
+    for key in ("electricity_prices", "electricity_prices_energy"):
+        try:
+            d = sc.get(key)
+            if d is not None and getattr(d, "ndim", 0) == 1 and d.shape[0] > 0:
+                return int(d.shape[0])
+        except Exception:
+            continue
+    for key in ("loss_load", "curtailment", "CO2_emissions", "voltage_angle"):
+        try:
+            d = sc.get(key)
+            if d is not None and getattr(d, "ndim", 0) == 2 and d.shape[1] > 0:
+                return int(d.shape[1])
+        except Exception:
+            continue
+    return None
+
+
+def _demand_node_hours(sc):
+    """Read a scenario's ``demand`` oriented to ``(nodes, hours)``.
+
+    Always use this instead of ``sc["demand"][:]``: current files store it
+    ``(nodes, hours)``, but older ones kept ``(hours, nodes)`` when there
+    were no more hours than nodes, so a raw read of those makes node-axis
+    sums and slices operate on the hour axis. Returns ``None`` when the
+    scenario has no demand.
+    """
+    if "demand" not in sc:
+        return None
+    return demand_node_hours(sc["demand"], _scenario_hours(sc))
 
 
 def _system_node_range(
@@ -623,6 +667,10 @@ class _SlicedScenarioView:
                     )
             # Fall through to raw root dataset when nodal data is absent.
         obj = self._g[key]
+        if (key == "demand" and isinstance(obj, _DATASET_T)
+                and demand_is_step_major(obj, _scenario_hours(self._g))):
+            # Old file with (hours, nodes) demand: the node axis is axis 1.
+            return _ArrayShim(obj[()][:, self._lo:self._hi].T)
         if isinstance(obj, _DATASET_T):
             if key in _SLICE_AXIS0_DATASETS:
                 # Downgrade to no-slicing for legacy 1D layouts where the
@@ -648,7 +696,9 @@ def _open_scenario(h5f: h5py.File, base_prefix: str, sc_key: str):
     system behind ``base_prefix``.
 
     Falls back to the legacy per-system mirror when present, so old
-    result files keep working unchanged."""
+    result files keep working unchanged. Either way its per-node arrays
+    and per-unit groups hold this system's nodes only: readers must not
+    slice them again with ``_system_node_range`` (a global node range)."""
     if not base_prefix:
         return h5f["detailed_results"][sc_key]
     legacy = f"{base_prefix}/detailed_results"
@@ -1279,19 +1329,14 @@ def _get_gen_types(h5f: h5py.File, base_prefix: str = "") -> dict[str, str]:
         if cache is not None:
             cache.gen_types[base_prefix] = types
         return types
-    gen_grp = sc["generators"]
-    n = int(gen_grp.attrs.get("num_generators", 0))
-    for i in range(n):
-        gk = f"generator_{i}"
-        if gk in gen_grp:
-            g = gen_grp[gk]
-            name = g.attrs.get("name", gk)
-            if isinstance(name, bytes):
-                name = name.decode()
-            gtype = g.attrs.get("type", "Unknown")
-            if isinstance(gtype, bytes):
-                gtype = gtype.decode()
-            types[name] = gtype
+    for g in _config_children(sc["generators"], "generator"):
+        name = g.attrs.get("name", g.name.rsplit("/", 1)[-1])
+        if isinstance(name, bytes):
+            name = name.decode()
+        gtype = g.attrs.get("type", "Unknown")
+        if isinstance(gtype, bytes):
+            gtype = gtype.decode()
+        types[name] = gtype
     if cache is not None:
         cache.gen_types[base_prefix] = types
     return types
@@ -1344,6 +1389,64 @@ def _canonical_tech_name(name: str) -> tuple[str, str]:
     if "reserve" in nl:
         return "Reserves", "reserve"
     return name, "thermal"
+
+
+# Series names the charts make up themselves (fuel buckets, synthetic
+# battery / curtailment / reserve series). They stay English inside the
+# code, where they key colours, categories and ordering; only the text a
+# chart shows goes through :func:`_series_label`.
+_SERIES_LABEL_KEYS = {
+    "Solar": "series_solar",
+    "Wind": "series_wind",
+    "Hydro": "series_hydro",
+    "Biomass": "series_biomass",
+    "Geothermal": "series_geothermal",
+    "Nuclear": "series_nuclear",
+    "Hydrogen": "series_hydrogen",
+    "Fuel oil": "series_fuel_oil",
+    "Gas": "series_gas",
+    "Coal": "series_coal",
+    "Other": "series_other",
+    "Storage": "series_storage",
+    "Solar rooftop": "series_solar_rooftop",
+    "Spillage": "series_spillage",
+    "Battery discharge": "series_battery_discharge",
+    "Battery charge": "series_battery_charge",
+    "Battery spillage": "series_battery_spillage",
+    "Curtailment": "series_curtailment",
+    "Reserves": "series_reserves",
+    "Dynamic reserve": "series_dynamic_reserve",
+    "Static reserve": "series_static_reserve",
+    "V2G discharge": "series_v2g_discharge",
+    "V2G charge": "series_v2g_charge",
+    "Load shed": "series_load_shed",
+}
+
+
+def _series_label(name: str) -> str:
+    """Display text of a chart-made series name; any other name (a
+    technology, unit or node from the user's data) is returned as is."""
+    key = _SERIES_LABEL_KEYS.get(name)
+    return tr(f"results_charts.{key}") if key else name
+
+
+def _month_short_names() -> list[str]:
+    """The twelve short month names in the current language."""
+    return [tr(f"results_charts.month_short_{m}") for m in range(1, 13)]
+
+
+def _default_node_label(index: int) -> str:
+    """Name shown for a node the results file does not name."""
+    return tr("results_charts.default_node", n=index)
+
+
+# Series the generation-mix payload builder adds itself (see
+# GenerationMixChart); shown through :func:`_series_label`.
+_MIX_SYNTHETIC_SERIES = frozenset({
+    "Solar rooftop", "Spillage", "Battery discharge", "Battery charge",
+    "Battery spillage", "Curtailment", "Reserves", "Dynamic reserve",
+    "Static reserve", "V2G discharge", "V2G charge",
+})
 
 
 def _categorize_gen_names(
@@ -1455,6 +1558,8 @@ def _fuel_tech_info(cfg: dict) -> dict:
         "color": _color_for(label),
         "category": category,
         "tech_key": "",
+        # The label is a chart-made fuel bucket, not a user's name.
+        "bucket": True,
     }
 
 
@@ -1683,17 +1788,158 @@ def _load_config_section(
     """Iterate ``{singular}_{i}`` children of a system_configuration
     section (``generators`` / ``batteries`` / ``technologies`` /
     ``battery_technologies``) and return the list of ``dict(attrs)``."""
-    configs: list[dict] = []
     sc = _open_system_config(h5f, base_prefix)
     if sc is None or section not in sc:
-        return configs
-    grp = sc[section]
-    n = int(grp.attrs.get(num_attr, 0))
-    for i in range(n):
-        ck = f"{singular}_{i}"
-        if ck in grp:
-            configs.append(dict(grp[ck].attrs))
-    return configs
+        return []
+    return [dict(g.attrs) for g in _config_children(sc[section], singular)]
+
+
+def _config_children(grp, singular: str) -> list:
+    """The ``{singular}_{i}`` children of a system_configuration section,
+    in index order.
+
+    The children present are listed, not ``range(num_*)``: a subsystem's
+    filtered view keeps the global keys (``generator_5``…) and reports the
+    filtered count, so the range found nothing past the first system."""
+    prefix = f"{singular}_"
+    idx = sorted(int(k[len(prefix):]) for k in grp.keys()
+                 if k.startswith(prefix) and k[len(prefix):].isdigit())
+    return [grp[f"{prefix}{i}"] for i in idx]
+
+
+def _gen_config_resolver(h5f: h5py.File, base_prefix: str = ""):
+    """``resolve(dataset_name, idx=-1, in_service_mw=None)`` → the config of
+    the generator behind a results dataset: its own config by name, or, for
+    a unit the master built (``"Investment <technology>"``, no config of its
+    own), its technology's; with ``in_service_mw``, its ``rated_power`` is
+    that MW (see ``financial_analysis._lookup_config``)."""
+    return _unit_config_resolver(
+        _load_gen_configs(h5f, base_prefix),
+        _load_tech_configs(h5f, base_prefix), "rated_power")
+
+
+def _bat_config_resolver(h5f: h5py.File, base_prefix: str = ""):
+    """The battery counterpart of :func:`_gen_config_resolver` (built
+    batteries take their battery technology's config; ``in_service_mw`` is
+    the ``MaxDischargePower``)."""
+    return _unit_config_resolver(
+        _load_bat_configs(h5f, base_prefix),
+        _load_bat_tech_configs(h5f, base_prefix), "MaxDischargePower")
+
+
+def _unit_config_resolver(configs: list[dict], tech_configs: list[dict],
+                          power_key: str):
+    by_name = _index_configs_by_name(configs)
+    tech_by_name = _index_configs_by_name(tech_configs)
+
+    def resolve(name: str, idx: int = -1, in_service_mw=None) -> dict:
+        return _lookup_config(name, by_name, configs, idx,
+                              tech_by_name=tech_by_name,
+                              in_service_mw=in_service_mw, power_key=power_key)
+    return resolve
+
+
+def _attr_node_values(val) -> np.ndarray:
+    """A per-node config attr (scalar, array or stringified list) as a 1-D
+    float array."""
+    if isinstance(val, (bytes, str)):
+        import ast
+        s = val.decode() if isinstance(val, bytes) else val
+        try:
+            val = ast.literal_eval(s.strip())
+        except (ValueError, SyntaxError):
+            return np.zeros(0)
+    try:
+        return np.atleast_1d(np.asarray(val, dtype=float)).ravel()
+    except (TypeError, ValueError):
+        return np.zeros(0)
+
+
+def _config_mw(cfg: dict, key: str, rng) -> float:
+    """``cfg[key]`` (a per-node list over every system's nodes) summed over
+    the node range ``rng`` of a subsystem (all nodes when None)."""
+    mw = _attr_node_values(cfg.get(key, 0.0))
+    if rng is not None and mw.size >= rng[1]:
+        mw = mw[rng[0]:rng[1]]
+    return float(mw.sum())
+
+
+def _gen_capacity_in_service(h5f: h5py.File, base_prefix: str, sc) -> float:
+    """Total generator MW in service in scenario ``sc`` over the system's
+    nodes: each unit's MW in service recorded on its ``generation`` dataset
+    (the master's builds, retirements, life extension and degradation
+    applied). A unit without it (files written before it was recorded) counts
+    its config's ``rated_power``."""
+    if "generation" not in sc:
+        return 0.0
+    grp = sc["generation"]
+    resolve = _gen_config_resolver(h5f, base_prefix)
+    rng = _system_node_range(h5f, base_prefix)
+    total = 0.0
+    for gi, name in enumerate(_load_gen_data(sc)):
+        total += _config_mw(resolve(name, gi, power_in_service(grp, name)),
+                            "rated_power", rng)
+    return total
+
+
+def _legacy_unit_investments(inv_data: dict, key: str,
+                             configs: list[dict]) -> list[tuple[dict, float]]:
+    """``(config, MW)`` of each unit in the per-unit investment results
+    ``key`` (``gen_investment_power`` / ``bat_investment_power``) of
+    :func:`_load_investment_data`: a ``{key}/{unit}`` dataset finds its
+    unit's config by name (h5py lists them alphabetically); an old ``[unit]``
+    array is index-aligned with the configured units."""
+    out: list[tuple[dict, float]] = []
+    by_name = _index_configs_by_name(configs)
+    for name, mw in inv_data.get(key + "_by_name", {}).items():
+        cfg = _lookup_config(name, by_name, configs)
+        if cfg and mw > 0:
+            out.append((cfg, float(mw)))
+    if key in inv_data:
+        for i, mw in enumerate(np.ravel(inv_data[key])):
+            if mw > 0 and i < len(configs):
+                out.append((configs[i], float(mw)))
+    return out
+
+
+def _add_legacy_unit_investments(inv_data: dict, gen_configs: list[dict],
+                                 bat_configs: list[dict],
+                                 gen_inv_by_tech: dict, bat_inv_by_tech: dict,
+                                 year_idx: int, n_years: int, label) -> float:
+    """Add the per-unit investments of :func:`_legacy_unit_investments`
+    (each unit paired with its own config) to ``gen_inv_by_tech`` /
+    ``bat_inv_by_tech`` in GW at ``year_idx``, under ``label(unit name)``
+    (units whose label is None are left out). Returns their cost in M$
+    (MW × ``invest_cost``)."""
+    cost = 0.0
+    for key, configs, inv_by_tech in (
+            ("gen_investment_power", gen_configs, gen_inv_by_tech),
+            ("bat_investment_power", bat_configs, bat_inv_by_tech)):
+        for uc, inv_mw in _legacy_unit_investments(inv_data, key, configs):
+            un = uc.get("name", "")
+            if isinstance(un, bytes):
+                un = un.decode()
+            u_label = label(un)
+            if u_label is None:
+                continue
+            if u_label not in inv_by_tech:
+                inv_by_tech[u_label] = np.zeros(n_years)
+            inv_by_tech[u_label][year_idx] += inv_mw / 1000
+            if "invest_cost" in uc:
+                cost += inv_mw * _parse_invest_cost(uc["invest_cost"]) / 1e6
+    return cost
+
+
+def _legacy_investment_cost(inv_data: dict, gen_configs: list[dict],
+                            bat_configs: list[dict]) -> float:
+    """$ of the per-unit investments of :func:`_legacy_unit_investments`:
+    MW × the unit's ``invest_cost``."""
+    return sum(
+        mw * _parse_invest_cost(cfg["invest_cost"])
+        for key, configs in (("gen_investment_power", gen_configs),
+                             ("bat_investment_power", bat_configs))
+        for cfg, mw in _legacy_unit_investments(inv_data, key, configs)
+        if "invest_cost" in cfg)
 
 
 def _load_gen_configs(h5f: h5py.File, base_prefix: str = "") -> list[dict]:
@@ -1877,7 +2123,8 @@ def _load_decommissioning_data(
     """Load decommissioning (retirement) data.
 
     Reads from:
-    1. Scenario attrs: retirement_gen_{idx} (cumulative fraction retired)
+    1. Scenario attrs: retirement_gen_{idx} (cumulative fraction retired:
+       end of life, life extension and the NPV-based retirement)
     2. Scenario sub-groups: decommissioning, gen_forced_replacement (legacy)
 
     If *fallback_sc* is provided, retirement attrs are read from there when
@@ -1914,7 +2161,7 @@ def _load_decommissioning_data(
                     name = name.decode()
                 # Compute MW retired from fraction × rated_power
                 rated = gc.get("rated_power", 0)
-                rated_mw = _parse_invest_cost(rated)  # handles str/list/scalar
+                rated_mw = _parse_total_mw(rated)  # handles str/list/scalar
                 ret_mw = fraction * rated_mw
                 out[name] = out.get(name, 0.0) + ret_mw
 
@@ -1938,23 +2185,32 @@ def _load_decommissioning_data(
     return out, raw_fractions
 
 
-def _parse_invest_cost(val) -> float:
-    """Parse invest_cost from HDF5 attrs (can be scalar, array, or string)."""
+def _parse_invest_cost(val, reduce=np.mean) -> float:
+    """Parse invest_cost from HDF5 attrs (can be scalar, array, or string).
+
+    A per-node value is reduced with *reduce* (mean for a cost; see
+    :func:`_parse_total_mw` for a capacity)."""
     if isinstance(val, (int, float, np.integer, np.floating)):
         return float(val)
     if isinstance(val, np.ndarray):
-        return float(np.mean(val))
+        return float(reduce(val))
     if isinstance(val, (bytes, str)):
         s = val.decode() if isinstance(val, bytes) else val
         import ast
         try:
             parsed = ast.literal_eval(s)
             if isinstance(parsed, (list, tuple)):
-                return float(np.mean(parsed))
+                return float(reduce(parsed))
             return float(parsed)
         except Exception:
             return 0.0
     return 0.0
+
+
+def _parse_total_mw(val) -> float:
+    """A unit's total capacity from its per-node ``rated_power`` attr (the
+    sum over nodes: ``retirement_gen_{g}`` is a share of the whole unit)."""
+    return _parse_invest_cost(val, reduce=np.sum)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -2006,7 +2262,8 @@ class ResultsChartBase(FigureCanvasQTAgg):
             logger.warning(f"Chart {self.TITLE} failed: {e}")
             if hasattr(self, "ax"):
                 self.ax.clear()
-                self.ax.text(0.5, 0.5, f"Error: {e}", transform=self.ax.transAxes,
+                self.ax.text(0.5, 0.5, tr("results_charts.chart_error", error=e),
+                             transform=self.ax.transAxes,
                              ha="center", va="center", fontsize=10, color="red")
             self.draw()
 
@@ -2031,7 +2288,7 @@ class _MixChartBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -2133,7 +2390,7 @@ class GenerationMixChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -2289,7 +2546,7 @@ class GenerationMixChart(QWidget):
                         all_gen.setdefault(rlabel, []).extend(rm.tolist())
 
                 if "demand" in sc:
-                    dem = sc["demand"][:]
+                    dem = _demand_node_hours(sc)
                     dt = _sum_nodes(dem) if dem.ndim >= 2 else dem
                     dm = _aggregate(dt, "monthly", tres)
                     demand_all.extend(dm.tolist())
@@ -2344,39 +2601,12 @@ class GenerationMixChart(QWidget):
                         cost_per_mw = inv_data.get("bat_tech_costs", {}).get(bt_name, 0)
                         year_cost += float(inv_mw) * cost_per_mw / 1e6
 
-                if "gen_investment_power" in inv_data:
-                    for gi, inv_mw in enumerate(inv_data["gen_investment_power"]):
-                        if inv_mw > 0 and gi < len(gen_configs):
-                            gc = gen_configs[gi]
-                            gn = gc.get("name", f"Gen_{gi}")
-                            if isinstance(gn, bytes):
-                                gn = gn.decode()
-                            info = _resolve_gen_tech(gn, gen_tech_map)
-                            if info is None:
-                                continue
-                            gn_canon = info["label"]
-                            if gn_canon not in gen_inv_by_tech:
-                                gen_inv_by_tech[gn_canon] = np.zeros(len(scenarios))
-                            gen_inv_by_tech[gn_canon][year_idx] += float(inv_mw) / 1000
-                            if "invest_cost" in gc:
-                                year_cost += float(inv_mw) * _parse_invest_cost(gc["invest_cost"]) / 1e6
-
-                if "bat_investment_power" in inv_data:
-                    for bi, inv_mw in enumerate(inv_data["bat_investment_power"]):
-                        if inv_mw > 0 and bi < len(bat_configs):
-                            bc = bat_configs[bi]
-                            bn = bc.get("name", f"Battery_{bi}")
-                            if isinstance(bn, bytes):
-                                bn = bn.decode()
-                            info = _resolve_gen_tech(bn, gen_tech_map)
-                            if info is None:
-                                continue
-                            bn_canon = info["label"]
-                            if bn_canon not in bat_inv_by_tech:
-                                bat_inv_by_tech[bn_canon] = np.zeros(len(scenarios))
-                            bat_inv_by_tech[bn_canon][year_idx] += float(inv_mw) / 1000
-                            if "invest_cost" in bc:
-                                year_cost += float(inv_mw) * _parse_invest_cost(bc["invest_cost"]) / 1e6
+                def _unit_label(name):
+                    info = _resolve_gen_tech(name, gen_tech_map)
+                    return None if info is None else info["label"]
+                year_cost += _add_legacy_unit_investments(
+                    inv_data, gen_configs, bat_configs, gen_inv_by_tech,
+                    bat_inv_by_tech, year_idx, len(scenarios), _unit_label)
 
                 total_cost_by_year.append(year_cost)
 
@@ -2396,7 +2626,7 @@ class GenerationMixChart(QWidget):
                         if _sys_filter and not name.startswith(_sys_filter + "/"):
                             continue
                         rated = gc.get("rated_power", 0)
-                        rated_mw = _parse_invest_cost(rated)
+                        rated_mw = _parse_total_mw(rated)
                         inc_mw = delta * rated_mw
                         info = _resolve_gen_tech(name, gen_tech_map)
                         if info is None:
@@ -2453,13 +2683,22 @@ class GenerationMixChart(QWidget):
                 return info["color"]
             return _color_for(tech_label, tech_colors)
 
+        def _display(tech_label: str) -> str:
+            # Series this chart makes up (battery, curtailment,
+            # reserves, fuel buckets) are shown translated; a
+            # technology name from the user's data is shown as is.
+            info = label_to_info.get(tech_label)
+            if tech_label in _MIX_SYNTHETIC_SERIES or (info and info.get("bucket")):
+                return _series_label(tech_label)
+            return tech_label
+
         # Positive stack (subplot a): renewable + rooftop + thermal + storage_discharge
         positive_series = []
         for cat_key in ("renewable", "rooftop", "thermal", "storage_discharge"):
             for tech in cats[cat_key]:
                 if tech in all_gen and np.any(all_gen[tech] > 0):
                     positive_series.append({
-                        "label": tech,
+                        "label": _display(tech),
                         "values_gwh": (all_gen[tech] / 1000).tolist(),
                         "color": _resolve_color(tech),
                         "category": cat_key,
@@ -2471,7 +2710,7 @@ class GenerationMixChart(QWidget):
             for tech in cats[cat_key]:
                 if tech in all_gen and np.any(all_gen[tech] > 0):
                     negative_series.append({
-                        "label": tech,
+                        "label": _display(tech),
                         "values_gwh": (all_gen[tech] / 1000).tolist(),
                         "color": _resolve_color(tech),
                         "category": cat_key,
@@ -2514,7 +2753,7 @@ class GenerationMixChart(QWidget):
             vals = gen_inv_by_tech.get(tech)
             if vals is not None and np.any(vals > 0):
                 inv_series.append({
-                    "label": tech,
+                    "label": _display(tech),
                     "values_gw": vals[:n_years].tolist(),
                     "color": _resolve_color(tech),
                     "category": "renewable_inv",
@@ -2522,7 +2761,7 @@ class GenerationMixChart(QWidget):
         for bn, vals in bat_inv_by_tech.items():
             if np.any(vals > 0):
                 inv_series.append({
-                    "label": bn,
+                    "label": _display(bn),
                     "values_gw": vals[:n_years].tolist(),
                     "color": _resolve_color(bn),
                     "category": "battery_inv",
@@ -2531,7 +2770,7 @@ class GenerationMixChart(QWidget):
             vals = gen_inv_by_tech.get(tech)
             if vals is not None and np.any(vals > 0):
                 inv_series.append({
-                    "label": tech,
+                    "label": _display(tech),
                     "values_gw": vals[:n_years].tolist(),
                     "color": _resolve_color(tech),
                     "category": "thermal_inv",
@@ -2542,7 +2781,11 @@ class GenerationMixChart(QWidget):
         for tech_name, vals in ret_by_tech.items():
             if np.any(vals > 0):
                 ret_series.append({
-                    "label": f"{tech_name} (retired)",
+                    # The JS groups a retirement with its technology
+                    # by ``parent_label`` (the label text is translated).
+                    "label": tr("results_charts.mix_retired_label",
+                                tech=_display(tech_name)),
+                    "parent_label": _display(tech_name),
                     "values_gw": vals[:n_years].tolist(),
                     "color": _resolve_color(tech_name),
                 })
@@ -2581,7 +2824,8 @@ class SummaryMetricsChart(ResultsChartBase):
             bp = kw.get("base_prefix", "")
             sg = _open_summary_results(h5f, bp)
             if sg is None:
-                ax1.text(0.5, 0.5, "No summary data", transform=ax1.transAxes, ha="center")
+                ax1.text(0.5, 0.5, tr("results_charts.no_summary_data"),
+                         transform=ax1.transAxes, ha="center")
                 self.draw()
                 return
             yrs = sg["year"][:] if "year" in sg else np.array([])
@@ -2592,16 +2836,16 @@ class SummaryMetricsChart(ResultsChartBase):
         if len(yrs) > 0 and len(cost) > 0:
             idx = np.argsort(yrs)
             ax1.plot(yrs[idx], cost[idx] / 1e6, "o-", linewidth=2, markersize=5, color="#2980b9")
-            ax1.set_xlabel("Year", fontweight="bold")
-            ax1.set_ylabel("Total Cost (M$)", fontweight="bold")
-            ax1.set_title("System Cost Evolution", fontweight="bold")
+            ax1.set_xlabel(tr("results_charts.axis_year"), fontweight="bold")
+            ax1.set_ylabel(tr("results_charts.axis_total_cost"), fontweight="bold")
+            ax1.set_title(tr("results_charts.title_cost_evolution"), fontweight="bold")
             ax1.grid(True, alpha=0.3)
 
         if len(re_pen) > 0 and len(co2) > 0:
             ax2.scatter(re_pen * 100, co2 / 1e6, s=50, alpha=0.7, c="#27ae60")
-            ax2.set_xlabel("RE Penetration (%)", fontweight="bold")
-            ax2.set_ylabel("CO2 Emissions (Mt)", fontweight="bold")
-            ax2.set_title("Emissions vs RE Penetration", fontweight="bold")
+            ax2.set_xlabel(tr("results_charts.axis_re_penetration"), fontweight="bold")
+            ax2.set_ylabel(tr("results_charts.axis_co2_mt"), fontweight="bold")
+            ax2.set_title(tr("results_charts.title_emissions_vs_re"), fontweight="bold")
             ax2.grid(True, alpha=0.3)
 
         self.fig.tight_layout()
@@ -2624,7 +2868,7 @@ class _BatteryHeatmapBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -2698,7 +2942,7 @@ class BatteryHeatmapChart(QWidget):
         sp.valueChanged.connect(self._on_sigma_changed)
         wl.addWidget(sp)
 
-        wl.addWidget(QLabel("Colormap"))
+        wl.addWidget(QLabel(tr("results_charts.colormap")))
         cb = QComboBox()
         cb.addItems(self._COLORSCALES)
         cb.setCurrentText(self._colormap)
@@ -2749,7 +2993,7 @@ class BatteryHeatmapChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -2824,7 +3068,7 @@ class BatteryHeatmapChart(QWidget):
                     discharge_mwh_yr.append(d_mwh_total)
 
         if not rows:
-            return {"error": "No battery data"}
+            return {"error": tr("results_charts.err_no_battery_data")}
 
         data = np.array(rows).T  # shape: [12 months, N years]
         if self._sigma > 0:
@@ -2844,8 +3088,7 @@ class BatteryHeatmapChart(QWidget):
 
         return {
             "years": year_labels,
-            "month_labels": ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                             "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+            "month_labels": _month_short_names(),
             "values_mwh": data.tolist(),
             "sigma": float(self._sigma),
             "colormap": self._colormap,
@@ -2873,7 +3116,7 @@ class _BatteryOperationBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -2936,9 +3179,14 @@ class BatteryOperationChart(QWidget):
         wl.setContentsMargins(0, 0, 0, 0)
         wl.addWidget(QLabel(tr("results_charts.resolution")))
         cb = QComboBox()
-        cb.addItems(["hourly", "daily", "monthly", "yearly"])
-        cb.setCurrentText(self._resolution)
-        cb.currentTextChanged.connect(self._on_resolution_changed)
+        for value, key in (("hourly", "results_charts.res_hourly"),
+                           ("daily", "results_charts.res_daily"),
+                           ("monthly", "results_charts.res_monthly"),
+                           ("yearly", "results_charts.res_yearly")):
+            cb.addItem(tr(key), value)
+        cb.setCurrentIndex(max(0, cb.findData(self._resolution)))
+        cb.currentIndexChanged.connect(
+            lambda _i, c=cb: self._on_resolution_changed(c.currentData()))
         wl.addWidget(cb)
         self._resolution_combo = cb
         wl.addStretch()
@@ -2977,7 +3225,7 @@ class BatteryOperationChart(QWidget):
                     cb = getattr(self, "_resolution_combo", None)
                     if cb is not None:
                         cb.blockSignals(True)
-                        cb.setCurrentText("hourly")
+                        cb.setCurrentIndex(max(0, cb.findData("hourly")))
                         cb.blockSignals(False)
         except Exception:
             logger.debug(
@@ -3001,7 +3249,7 @@ class BatteryOperationChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -3043,7 +3291,7 @@ class BatteryOperationChart(QWidget):
             tres = _get_temporal_res(h5f)
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             for sc_key, year in scenarios:
                 if y_min is not None and (year < y_min or year > y_max):
                     continue
@@ -3072,7 +3320,7 @@ class BatteryOperationChart(QWidget):
                 )
 
         if not per_year_blocks:
-            return {"error": "No battery data in selected range"}
+            return {"error": tr("results_charts.err_no_battery_data_range")}
 
         sel_years = [b[0] for b in per_year_blocks]
         c_concat = np.concatenate([b[1] for b in per_year_blocks])
@@ -3101,13 +3349,14 @@ class BatteryOperationChart(QWidget):
         unambiguous along the x axis."""
         labels: list[str] = []
         if resolution == "monthly":
-            months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+            months = _month_short_names()
             for year, c_agg, _d, _s in per_year_blocks:
                 n_y = len(c_agg)
                 labels.extend(
-                    f"{year}-{months[i % 12]}" if i < 12
-                    else f"{year}-M{i+1}"
+                    tr("results_charts.xlabel_year_month", year=year,
+                       month=months[i % 12]) if i < 12
+                    else tr("results_charts.xlabel_year_month_index",
+                            year=year, n=i + 1)
                     for i in range(n_y)
                 )
         elif resolution == "yearly":
@@ -3116,7 +3365,8 @@ class BatteryOperationChart(QWidget):
         else:  # daily (and any other fallback)
             for year, c_agg, _d, _s in per_year_blocks:
                 n_y = len(c_agg)
-                labels.extend(f"{year}-D{i+1}" for i in range(n_y))
+                labels.extend(tr("results_charts.xlabel_year_day_index",
+                                 year=year, n=i + 1) for i in range(n_y))
         return labels
 
 
@@ -3139,7 +3389,7 @@ class _NetLoadHeatmapBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -3215,7 +3465,7 @@ class NetLoadHeatmapChart(QWidget):
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
 
-        wl.addWidget(QLabel("Year:"))
+        wl.addWidget(QLabel(tr("results_charts.year")))
         yc = QComboBox()
         yc.addItems([str(y) for y in self._available_years])
         if self._available_years:
@@ -3242,12 +3492,12 @@ class NetLoadHeatmapChart(QWidget):
             cb.setStyleSheet("QComboBox { combobox-popup: 0; }")
             return cb
 
-        wl.addWidget(QLabel("a) Net Load"))
+        wl.addWidget(QLabel(tr("results_charts.net_load_a")))
         cb_a = _make_cmap_combo(self._colormap_a)
         cb_a.currentTextChanged.connect(self._on_colormap_a_changed)
         wl.addWidget(cb_a)
 
-        wl.addWidget(QLabel("b) Ramp"))
+        wl.addWidget(QLabel(tr("results_charts.ramp_b")))
         cb_b = _make_cmap_combo(self._colormap_b)
         cb_b.currentTextChanged.connect(self._on_colormap_b_changed)
         wl.addWidget(cb_b)
@@ -3339,7 +3589,7 @@ class NetLoadHeatmapChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -3369,14 +3619,18 @@ class NetLoadHeatmapChart(QWidget):
             tres = _get_temporal_res(h5f)
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             if year_idx >= len(scenarios):
                 year_idx = 0
             sc_key, year = scenarios[year_idx]
             sc = _open_scenario(h5f, bp, sc_key)
             if "demand" not in sc:
-                return {"error": "No demand data"}
-            dem = sc["demand"][:]
+                return {"error": tr("results_charts.err_no_demand_data")}
+            # Orient ``demand`` (old files may hold it (hours, nodes)) before
+            # summing the node axis, otherwise the "hourly" series is really
+            # one value per NODE and the UC day×hour reshape below invents
+            # days (296 nodes → 13 "days" for a 24 h run).
+            dem = _demand_node_hours(sc)
             demand = _sum_nodes(dem) if dem.ndim >= 2 else dem
             # In UC keep the full operational horizon (often < 1 year);
             # in planning, cap to 1 year to match the month×hour layout.
@@ -3393,7 +3647,7 @@ class NetLoadHeatmapChart(QWidget):
             net_load = demand[:len(re_gen)] - re_gen[:len(demand)]
 
         if len(net_load) == 0:
-            return {"error": "Empty net load"}
+            return {"error": tr("results_charts.err_empty_net_load")}
 
         steps_per_day = max(1, 24 // max(1, tres))
         ramp = np.diff(net_load, prepend=net_load[0])
@@ -3410,14 +3664,14 @@ class NetLoadHeatmapChart(QWidget):
                 ramp = np.pad(ramp, (0, pad_to - n_steps), mode="constant")
             nl_vals = net_load.reshape(n_days, steps_per_day)
             ramp_vals = ramp.reshape(n_days, steps_per_day)
-            row_labels = [f"Day {d + 1}" for d in range(n_days)]
+            row_labels = [tr("results_charts.row_day", n=d + 1)
+                          for d in range(n_days)]
         else:
             yh = _year_hours(tres)
             if len(net_load) < yh:
                 net_load = np.pad(net_load, (0, yh - len(net_load)), mode="constant")
                 ramp = np.pad(ramp, (0, yh - len(ramp)), mode="constant")
-            freq = f"{tres}h"
-            idx = pd.date_range(start=f"{year}-01-01", periods=yh, freq=freq)
+            idx = model_time_index(f"{year}-01-01", yh, tres)
             df = pd.DataFrame({"NL": net_load[:yh], "ramp": ramp[:yh]}, index=idx)
             df["tod"] = (df.index.hour // tres)
             avg_nl = df.groupby([df.index.month, "tod"])["NL"].mean().unstack()
@@ -3430,8 +3684,7 @@ class NetLoadHeatmapChart(QWidget):
             avg_ramp = avg_ramp.sort_index()
             nl_vals = avg_nl.values
             ramp_vals = avg_ramp.values
-            row_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+            row_labels = _month_short_names()
 
         if self._sigma > 0:
             try:
@@ -3479,7 +3732,7 @@ class _TechPerformanceBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -3554,7 +3807,7 @@ class CFLcoeVallcoeChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -3680,7 +3933,8 @@ class CFLcoeVallcoeChart(QWidget):
                     for name in grp:
                         fuel = self._resolve_tech(name, gen_to_tech)
                         if is_bat and fuel == name:
-                            fuel = f"Storage: {name.replace('_', ' ')}"
+                            fuel = tr("results_charts.tech_storage_unit",
+                                      name=name.replace("_", " "))
                         cf_arr = grp[name][:]
                         avg_cf = self._avg_positive(cf_arr) * 100
                         if avg_cf <= 0:
@@ -3698,7 +3952,7 @@ class CFLcoeVallcoeChart(QWidget):
                             vallcoe_by_tech.setdefault(fuel, {}).setdefault(year, []).append(avg_vallcoe)
 
         if not cf_by_tech:
-            return {"error": "No CF/LCOE data"}
+            return {"error": tr("results_charts.err_no_cf_lcoe")}
 
         techs = sorted(cf_by_tech.keys())
         all_years = sorted({y for d in cf_by_tech.values() for y in d})
@@ -3838,7 +4092,7 @@ class _ElectricityCostBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -3912,7 +4166,7 @@ class ElectricityCostChart(QWidget):
         sp.valueChanged.connect(self._on_sigma_changed)
         wl.addWidget(sp)
 
-        wl.addWidget(QLabel("Colormap"))
+        wl.addWidget(QLabel(tr("results_charts.colormap")))
         cb = QComboBox()
         cb.addItems(self._COLORSCALES)
         cb.setCurrentText(self._colormap)
@@ -3957,7 +4211,7 @@ class ElectricityCostChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -4016,7 +4270,7 @@ class ElectricityCostChart(QWidget):
 
         n_years = len(yr_list)
         if not yr_list:
-            return {"error": "No price data"}
+            return {"error": tr("results_charts.err_no_price_data")}
 
         # Daily cost matrix [days_per_year × n_years]
         cost_matrix = np.zeros((days_per_year, n_years), dtype=float)
@@ -4122,7 +4376,7 @@ class _InterNodeFlowsBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -4188,7 +4442,7 @@ class InterNodeFlowsChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -4252,11 +4506,11 @@ class InterNodeFlowsChart(QWidget):
                 imports_by_yr[int(year)] = imp
                 exports_by_yr[int(year)] = exp
         if not yr_list or num_nodes == 0:
-            return {"error": "No power flow data"}
+            return {"error": tr("results_charts.err_no_power_flow")}
         palette = get_tab10()
         nodes_payload = []
         for node in range(num_nodes):
-            label = node_names[node] if node < len(node_names) else f"Node {node}"
+            label = node_names[node] if node < len(node_names) else _default_node_label(node)
             imp_vals = [float(imports_by_yr.get(y, {}).get(node, 0.0)) for y in yr_list]
             exp_vals = [float(exports_by_yr.get(y, {}).get(node, 0.0)) for y in yr_list]
             if not any(v != 0 for v in imp_vals) and not any(v != 0 for v in exp_vals):
@@ -4283,7 +4537,7 @@ class InterNodeFlowsChart(QWidget):
             node_names = _get_node_names(h5f, bp)
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             # Pick the last year in range (snapshot semantics, same as
             # other UC charts).
             y_lo = y_hi = None
@@ -4299,10 +4553,10 @@ class InterNodeFlowsChart(QWidget):
             sc_key, year = scenarios[sel_idx]
             sc = _open_scenario(h5f, bp, sc_key)
             if "power_flow" not in sc:
-                return {"error": "power_flow missing"}
+                return {"error": tr("results_charts.err_dataset_missing", name="power_flow")}
             pf = sc["power_flow"][:]
             if pf.ndim != 3:
-                return {"error": "power_flow not 3-D"}
+                return {"error": tr("results_charts.err_dataset_not_3d", name="power_flow")}
             n_nodes, _, n_hours = pf.shape
             # Net flow per node-hour: sum incoming − sum outgoing.
             # ``pf[other, n, t]`` is flow from ``other`` to ``n`` when
@@ -4315,7 +4569,7 @@ class InterNodeFlowsChart(QWidget):
         palette = get_tab10()
         nodes_payload = []
         for node in range(n_nodes):
-            label = node_names[node] if node < len(node_names) else f"Node {node}"
+            label = node_names[node] if node < len(node_names) else _default_node_label(node)
             series = net[node].tolist()
             if max(abs(v) for v in series) < 1e-3:
                 continue
@@ -4325,7 +4579,7 @@ class InterNodeFlowsChart(QWidget):
                 "net_mw": [float(v) for v in series],
             })
         if not nodes_payload:
-            return {"error": "Power flows are all zero — nothing to plot"}
+            return {"error": tr("results_charts.err_flows_all_zero")}
         return {
             "mode": "uc",
             "year": int(year),
@@ -4412,15 +4666,31 @@ _MGA_OBJECTIVE_COLORS = {
     "max_regional_equity": "#8E44AD",
     "evolutionary_dist":   "#16A085",
 }
-# Human-readable labels for the legend and hover text.
-_MGA_OBJECTIVE_LABELS = {
-    "cost_optimal":        "Cost-optimal",
-    "hsj_diversity":       "HSJ diversity",
-    "min_total_build":     "Min total build",
-    "max_tech_equity":     "Tech equity",
-    "max_regional_equity": "Regional equity",
-    "evolutionary_dist":   "Evolutionary dist.",
+
+
+def _mga_objective_label(objective: str) -> str:
+    """Legend / hover text of a SPORES objective id, translated; an
+    unknown id is shown title-cased."""
+    if objective in _MGA_OBJECTIVE_COLORS:
+        return tr(f"results_charts.mga_obj_{objective}")
+    return objective.replace("_", " ").title()
+
+
+# MGA technology categories (ids from :func:`_mga_category`) → key of
+# their translated name, for the hover texts Python builds.
+_MGA_CATEGORY_KEYS = {
+    "Solar": "series_solar",
+    "Wind": "series_wind",
+    "Other RE": "mga_cat_other_re",
+    "Storage": "series_storage",
+    "Thermal": "mga_cat_thermal",
+    "Other": "series_other",
 }
+
+
+def _mga_category_label(category: str) -> str:
+    key = _MGA_CATEGORY_KEYS.get(category)
+    return tr(f"results_charts.{key}") if key else category
 
 
 def _read_mga_node_labels(h5f, n: int) -> list[str]:
@@ -4431,7 +4701,7 @@ def _read_mga_node_labels(h5f, n: int) -> list[str]:
         raw = sc["name"][:]
         out = [r.decode() if isinstance(r, bytes) else str(r) for r in raw]
     while len(out) < n:
-        out.append(f"Node {len(out)}")
+        out.append(_default_node_label(len(out)))
     return out[:n]
 
 
@@ -4441,8 +4711,7 @@ def _build_mga_bundle(h5f, base_prefix: str) -> dict:
     per-system MGA but currently the data lives at root."""
     mga = h5f.get("mga")
     if mga is None:
-        return {"error": "No MGA results.\nEnable MGA in Global Settings > "
-                         "Master Problem and re-run."}
+        return {"error": tr("results_charts.err_no_mga")}
     slack = float(mga.attrs.get("slack_fraction", 0))
     optimal_cost = float(mga.attrs.get("optimal_cost", 0))
     years_arr = mga.attrs.get("years")
@@ -4565,7 +4834,7 @@ def _build_mga_bundle(h5f, base_prefix: str) -> dict:
             opt_idx = len(alts) - 1
 
     if not alts:
-        return {"error": "No alternatives found in /mga"}
+        return {"error": tr("results_charts.err_no_mga_alternatives")}
 
     inv_arr = np.array(invest_matrix, dtype=float)
     mins = inv_arr.min(axis=0)
@@ -4624,22 +4893,23 @@ def _build_mga_bundle(h5f, base_prefix: str) -> dict:
     # with the agnostic L1 distance from the cost-optimal plan, which
     # is comparable across methods.
     parcoord_dims = [
-        ("Cost ($B)",         [a["cost_busd"] for a in alts]),
+        (tr("results_charts.mga_dim_cost"), [a["cost_busd"] for a in alts]),
     ]
     if method == "spores":
         parcoord_dims.append(
-            ("Distance from opt.",
+            (tr("results_charts.mga_dim_distance"),
              [a["cost_optimal_distance"] for a in alts])
         )
     else:
         parcoord_dims.append(
-            ("Diversity", [(a["diversity"] or 0.0) for a in alts])
+            (tr("results_charts.mga_dim_diversity"),
+             [(a["diversity"] or 0.0) for a in alts])
         )
     parcoord_dims.extend([
-        ("Peak RE (%)",   [a["re_peak_pct"] for a in alts]),
-        ("Renewable MW",  [a["tot_re_mw"] for a in alts]),
-        ("Storage MW",    [a["tot_storage_mw"] for a in alts]),
-        ("Thermal MW",    [a["tot_thermal_mw"] for a in alts]),
+        (tr("results_charts.mga_dim_peak_re"), [a["re_peak_pct"] for a in alts]),
+        (tr("results_charts.mga_dim_renewable_mw"), [a["tot_re_mw"] for a in alts]),
+        (tr("results_charts.mga_dim_storage_mw"), [a["tot_storage_mw"] for a in alts]),
+        (tr("results_charts.mga_dim_thermal_mw"), [a["tot_thermal_mw"] for a in alts]),
     ])
     parcoords = {
         "dim_labels": [d[0] for d in parcoord_dims],
@@ -4958,7 +5228,7 @@ def _build_mga_bundle(h5f, base_prefix: str) -> dict:
         tech_full = all_labels[t]
         tech_short = tech_full.split("/", 1)[-1]
         node_lab = (node_labels[nd] if nd < len(node_labels)
-                    else f"Node {nd}")
+                    else _default_node_label(nd))
         tn_col_labels.append(f"{tech_short} @ {node_lab}")
         tn_col_categories.append(all_meta[t]["category"])
     view_tech_node = _make_df_view(
@@ -4968,7 +5238,8 @@ def _build_mga_bundle(h5f, base_prefix: str) -> dict:
     )
 
     df_alt_labels = [
-        (("★ " if alts[i]["is_optimal"] else "") + f"Alt {alts[i]['id']}")
+        (("★ " if alts[i]["is_optimal"] else "")
+         + tr("results_charts.mga_alt_label", id=alts[i]["id"]))
         for i in df_alt_order
     ]
     decision_factors = {
@@ -5082,7 +5353,9 @@ def _build_mga_bundle(h5f, base_prefix: str) -> dict:
                 "x": R_lab * math.cos(th),
                 "y": R_lab * math.sin(th),
                 "angle_deg": math.degrees(th),
-                "text": f"Alt {alts[leaf]['id']}",
+                # ``alt_id`` lets the JS build its own "Alt N" text.
+                "text": tr("results_charts.mga_alt_label", id=alts[leaf]["id"]),
+                "alt_id": alts[leaf]["id"],
                 "is_optimal": bool(alts[leaf]["is_optimal"]),
                 "cluster": int(clusters[leaf]),
             })
@@ -5164,6 +5437,7 @@ def _build_mga_bundle(h5f, base_prefix: str) -> dict:
 
         for i, leaf in enumerate(order):
             th_c = leaf_angle[i]
+            alt_text = tr("results_charts.mga_alt_label", id=alts[leaf]["id"])
             sums = per_alt_cat_mw[leaf]
             total = sum(sums.values())
             r_lo = T0_R0
@@ -5176,8 +5450,9 @@ def _build_mga_bundle(h5f, base_prefix: str) -> dict:
                 r_hi = r_lo + r_extent * share
                 w = wedge_polygon(
                     r_lo, r_hi, th_c, half, cat_color[cat],
-                    f"<b>Alt {alts[leaf]['id']}</b><br>{cat}: "
-                    f"{v:,.0f} MW ({share * 100:.0f}%)")
+                    tr("results_charts.mga_ring_composition",
+                       alt=alt_text, category=_mga_category_label(cat),
+                       mw=f"{v:,.0f}", share=f"{share * 100:.0f}"))
                 w["track"] = "composition"
                 annotated_dendrogram["ring_segments"].append(w)
                 r_lo = r_hi
@@ -5187,27 +5462,26 @@ def _build_mga_bundle(h5f, base_prefix: str) -> dict:
                 v_re = re_peak[leaf] / max_re if max_re > 0 else 0.0
                 w_re = wedge_polygon(
                     T1_R0, T1_R1, th_c, half, green_scale(v_re),
-                    f"<b>Alt {alts[leaf]['id']}</b><br>Peak RE: "
-                    f"{re_peak[leaf]:.1f}%")
+                    tr("results_charts.mga_ring_peak_re", alt=alt_text,
+                       pct=f"{re_peak[leaf]:.1f}"))
                 w_re["track"] = "re_peak"
                 annotated_dendrogram["ring_segments"].append(w_re)
             else:
                 obj = alts[leaf]["objective"]
                 obj_color = _MGA_OBJECTIVE_COLORS.get(obj, "#7f8c8d")
-                obj_label = _MGA_OBJECTIVE_LABELS.get(
-                    obj, obj.replace("_", " ").title())
+                obj_label = _mga_objective_label(obj)
                 w_obj = wedge_polygon(
                     T1_R0, T1_R1, th_c, half, obj_color,
-                    f"<b>Alt {alts[leaf]['id']}</b><br>"
-                    f"Objective: {obj_label}")
+                    tr("results_charts.mga_ring_objective", alt=alt_text,
+                       objective=obj_label))
                 w_obj["track"] = "objective"
                 annotated_dendrogram["ring_segments"].append(w_obj)
             # ── Track 2 ── Cost premium (red ramp) ──
             v_c = cost_pct[leaf] / max_cost if max_cost > 0 else 0.0
             w_c = wedge_polygon(
                 T2_R0, T2_R1, th_c, half, red_scale(v_c),
-                f"<b>Alt {alts[leaf]['id']}</b><br>+"
-                f"{cost_pct[leaf]:.2f}% above optimal")
+                tr("results_charts.mga_ring_cost_premium", alt=alt_text,
+                   pct=f"{cost_pct[leaf]:.2f}"))
             w_c["track"] = "cost_premium"
             annotated_dendrogram["ring_segments"].append(w_c)
 
@@ -5257,7 +5531,7 @@ def _build_mga_bundle(h5f, base_prefix: str) -> dict:
         for o in (["cost_optimal"] + distinct_objectives)
     }
     objective_labels_map = {
-        o: _MGA_OBJECTIVE_LABELS.get(o, o.replace("_", " ").title())
+        o: _mga_objective_label(o)
         for o in objective_palette.keys()
     }
 
@@ -5294,18 +5568,22 @@ def _build_mga_bundle(h5f, base_prefix: str) -> dict:
 
 def _load_mga_bundle(h5_path: Path, base_prefix: str) -> dict:
     """Cache-aware loader: all five MGA charts share the same bundle so
-    the HDF5 read + analytics happen exactly once per batch render."""
+    the HDF5 read + analytics happen exactly once per batch render. The
+    bundle holds translated labels and hover texts, so it is kept per
+    language."""
+    from esfex.visualization.i18n import get_language
+    key = (base_prefix, get_language())
     cache = _active_cache()
     if cache is not None:
         store = getattr(cache, "mga_bundle", None)
         if store is None:
             cache.mga_bundle = store = {}
-        if base_prefix in store:
-            return store[base_prefix]
+        if key in store:
+            return store[key]
     with _open_h5(h5_path) as h5f:
         bundle = _build_mga_bundle(h5f, base_prefix)
     if cache is not None and "error" not in bundle:
-        cache.mga_bundle[base_prefix] = bundle
+        cache.mga_bundle[key] = bundle
     return bundle
 
 
@@ -5323,7 +5601,7 @@ class _MGAChartBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -5380,7 +5658,7 @@ class _MGAChartBase(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -5482,7 +5760,7 @@ class MGASpatialChart(_MGAChartBase):
         w = QWidget()
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
-        wl.addWidget(QLabel("Colormap"))
+        wl.addWidget(QLabel(tr("results_charts.colormap")))
         cb = QComboBox()
         cb.addItems(self._COLORSCALES)
         cb.setCurrentText(self._colormap)
@@ -5528,7 +5806,7 @@ class MGAProjectionChart(_MGAChartBase):
         w = QWidget()
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
-        wl.addWidget(QLabel("Method:"))
+        wl.addWidget(QLabel(tr("results_charts.method")))
         cb = QComboBox()
         for d, lab in (("pca", "PCA"), ("tsne", "t-SNE")):
             cb.addItem(lab, d)
@@ -5584,8 +5862,8 @@ class MGADecisionFactorsChart(_MGAChartBase):
     # decision (one column per (technology, node) cell that any
     # alternative actually used > 1 MW).
     _GRANULARITIES = [
-        ("tech",      "Tech"),
-        ("tech_node", "Tech × Node"),
+        ("tech",      "results_charts.granularity_tech"),
+        ("tech_node", "results_charts.granularity_tech_node"),
     ]
 
     def __init__(self):
@@ -5597,10 +5875,10 @@ class MGADecisionFactorsChart(_MGAChartBase):
         w = QWidget()
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
-        wl.addWidget(QLabel("Granularity"))
+        wl.addWidget(QLabel(tr("results_charts.granularity")))
         gb = QComboBox()
-        for value, label in self._GRANULARITIES:
-            gb.addItem(label, value)
+        for value, key in self._GRANULARITIES:
+            gb.addItem(tr(key), value)
         # Match selection to the saved key, not the display label.
         idx = next((i for i, (v, _) in enumerate(self._GRANULARITIES)
                     if v == self._granularity), 0)
@@ -5610,7 +5888,7 @@ class MGADecisionFactorsChart(_MGAChartBase):
         )
         wl.addWidget(gb)
         wl.addSpacing(12)
-        wl.addWidget(QLabel("Colormap"))
+        wl.addWidget(QLabel(tr("results_charts.colormap")))
         cb = QComboBox()
         cb.addItems(self._COLORSCALES)
         cb.setCurrentText(self._colormap)
@@ -5714,7 +5992,7 @@ class MGASimilarityChart(_MGAChartBase):
         w = QWidget()
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
-        wl.addWidget(QLabel("Colormap"))
+        wl.addWidget(QLabel(tr("results_charts.colormap")))
         cb = QComboBox()
         cb.addItems(self._COLORSCALES)
         cb.setCurrentText(self._colormap)
@@ -5757,7 +6035,7 @@ class MGAComparisonChart(_MGAChartBase):
     _HTML_FILE = "mga_robust.html"
 
     def _build_payload(self, h5_path, years, **kw):
-        return {"error": "This chart has been split into five MGA charts."}
+        return {"error": tr("results_charts.err_mga_split")}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -5783,7 +6061,7 @@ class _FuelSupplyBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -5849,7 +6127,7 @@ class FuelSupplyChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -5862,44 +6140,12 @@ class FuelSupplyChart(QWidget):
         year_gen_by_fuel: dict[int, dict[str, float]] = {}
         year_cost_by_fuel: dict[int, dict[str, float]] = {}
         all_fuels: set[str] = set()
+        # Groups made up for units with no fuel (shown translated).
+        fallback_fuels: set[str] = set()
 
         with _open_h5(h5_path) as h5f:
             tres = _get_temporal_res(h5f)
-            gen_configs = _load_gen_configs(h5f, bp)
-
-            # gen_name → (fuel, avg_fuel_cost $/MWh). Average across
-            # the time-varying fuel_cost vector so each fuel gets a
-            # single price for the year-cost aggregation.
-            gen_fuel_info: dict[str, tuple[str, float]] = {}
-            for gc in gen_configs:
-                name = gc.get("name", "")
-                if isinstance(name, bytes):
-                    name = name.decode()
-                fuel = gc.get("fuel", "")
-                if isinstance(fuel, bytes):
-                    fuel = fuel.decode()
-                if not fuel or fuel.lower() in ("none", ""):
-                    continue
-                fc_raw = gc.get("fuel_cost", None)
-                avg_fc = 0.0
-                if fc_raw is not None:
-                    if isinstance(fc_raw, (list, np.ndarray)):
-                        vals = [float(v) for v in fc_raw if float(v) > 0]
-                        avg_fc = float(np.mean(vals)) if vals else 0.0
-                    elif isinstance(fc_raw, str):
-                        try:
-                            parsed = [float(v) for v in fc_raw.strip("[]").split(",")
-                                      if float(v.strip()) > 0]
-                            avg_fc = float(np.mean(parsed)) if parsed else 0.0
-                        except (ValueError, TypeError):
-                            avg_fc = 0.0
-                    else:
-                        try:
-                            v = float(fc_raw)
-                            avg_fc = v if v > 0 else 0.0
-                        except (ValueError, TypeError):
-                            avg_fc = 0.0
-                gen_fuel_info[name] = (fuel, avg_fc)
+            unit_config = _gen_config_resolver(h5f, bp)
 
             for sc_key, year in _sorted_scenarios(h5f, bp):
                 sc = _open_scenario(h5f, bp, sc_key)
@@ -5910,18 +6156,18 @@ class FuelSupplyChart(QWidget):
                 for gen_name, arr in gen_data.items():
                     total = _sum_nodes(arr) if arr.ndim >= 2 else arr
                     gen_mwh = float(np.sum(total)) * tres
-                    # Match generator → (fuel, avg_fuel_cost)
-                    matched_fuel = None
-                    matched_fc = 0.0
-                    for cfg_name, (cfg_fuel, cfg_fc) in gen_fuel_info.items():
-                        suffix = cfg_name.split("/")[-1] if "/" in cfg_name else cfg_name
-                        if cfg_name.endswith(gen_name) or gen_name.endswith(suffix):
-                            matched_fuel = cfg_fuel
-                            matched_fc = cfg_fc
-                            break
-                    if matched_fuel is None:
+                    # The unit's (or a master-built unit's technology's) fuel
+                    # and fuel cost averaged over the per-node vector
+                    cfg = unit_config(gen_name)
+                    matched_fuel = cfg.get("fuel", "")
+                    if isinstance(matched_fuel, bytes):
+                        matched_fuel = matched_fuel.decode()
+                    matched_fc = CashFlowChart._scalar_avg_cost(cfg.get("fuel_cost"))
+                    if not matched_fuel or str(matched_fuel).lower() == "none":
                         _, cat = _canonical_tech_name(gen_name)
                         matched_fuel = "Renewable" if cat == "renewable" else "Other"
+                        fallback_fuels.add(matched_fuel)
+                        matched_fc = 0.0
                     gen_by_fuel[matched_fuel] = gen_by_fuel.get(matched_fuel, 0.0) + gen_mwh
                     all_fuels.add(matched_fuel)
                     cost = gen_mwh * matched_fc
@@ -5932,7 +6178,7 @@ class FuelSupplyChart(QWidget):
                 year_cost_by_fuel[int(year)] = cost_by_fuel
 
         if not year_gen_by_fuel:
-            return {"error": "No generation data"}
+            return {"error": tr("results_charts.err_no_generation_data")}
 
         sorted_years = sorted(year_gen_by_fuel.keys())
         fuel_list = sorted(all_fuels)
@@ -5947,13 +6193,17 @@ class FuelSupplyChart(QWidget):
             cost_vals = [float(year_cost_by_fuel.get(y, {}).get(fuel, 0.0)) / 1e6
                          for y in sorted_years]
             color = _FUEL_COLORS[i % len(_FUEL_COLORS)]
+            label = fuel
+            if fuel in fallback_fuels:
+                label = (tr("results_charts.fuel_group_renewable")
+                         if fuel == "Renewable" else _series_label(fuel))
             if any(v > 0 for v in gen_vals):
                 fuels_payload.append({
-                    "label": fuel, "color": color, "values_gwh": gen_vals,
+                    "label": label, "color": color, "values_gwh": gen_vals,
                 })
             if any(v > 0 for v in cost_vals):
                 fuel_costs_payload.append({
-                    "label": fuel, "color": color, "values_musd": cost_vals,
+                    "label": label, "color": color, "values_musd": cost_vals,
                 })
 
         # Trend lines: sum across fuels per year, in the same units as
@@ -5997,7 +6247,7 @@ class _SankeyBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -6061,7 +6311,7 @@ class SankeyEnergyFlowChart(QWidget):
         w = QWidget()
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
-        wl.addWidget(QLabel("Year:"))
+        wl.addWidget(QLabel(tr("results_charts.year")))
         cb = QComboBox()
         cb.addItems([str(y) for y in self._available_years])
         if self._available_years:
@@ -6130,7 +6380,7 @@ class SankeyEnergyFlowChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -6286,7 +6536,7 @@ class SankeyEnergyFlowChart(QWidget):
                         node_names = [x.decode("utf-8") if isinstance(x, bytes)
                                       else str(x) for x in nn_grp["name"][:]]
                     except Exception:
-                        node_names = [f"Node {i}" for i in
+                        node_names = [_default_node_label(i) for i in
                                       range(nn_grp["latitude"].shape[0])]
                 if "losses" in nn_grp:
                     node_losses = list(nn_grp["losses"][:])
@@ -6319,9 +6569,9 @@ class SankeyEnergyFlowChart(QWidget):
 
             # Per-node demand
             if "demand" in sc:
-                dem = sc["demand"][:]
+                dem = _demand_node_hours(sc)
                 for ni in range(dem.shape[0]):
-                    nname = node_names[ni] if ni < len(node_names) else f"Node {ni}"
+                    nname = node_names[ni] if ni < len(node_names) else _default_node_label(ni)
                     gwh = float(np.sum(dem[ni, :])) * tres / 1000.0
                     if gwh > 0:
                         demand_by_node[nname] = demand_by_node.get(nname, 0) + gwh
@@ -6332,15 +6582,18 @@ class SankeyEnergyFlowChart(QWidget):
             if "loss_load" in sc:
                 loss_load_total = float(np.sum(sc["loss_load"][:])) * tres / 1000.0
 
-            # Transmission losses from node loss factors
-            if node_losses and "demand" in sc:
-                dem = sc["demand"][:]
+            # Transmission losses: the dispatch's own (line_losses); files
+            # without it are estimated from node loss factors or flows
+            if "line_losses" in sc:
+                tx_loss_total = float(np.sum(sc["line_losses"][:])) * tres / 1000.0
+            elif node_losses and "demand" in sc:
+                dem = _demand_node_hours(sc)
                 for ni in range(dem.shape[0]):
                     if ni < len(node_losses) and node_losses[ni] > 0:
                         node_dem = float(np.sum(dem[ni, :])) * tres / 1000.0
                         tx_loss_total += node_dem * node_losses[ni]
             # Fallback: estimate from power_flow if no loss factors
-            if tx_loss_total < 0.01 and "power_flow" in sc:
+            if "line_losses" not in sc and tx_loss_total < 0.01 and "power_flow" in sc:
                 pf = sc["power_flow"][:]
                 if pf.ndim == 3:
                     total_flow = float(np.sum(np.abs(pf))) * tres / 1000.0
@@ -6350,7 +6603,7 @@ class SankeyEnergyFlowChart(QWidget):
         if not gen_by_tech:
             self.fig.clf()
             ax = self.fig.add_axes([0, 0, 1, 1])
-            ax.text(0.5, 0.5, "No generation data available",
+            ax.text(0.5, 0.5, tr("results_charts.no_generation_data"),
                     ha="center", va="center", fontsize=14, color="#888")
             ax.set_axis_off()
             self.draw()
@@ -6363,14 +6616,17 @@ class SankeyEnergyFlowChart(QWidget):
         # ── Column 0: Primary Energy Sources ──
         # ── Column 1: Generation Technologies ──
         # ── Column 2: Power Grid (In) ──
-        grid_in = _idx("Power Grid (In)", CLR_GRID_IN)
+        # Node names double as the dedup keys of ``_idx``; the fixed
+        # ones are translated once here so every call uses the same text.
+        conv_loss_name = tr("results_charts.sankey_conversion_losses")
+        grid_in = _idx(tr("results_charts.sankey_grid_in"), CLR_GRID_IN)
 
         sorted_techs = sorted(gen_by_tech.items(), key=lambda x: -x[1])
         conv_loss_total = 0.0
 
         for tech, gen_gwh in sorted_techs:
             clr = _color_for(tech)
-            tech_nd = _idx(f"Gen: {tech}", clr)
+            tech_nd = _idx(tr("results_charts.sankey_gen_node", tech=tech), clr)
 
             eff_vals = _tech_eff.get(tech, [])
             avg_eff = float(np.mean(eff_vals)) if eff_vals else 1.0
@@ -6382,7 +6638,7 @@ class SankeyEnergyFlowChart(QWidget):
 
             fuel = _tech_fuel.get(tech, tech)
             fuel_clr = FUEL_COLORS.get(fuel, _color_for(fuel))
-            fuel_nd = _idx(f"Fuel: {fuel}", fuel_clr)
+            fuel_nd = _idx(tr("results_charts.sankey_fuel_node", fuel=fuel), fuel_clr)
 
             # Fuel → Gen Technology
             _link(fuel_nd, tech_nd, primary_gwh, _rgba(fuel_clr, 0.35))
@@ -6390,11 +6646,11 @@ class SankeyEnergyFlowChart(QWidget):
             _link(tech_nd, grid_in, gen_gwh, _rgba(clr, 0.35))
             # Gen Technology → Conversion Losses
             if losses_gwh > 0.1:
-                loss_nd = _idx("Conversion Losses", CLR_CONV_LOSS)
+                loss_nd = _idx(conv_loss_name, CLR_CONV_LOSS)
                 _link(tech_nd, loss_nd, losses_gwh, _rgba(CLR_CONV_LOSS, 0.2))
 
         # ── Column 3: Power Grid (Out) ──
-        grid_out = _idx("Power Grid (Out)", CLR_GRID_OUT)
+        grid_out = _idx(tr("results_charts.sankey_grid_out"), CLR_GRID_OUT)
         grid_internal_loss = total_generation * 0.005  # ~0.5% internal grid loss
         grid_throughput = total_generation - grid_internal_loss
 
@@ -6402,7 +6658,7 @@ class SankeyEnergyFlowChart(QWidget):
         _link(grid_in, grid_out, grid_throughput, _rgba(CLR_GRID_IN, 0.25))
         # Grid In → Conversion Losses (internal)
         if grid_internal_loss > 0.1:
-            _link(grid_in, _idx("Conversion Losses", CLR_CONV_LOSS),
+            _link(grid_in, _idx(conv_loss_name, CLR_CONV_LOSS),
                   grid_internal_loss, _rgba(CLR_CONV_LOSS, 0.15))
 
         # ── Storage: split In/Out per type ──
@@ -6414,8 +6670,8 @@ class SankeyEnergyFlowChart(QWidget):
             rt_loss = ch - dc if ch > dc else ch * (1 - rt_eff)
             bat_rt_losses_total += max(rt_loss, 0)
 
-            st_in = _idx(f"Storage: {bt} (In)", CLR_STORAGE)
-            st_out = _idx(f"Storage: {bt} (Out)", CLR_STORAGE)
+            st_in = _idx(tr("results_charts.sankey_storage_in", name=bt), CLR_STORAGE)
+            st_out = _idx(tr("results_charts.sankey_storage_out", name=bt), CLR_STORAGE)
 
             # Grid Out → Storage In
             if ch > 0.01:
@@ -6425,7 +6681,7 @@ class SankeyEnergyFlowChart(QWidget):
                 _link(st_in, st_out, dc, _rgba(CLR_STORAGE, 0.25))
                 loss = ch - dc
                 if loss > 0.1:
-                    _link(st_in, _idx("Conversion Losses", CLR_CONV_LOSS),
+                    _link(st_in, _idx(conv_loss_name, CLR_CONV_LOSS),
                           loss, _rgba(CLR_CONV_LOSS, 0.15))
             # Storage Out → Grid Out
             if dc > 0.01:
@@ -6433,12 +6689,13 @@ class SankeyEnergyFlowChart(QWidget):
 
         # ── Grid Out → Transmission Losses ──
         if tx_loss_total > 0.1:
-            _link(grid_out, _idx("Transmission Losses", CLR_TX_LOSS),
+            _link(grid_out, _idx(tr("results_charts.sankey_transmission_losses"),
+                                 CLR_TX_LOSS),
                   tx_loss_total, _rgba(CLR_TX_LOSS, 0.2))
 
         # ── Grid Out → Curtailment ──
         if curtailment_total > 0.1:
-            _link(grid_out, _idx("Curtailment", CLR_CURT),
+            _link(grid_out, _idx(_series_label("Curtailment"), CLR_CURT),
                   curtailment_total, _rgba(CLR_CURT, 0.25))
 
         # ── Grid Out → Per-node demands ──
@@ -6448,7 +6705,7 @@ class SankeyEnergyFlowChart(QWidget):
 
         # ── Unserved Energy → Grid Out (deficit) ──
         if loss_load_total > 0.1:
-            _link(_idx("Unserved Energy", CLR_UNSERVED), grid_out,
+            _link(_idx(tr("results_charts.sankey_unserved"), CLR_UNSERVED), grid_out,
                   loss_load_total, _rgba(CLR_UNSERVED, 0.25))
 
         # ── Build Plotly figure ──
@@ -6460,7 +6717,8 @@ class SankeyEnergyFlowChart(QWidget):
             node_in[t] += v
         node_totals = [max(node_in[i], node_out[i]) for i in range(len(_nodes))]
         labels = [
-            f"{_nodes[i]}<br>{node_totals[i]:,.0f} GWh"
+            tr("results_charts.sankey_node_label", name=_nodes[i],
+               gwh=f"{node_totals[i]:,.0f}")
             for i in range(len(_nodes))
         ]
 
@@ -6488,11 +6746,13 @@ class SankeyEnergyFlowChart(QWidget):
             ),
         ))
 
-        title_text = (
-            f"Energy Flow — {sel_year}"
-            f"  |  Generation: {total_generation:,.0f} GWh"
-            f"  |  Demand: {total_demand:,.0f} GWh"
-            f"  |  RE: {re_pct:.1f}%"
+        # No chart-level heading (the Results Viewer window already
+        # names the chart); keep only the key totals as a caption.
+        caption_text = tr(
+            "results_charts.sankey_caption",
+            generation=f"{total_generation:,.0f}",
+            demand=f"{total_demand:,.0f}",
+            re_pct=f"{re_pct:.1f}",
         )
         # Pick up the active GUI palette so the Sankey blends with the
         # surrounding window. Falls back to white if the theme module
@@ -6506,11 +6766,11 @@ class SankeyEnergyFlowChart(QWidget):
             _bg, _fg = "white", "black"
 
         pfig.update_layout(
-            title=dict(text=title_text,
-                       font=dict(size=14, family="Arial, sans-serif",
+            title=dict(text=caption_text,
+                       font=dict(size=11, family="Arial, sans-serif",
                                  color=_fg)),
             font=dict(size=11, family="Arial, sans-serif", color=_fg),
-            margin=dict(l=10, r=10, t=50, b=10),
+            margin=dict(l=10, r=10, t=36, b=10),
             paper_bgcolor=_bg,
             plot_bgcolor=_bg,
         )
@@ -6538,7 +6798,7 @@ class _RevenueProfitabilityBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -6604,7 +6864,7 @@ class RevenueProfitabilityChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -6636,6 +6896,9 @@ class RevenueProfitabilityChart(QWidget):
         lcoe_sum_w: dict[str, float] = {}
         gen_for_lcoe: dict[str, float] = {}
         bucket_color: dict[str, str] = {}
+        # Shown text per bucket: a made-up bucket (fuel group, "Other")
+        # is translated, a technology from the user's data is not.
+        bucket_display: dict[str, str] = {}
 
         with _open_h5(h5_path) as h5f:
             # Resolve each selling-price / LCOE entry to its technology
@@ -6659,7 +6922,11 @@ class RevenueProfitabilityChart(QWidget):
                 through to the grey "Other" bucket."""
                 info = _resolve_gen_tech(name, gen_tech_map)
                 if info is not None and info.get("label"):
-                    return info["label"], (info.get("color") or "#7F8C8D")
+                    label = info["label"]
+                    bucket_display.setdefault(
+                        label, _series_label(label) if info.get("bucket") else label)
+                    return label, (info.get("color") or "#7F8C8D")
+                bucket_display.setdefault("Other", _series_label("Other"))
                 return "Other", "#7F8C8D"
 
             for sc_key, year in _sorted_scenarios(h5f, bp):
@@ -6697,7 +6964,7 @@ class RevenueProfitabilityChart(QWidget):
                 per_year[int(year)] = year_buckets
 
         if not per_year:
-            return {"error": "No revenue data"}
+            return {"error": tr("results_charts.err_no_revenue_data")}
 
         sorted_years = sorted(per_year.keys())
         buckets = sorted({t for d in per_year.values() for t in d})
@@ -6714,7 +6981,7 @@ class RevenueProfitabilityChart(QWidget):
                 totals_musd[i] += rev_musd
             if any(v > 0 for v in rev_series):
                 techs_payload.append({
-                    "label": bk,
+                    "label": bucket_display.get(bk, bk),
                     "color": bucket_color.get(bk, "#7F8C8D"),
                     "revenue_musd": rev_series,
                 })
@@ -6737,7 +7004,7 @@ class RevenueProfitabilityChart(QWidget):
                 if avg_price > 1e-6 else None
             )
             summary.append({
-                "label": bk,
+                "label": bucket_display.get(bk, bk),
                 "color": bucket_color.get(bk, "#7F8C8D"),
                 "avg_price": float(avg_price),
                 "lcoe": float(avg_lcoe),
@@ -6770,7 +7037,7 @@ class _PriceDurationBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -6834,7 +7101,7 @@ class PriceDurationChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -6941,11 +7208,11 @@ class PriceDurationChart(QWidget):
                 if c_monthly is not None:
                     c_monthly = np.array(c_monthly) / hpm
 
-                months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                          "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                months = _month_short_names()
                 ref = e_monthly if e_monthly is not None else c_monthly
                 for m_idx in range(min(12, len(ref))):
-                    monthly_labels.append(f"{year} {months[m_idx]}")
+                    monthly_labels.append(tr("results_charts.xlabel_year_month_space",
+                                             year=year, month=months[m_idx]))
                     monthly_energy.append(
                         float(e_monthly[m_idx]) if e_monthly is not None else 0.0
                     )
@@ -6958,7 +7225,7 @@ class PriceDurationChart(QWidget):
                     )
 
         if not duration_curves and not monthly_labels:
-            return {"error": "No price data"}
+            return {"error": tr("results_charts.err_no_price_data")}
 
         return {
             "years": [str(dc["year"]) for dc in duration_curves],
@@ -6988,7 +7255,7 @@ class _CarbonPenaltyBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -7053,7 +7320,7 @@ class CarbonPenaltyChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -7091,7 +7358,7 @@ class CarbonPenaltyChart(QWidget):
 
                 # Demand for intensity normalisation.
                 if "demand" in sc:
-                    d = sc["demand"][:]
+                    d = _demand_node_hours(sc)
                     df = _sum_nodes(d) if d.ndim >= 2 else d
                     demand_mwh.append(float(np.sum(df)) * tres)
                 else:
@@ -7102,7 +7369,7 @@ class CarbonPenaltyChart(QWidget):
                 rsv_sta.append(self._sum_scenario(sc, "loss_of_reserve_static", tres))
 
         if not yr_list:
-            return {"error": "No data"}
+            return {"error": tr("results_charts.err_no_data")}
 
         co2_mt = [v / 1e6 for v in co2_t]
         # Intensity = (g CO₂) / (kWh demand) = tons * 1e6 g/t  /  (MWh * 1e3 kWh/MWh)
@@ -7139,7 +7406,7 @@ class _CashFlowBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -7205,7 +7472,7 @@ class CashFlowChart(QWidget):
         wl = QHBoxLayout(w)
         wl.setContentsMargins(0, 0, 0, 0)
 
-        wl.addWidget(QLabel("Discount rate (%)"))
+        wl.addWidget(QLabel(tr("results_charts.discount_rate")))
         sp_d = QDoubleSpinBox()
         sp_d.setRange(0.0, 30.0)
         sp_d.setSingleStep(0.5)
@@ -7213,7 +7480,7 @@ class CashFlowChart(QWidget):
         sp_d.valueChanged.connect(self._on_discount_changed)
         wl.addWidget(sp_d)
 
-        wl.addWidget(QLabel("VOLL ($/MWh)"))
+        wl.addWidget(QLabel(tr("results_charts.voll")))
         sp_v = QDoubleSpinBox()
         sp_v.setRange(0.0, 100000.0)
         sp_v.setSingleStep(500.0)
@@ -7256,7 +7523,7 @@ class CashFlowChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -7320,16 +7587,10 @@ class CashFlowChart(QWidget):
                          if _is_per_system else bt_configs)
             sys_filter = bp.split("/")[-1] if _is_per_system else None
 
-            # Pre-compute (fuel, $/MWh fuel, $/ton co2) per generator
-            gen_fuel_info: dict[str, tuple[float, float]] = {}
-            for gc in gen_configs:
-                name = gc.get("name", "")
-                if isinstance(name, bytes):
-                    name = name.decode()
-                gen_fuel_info[name] = (
-                    self._scalar_avg_cost(gc.get("fuel_cost")),
-                    self._scalar_avg_cost(gc.get("co2_emission_cost")),
-                )
+            # $/ton CO2 of each configured generator
+            co2_rates = [r for gc in gen_configs
+                         if (r := self._scalar_avg_cost(gc.get("co2_emission_cost"))) > 0]
+            unit_config = _gen_config_resolver(h5f, bp)
 
             for sc_key, year in _sorted_scenarios(h5f, bp):
                 sc = _open_scenario(h5f, bp, sc_key)
@@ -7357,7 +7618,6 @@ class CashFlowChart(QWidget):
                 # Average $/ton across configs (weighted by their gen
                 # share would be more accurate, but matches the
                 # matplotlib chart's existing simplification).
-                co2_rates = [r for (_f, r) in gen_fuel_info.values() if r > 0]
                 avg_co2_rate = float(np.mean(co2_rates)) if co2_rates else 0.0
                 year_co2_cost = co2_total_t * avg_co2_rate
 
@@ -7366,14 +7626,9 @@ class CashFlowChart(QWidget):
                     gen_mwh = float(np.sum(total)) * tres
                     if gen_mwh <= 0:
                         continue
-                    # Best-effort match against gen_configs by suffix
-                    matched_fc = 0.0
-                    for cfg_name, (fc, _co2) in gen_fuel_info.items():
-                        suffix = cfg_name.split("/")[-1] if "/" in cfg_name else cfg_name
-                        if cfg_name.endswith(gen_name) or gen_name.endswith(suffix):
-                            matched_fc = fc
-                            break
-                    year_fuel += gen_mwh * matched_fc
+                    # The unit's (or its technology's) mean fuel cost
+                    year_fuel += gen_mwh * self._scalar_avg_cost(
+                        unit_config(gen_name).get("fuel_cost"))
                 fuel_cost.append(year_fuel)
                 co2_cost.append(year_co2_cost)
 
@@ -7407,22 +7662,11 @@ class CashFlowChart(QWidget):
                     if inv_mw > 0 and (sys_filter is None or bt_name.startswith(sys_filter + "/")):
                         rate = inv_data.get("bat_tech_costs", {}).get(bt_name, 0)
                         year_capex += float(inv_mw) * rate
-                if "gen_investment_power" in inv_data:
-                    for gi, inv_mw in enumerate(inv_data["gen_investment_power"]):
-                        if inv_mw > 0 and gi < len(gen_configs):
-                            gc = gen_configs[gi]
-                            if "invest_cost" in gc:
-                                year_capex += float(inv_mw) * _parse_invest_cost(gc["invest_cost"])
-                if "bat_investment_power" in inv_data:
-                    for bi, inv_mw in enumerate(inv_data["bat_investment_power"]):
-                        if inv_mw > 0 and bi < len(bat_configs):
-                            bc = bat_configs[bi]
-                            if "invest_cost" in bc:
-                                year_capex += float(inv_mw) * _parse_invest_cost(bc["invest_cost"])
+                year_capex += _legacy_investment_cost(inv_data, gen_configs, bat_configs)
                 capex.append(year_capex)
 
         if not yr_list:
-            return {"error": "No cash flow data"}
+            return {"error": tr("results_charts.err_no_cash_flow")}
 
         # ── Aggregate into per-year M$ series ──
         n = len(yr_list)
@@ -7476,16 +7720,16 @@ class CashFlowChart(QWidget):
         # `relative` mode stacks in array order. Outflows are emitted
         # with sign=-1 so the JS flips them to negative bars.
         components = [
-            {"label": "Revenue",     "color": "#27AE60",
-             "values_musd": rev_m,  "sign":  1},
-            {"label": "Fuel cost",   "color": "#E67E22",
-             "values_musd": fuel_m, "sign": -1},
-            {"label": "CO₂ cost",    "color": "#7F8C8D",
-             "values_musd": co2_m,  "sign": -1},
-            {"label": "Loss of Load","color": "#C0392B",
-             "values_musd": ll_m,   "sign": -1},
-            {"label": "Investment",  "color": "#2980B9",
-             "values_musd": cpx_m,  "sign": -1},
+            {"id": "revenue", "label": tr("results_charts.cashflow_revenue"),
+             "color": "#27AE60", "values_musd": rev_m, "sign": 1},
+            {"id": "fuel_cost", "label": tr("results_charts.cashflow_fuel_cost"),
+             "color": "#E67E22", "values_musd": fuel_m, "sign": -1},
+            {"id": "co2_cost", "label": tr("results_charts.cashflow_co2_cost"),
+             "color": "#7F8C8D", "values_musd": co2_m, "sign": -1},
+            {"id": "loss_of_load", "label": tr("results_charts.cashflow_loss_of_load"),
+             "color": "#C0392B", "values_musd": ll_m, "sign": -1},
+            {"id": "investment", "label": tr("results_charts.cashflow_investment"),
+             "color": "#2980B9", "values_musd": cpx_m, "sign": -1},
         ]
 
         return {
@@ -7519,7 +7763,7 @@ class _SystemMetricsBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -7544,48 +7788,50 @@ class SystemMetricsEvolutionChart(QWidget):
     TITLE = "System Metrics Evolution"
     TR_KEY = "results_charts.system_metrics"
 
-    # Metric registry. Each entry: (label, unit, category, key) — the
-    # ``key`` selects the extractor function below. Categories drive
-    # the ordering AND the band colour.
+    # Metric registry. Each entry: (key, category id). ``key`` selects
+    # the extractor below and names the translated row label
+    # ``results_charts.metric_<key>`` (unit included). Categories drive
+    # the ordering AND the band colour; their shown names are
+    # ``results_charts.metric_cat_<id>``.
     _METRICS = [
         # System Reliability
-        ("Loss of Load Probability", "p.u.",     "System Reliability", "lolp"),
-        ("Loss of Load Hours",       "h/yr",     "System Reliability", "lolh"),
-        ("Loss of Load Frequency",   "events/yr","System Reliability", "lolf"),
-        ("Energy Not Served",        "MWh/yr",   "System Reliability", "ens"),
-        ("Peak Unserved Power",      "MW",       "System Reliability", "peak_uns"),
-        ("Reserve Shortfall",        "MWh/yr",   "System Reliability", "rsv_shortfall"),
-        ("Reserve Margin",           "%",        "System Reliability", "reserve_margin"),
+        ("lolp", "reliability"),
+        ("lolh", "reliability"),
+        ("lolf", "reliability"),
+        ("ens", "reliability"),
+        ("peak_uns", "reliability"),
+        ("rsv_shortfall", "reliability"),
+        ("reserve_margin", "reliability"),
         # Operational Security
-        ("Dynamic Reserve Adequacy", "%",      "Operational Security", "res_adq_dyn"),
-        ("Static Reserve Adequacy",  "%",      "Operational Security", "res_adq_sta"),
+        ("res_adq_dyn", "security"),
+        ("res_adq_sta", "security"),
         # System Flexibility
-        ("RE Curtailment",           "GWh/yr", "System Flexibility", "curtailment"),
-        ("Net Load Variability",     "MW",     "System Flexibility", "nl_var"),
-        ("Max Ramp Up Rate",         "MW/h",   "System Flexibility", "ramp_up"),
-        ("Max Ramp Down Rate",       "MW/h",   "System Flexibility", "ramp_down"),
-        ("Storage Utilization",      "%",      "System Flexibility", "storage_util"),
-        ("V2G Flexibility Provision","GWh/yr", "System Flexibility", "v2g"),
+        ("curtailment", "flexibility"),
+        ("nl_var", "flexibility"),
+        ("ramp_up", "flexibility"),
+        ("ramp_down", "flexibility"),
+        ("storage_util", "flexibility"),
+        ("v2g", "flexibility"),
         # Resource Adequacy
-        ("Renewable Penetration",    "%",      "Resource Adequacy", "re_pen"),
-        ("Total Installed Capacity", "MW",     "Resource Adequacy", "cap_total"),
-        ("Storage Energy Capacity",  "MWh",    "Resource Adequacy", "storage_cap"),
+        ("re_pen", "adequacy"),
+        ("cap_total", "adequacy"),
+        ("storage_cap", "adequacy"),
         # Economic Performance
-        ("System LCOE",              "$/MWh",  "Economic Performance", "lcoe_sys"),
-        ("Annual Investment Cost",   "M$",     "Economic Performance", "inv_cost"),
-        ("Annual Net Cash Flow",     "M$",     "Economic Performance", "net_cf"),
+        ("lcoe_sys", "economics"),
+        ("inv_cost", "economics"),
+        ("net_cf", "economics"),
         # Environmental Impact
-        ("CO₂ Emissions Rate",       "kg/MWh", "Environmental Impact", "co2_rate"),
-        ("CO₂ Emissions Total",      "Mt/yr",  "Environmental Impact", "co2_total"),
+        ("co2_rate", "environment"),
+        ("co2_total", "environment"),
     ]
 
     _CATEGORY_COLORS = {
-        "System Reliability":     "rgba(231,76,60,0.07)",
-        "Operational Security":   "rgba(241,196,15,0.07)",
-        "System Flexibility":     "rgba(52,152,219,0.07)",
-        "Resource Adequacy":      "rgba(46,204,113,0.07)",
-        "Economic Performance":   "rgba(155,89,182,0.07)",
-        "Environmental Impact":   "rgba(127,140,141,0.07)",
+        "reliability":  "rgba(231,76,60,0.07)",
+        "security":     "rgba(241,196,15,0.07)",
+        "flexibility":  "rgba(52,152,219,0.07)",
+        "adequacy":     "rgba(46,204,113,0.07)",
+        "economics":    "rgba(155,89,182,0.07)",
+        "environment":  "rgba(127,140,141,0.07)",
     }
 
     def __init__(self):
@@ -7633,7 +7879,7 @@ class SystemMetricsEvolutionChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -7652,7 +7898,8 @@ class SystemMetricsEvolutionChart(QWidget):
         return _sum_nodes(a) if a.ndim >= 2 else a
 
     def _extract_metrics(self, sc, sc_key, h5f, tres, gen_configs,
-                         bat_configs, tech_configs, bat_tech_configs) -> dict:
+                         bat_configs, tech_configs, bat_tech_configs,
+                         base_prefix: str = "") -> dict:
         out: dict[str, float] = {}
 
         ll = self._flat(sc, "loss_load")
@@ -7674,14 +7921,10 @@ class SystemMetricsEvolutionChart(QWidget):
             out["peak_uns"] = float(np.max(ll))
         if dem is not None and len(dem) > 0:
             peak_dem = float(np.max(dem))
-            # Reserve margin = (installed capacity − peak demand) / peak demand
-            installed_mw = 0.0
-            for gc in gen_configs:
-                rp = gc.get("rated_power", 0)
-                try:
-                    installed_mw += float(_parse_invest_cost(rp))
-                except Exception:
-                    pass
+            # Reserve margin = (installed capacity − peak demand) / peak
+            # demand, with the generator MW in service this year (the
+            # master's builds and retirements included)
+            installed_mw = _gen_capacity_in_service(h5f, base_prefix, sc)
             if peak_dem > 0:
                 out["reserve_margin"] = (installed_mw / peak_dem - 1.0) * 100.0
             out["cap_total"] = installed_mw
@@ -7804,19 +8047,8 @@ class SystemMetricsEvolutionChart(QWidget):
             for nm, mw in inv_data.get("bat_tech_power_investments", {}).items():
                 if mw > 0:
                     inv_cost += float(mw) * inv_data.get("bat_tech_costs", {}).get(nm, 0)
-            # Legacy per-generator investments (operational paths).
-            if "gen_investment_power" in inv_data:
-                for gi, mw in enumerate(inv_data["gen_investment_power"]):
-                    if mw > 0 and gi < len(gen_configs):
-                        gc = gen_configs[gi]
-                        if "invest_cost" in gc:
-                            inv_cost += float(mw) * _parse_invest_cost(gc["invest_cost"])
-            if "bat_investment_power" in inv_data:
-                for bi, mw in enumerate(inv_data["bat_investment_power"]):
-                    if mw > 0 and bi < len(bat_configs):
-                        bc = bat_configs[bi]
-                        if "invest_cost" in bc:
-                            inv_cost += float(mw) * _parse_invest_cost(bc["invest_cost"])
+            # Legacy per-unit investments (operational paths).
+            inv_cost += _legacy_investment_cost(inv_data, gen_configs, bat_configs)
             out["inv_cost"] = inv_cost / 1e6
         except Exception:
             logger.exception("inv_cost extraction failed")
@@ -7860,7 +8092,7 @@ class SystemMetricsEvolutionChart(QWidget):
                 m = self._extract_metrics(
                     sc, sc_key, h5f, tres,
                     gen_configs, bat_configs,
-                    tech_configs, bat_tech_configs,
+                    tech_configs, bat_tech_configs, base_prefix=bp,
                 )
                 per_year_metrics[int(year)] = m
 
@@ -7877,13 +8109,13 @@ class SystemMetricsEvolutionChart(QWidget):
                 per_year_metrics.setdefault(int(year), {})["net_cf"] = (rev - inv) / 1e6
 
         if not per_year_metrics:
-            return {"error": "No data"}
+            return {"error": tr("results_charts.err_no_data")}
 
         sorted_years = sorted(per_year_metrics.keys())
         ymin, ymax = sorted_years[0], sorted_years[-1]
 
         metrics_payload = []
-        for label, unit, category, key in self._METRICS:
+        for key, category in self._METRICS:
             raw_vals = [per_year_metrics.get(y, {}).get(key) for y in sorted_years]
             if all(v is None for v in raw_vals):
                 continue
@@ -7903,10 +8135,12 @@ class SystemMetricsEvolutionChart(QWidget):
                 for v in cleaned
             ]
             metrics_payload.append({
-                "label": f"{label} ({unit})",
+                "label": tr(f"results_charts.metric_{key}"),
+                # Category id; the shown name is in ``categories``.
                 "category": category,
                 "values_str": [
-                    ("n/a" if v is None else _fmt_val(v)) for v in cleaned
+                    (tr("results_charts.value_na") if v is None else _fmt_val(v))
+                    for v in cleaned
                 ],
                 "normalized": normalized,
                 "min_str": _fmt_val(mn),
@@ -7918,7 +8152,8 @@ class SystemMetricsEvolutionChart(QWidget):
             "years_min": int(ymin),
             "years_max": int(ymax),
             "categories": [
-                {"name": cat, "color": col}
+                {"id": cat, "name": tr(f"results_charts.metric_cat_{cat}"),
+                 "color": col}
                 for cat, col in self._CATEGORY_COLORS.items()
             ],
             "metrics": metrics_payload,
@@ -8005,7 +8240,7 @@ class _FlexReliabilityBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -8074,7 +8309,7 @@ class FlexReliabilityChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -8087,7 +8322,7 @@ class FlexReliabilityChart(QWidget):
         """demand − (wind + solar utility generation), one-year [steps]."""
         if "demand" not in sc:
             return None
-        dem = sc["demand"][:]
+        dem = _demand_node_hours(sc)
         demand = _sum_nodes(dem) if dem.ndim >= 2 else np.asarray(dem).reshape(-1)
         demand = demand[:yh]
         re = np.zeros(len(demand))
@@ -8153,7 +8388,7 @@ class FlexReliabilityChart(QWidget):
                 else:
                     inertia_hours.append(0.0)
         if not yr_list:
-            return {"error": "No data"}
+            return {"error": tr("results_charts.err_no_data")}
         max_len = max((len(c) for c in ramp_curves if c), default=1)
         x_pct = (np.arange(max_len) / max(max_len - 1, 1) * 100.0).tolist()
         any_event = any(v > 0 for v in ens_year) or any(v > 0 for v in rsv_dyn) \
@@ -8180,7 +8415,7 @@ class FlexReliabilityChart(QWidget):
             tres = _get_temporal_res(h5f)
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             sel_idx = len(scenarios) - 1
             if year_range is not None:
                 y_lo, y_hi = int(year_range[0]), int(year_range[1])
@@ -8194,8 +8429,8 @@ class FlexReliabilityChart(QWidget):
             # Net load + hourly ramp. Use the full operational horizon
             # rather than capping at one year — UC windows are short.
             if "demand" not in sc:
-                return {"error": "demand missing"}
-            dem = sc["demand"][:]
+                return {"error": tr("results_charts.err_dataset_missing", name="demand")}
+            dem = _demand_node_hours(sc)
             demand = _sum_nodes(dem) if dem.ndim >= 2 else np.asarray(dem).reshape(-1)
             n_hours = int(demand.size)
             re = np.zeros(n_hours)
@@ -8256,29 +8491,29 @@ class FlexReliabilityChart(QWidget):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # System-level series the Custom chart can plot. Tuple = (hdf5 key,
-# label, unit, node-aggregation). Entries are offered only when the key
-# is present in the loaded results.
+# label key in ``results_charts``, unit, node-aggregation). Entries are
+# offered only when the key is present in the loaded results.
 _CUSTOM_STD_VARS = [
-    ("demand", "Demand", "MW", "sum"),
-    ("curtailment", "Curtailment", "MW", "sum"),
-    ("electricity_prices", "Electricity price (avg)", "$/MWh", "sum"),
-    ("electricity_prices_energy", "Price — energy component", "$/MWh", "sum"),
-    ("loss_load", "Loss of load", "MW", "sum"),
-    ("reserve_static", "Reserve (static)", "MW", "sum"),
-    ("reserve_dynamic", "Reserve (dynamic)", "MW", "sum"),
-    ("loss_of_reserve_static", "Reserve shortfall (static)", "MW", "sum"),
-    ("loss_of_reserve_dynamic", "Reserve shortfall (dynamic)", "MW", "sum"),
-    ("CO2_emissions", "CO₂ emissions", "tCO₂", "sum"),
-    ("voltage_angle", "Voltage angle (mean)", "rad", "mean"),
-    ("loss_of_inertia", "Inertia deficit", "GW·s", "sum"),
-    ("EV_charging", "EV charging", "MW", "sum"),
-    ("EV_V2G", "EV V2G", "MW", "sum"),
-    ("EV_soc", "EV fleet SOC", "MWh", "sum"),
-    ("EV_loss", "EV unmet charging", "MW", "sum"),
-    ("battery_charge", "Battery charge", "MW", "sum"),
-    ("battery_discharge", "Battery discharge", "MW", "sum"),
-    ("battery_soc", "Battery SOC", "MWh", "sum"),
-    ("rooftop_generation", "Rooftop solar", "MW", "sum"),
+    ("demand", "custom_var_demand", "MW", "sum"),
+    ("curtailment", "custom_var_curtailment", "MW", "sum"),
+    ("electricity_prices", "custom_var_price_avg", "$/MWh", "sum"),
+    ("electricity_prices_energy", "custom_var_price_energy", "$/MWh", "sum"),
+    ("loss_load", "custom_var_loss_load", "MW", "sum"),
+    ("reserve_static", "custom_var_reserve_static", "MW", "sum"),
+    ("reserve_dynamic", "custom_var_reserve_dynamic", "MW", "sum"),
+    ("loss_of_reserve_static", "custom_var_reserve_shortfall_static", "MW", "sum"),
+    ("loss_of_reserve_dynamic", "custom_var_reserve_shortfall_dynamic", "MW", "sum"),
+    ("CO2_emissions", "custom_var_co2", "tCO₂", "sum"),
+    ("voltage_angle", "custom_var_voltage_angle", "rad", "mean"),
+    ("loss_of_inertia", "custom_var_inertia_deficit", "GW·s", "sum"),
+    ("EV_charging", "custom_var_ev_charging", "MW", "sum"),
+    ("EV_V2G", "custom_var_ev_v2g", "MW", "sum"),
+    ("EV_soc", "custom_var_ev_soc", "MWh", "sum"),
+    ("EV_loss", "custom_var_ev_unmet", "MW", "sum"),
+    ("battery_charge", "series_battery_charge", "MW", "sum"),
+    ("battery_discharge", "series_battery_discharge", "MW", "sum"),
+    ("battery_soc", "custom_var_battery_soc", "MWh", "sum"),
+    ("rooftop_generation", "custom_var_rooftop_solar", "MW", "sum"),
 ]
 _CUSTOM_AGG_OF = {k: agg for k, _l, _u, agg in _CUSTOM_STD_VARS}
 
@@ -8290,14 +8525,17 @@ def _custom_catalog(sc: h5py.Group) -> list[dict]:
     catalogue adapts to whatever the run actually wrote.
     """
     cat: list[dict] = []
-    for key, label, unit, _agg in _CUSTOM_STD_VARS:
+    for key, label_key, unit, _agg in _CUSTOM_STD_VARS:
         if key in sc:
-            cat.append({"id": key, "label": label, "unit": unit})
+            cat.append({"id": key, "label": tr(f"results_charts.{label_key}"),
+                        "unit": unit})
     if "generation" in sc:
-        cat.append({"id": "__total_gen__", "label": "Total generation",
+        cat.append({"id": "__total_gen__",
+                    "label": tr("results_charts.custom_var_total_gen"),
                     "unit": "MW"})
     if "demand" in sc and "generation" in sc:
-        cat.append({"id": "__net_load__", "label": "Net load (demand − VRE)",
+        cat.append({"id": "__net_load__",
+                    "label": tr("results_charts.custom_var_net_load"),
                     "unit": "MW"})
     return cat
 
@@ -8307,7 +8545,7 @@ def _custom_extract(sc: h5py.Group, vid: str, yh: int) -> Optional[np.ndarray]:
     if vid == "__net_load__":
         if "demand" not in sc:
             return None
-        dem = sc["demand"][:]
+        dem = _demand_node_hours(sc)
         demand = _sum_nodes(dem) if dem.ndim >= 2 else np.asarray(dem).reshape(-1)
         demand = demand[:yh]
         re = np.zeros(len(demand))
@@ -8440,16 +8678,27 @@ class _CustomConfigWidget(QWidget):
         0.45,  # ✕
     ]
 
-    _TYPES = [("line", "Line"), ("bar", "Bar"),
-              ("scatter", "Scatter"), ("area", "Area")]
-    _STATS = [("mean", "Mean"), ("sum", "Sum"), ("max", "Max"), ("min", "Min")]
-    _TRANSFORMS = [("none", "None"), ("cumulative", "Cumulative"),
-                   ("rolling", "Rolling"), ("normalize", "Normalize"),
-                   ("derivative", "Derivative")]
+    # (value, translation key) — the combos show ``tr(key)``.
+    _TYPES = [("line", "results_charts.custom_type_line"),
+              ("bar", "results_charts.custom_type_bar"),
+              ("scatter", "results_charts.custom_type_scatter"),
+              ("area", "results_charts.custom_type_area")]
+    _STATS = [("mean", "results_charts.custom_stat_mean"),
+              ("sum", "results_charts.custom_stat_sum"),
+              ("max", "results_charts.custom_stat_max"),
+              ("min", "results_charts.custom_stat_min")]
+    _TRANSFORMS = [("none", "results_charts.custom_transform_none"),
+                   ("cumulative", "results_charts.custom_transform_cumulative"),
+                   ("rolling", "results_charts.custom_transform_rolling"),
+                   ("normalize", "results_charts.custom_transform_normalize"),
+                   ("derivative", "results_charts.custom_transform_derivative")]
+    # Line-dash symbols, shown as they are.
     _DASHES = [("solid", "──"), ("dash", "- -"), ("dot", "···"),
                ("dashdot", "-·-")]
-    _AGGS = [("raw", "Raw"), ("daily", "Daily"), ("monthly", "Monthly")]
-    _SCALES = [("linear", "Linear"), ("log", "Log")]
+    _AGGS = [("raw", "custom_chart.raw"), ("daily", "custom_chart.daily"),
+             ("monthly", "custom_chart.monthly")]
+    _SCALES = [("linear", "results_charts.custom_scale_linear"),
+               ("log", "results_charts.custom_scale_log")]
 
     # Column indices.
     (C_VAR, C_NAME, C_AGG, C_STAT, C_TRANS, C_TYPE, C_AXIS, C_SCALE,
@@ -8542,10 +8791,10 @@ class _CustomConfigWidget(QWidget):
         cb.setCurrentIndex(ix if ix >= 0 else 0)
         cb.blockSignals(False)
 
-    def _mk_combo(self, items):
+    def _mk_combo(self, items, translate: bool = True):
         cb = QComboBox()
         for d, label in items:
-            cb.addItem(label, d)
+            cb.addItem(tr(label) if translate else label, d)
         cb.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         cb.setMinimumWidth(0)
         cb.currentIndexChanged.connect(self._changed)
@@ -8589,7 +8838,7 @@ class _CustomConfigWidget(QWidget):
         lh = QHBoxLayout(line_w)
         lh.setContentsMargins(0, 0, 0, 0)
         lh.setSpacing(2)
-        dash_cb = self._mk_combo(self._DASHES)
+        dash_cb = self._mk_combo(self._DASHES, translate=False)
         dash_cb.setObjectName("dash")
         width_sp = QDoubleSpinBox()
         width_sp.setRange(0.5, 8.0)
@@ -8705,7 +8954,7 @@ class _CustomBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -8777,7 +9026,7 @@ class CustomChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -8811,7 +9060,7 @@ class CustomChart(QWidget):
         cfg = self._cfg.get_config()
         rows = cfg.get("rows", [])
         if not rows:
-            return {"error": "Add at least one variable"}
+            return {"error": tr("results_charts.err_add_variable")}
 
         x_id = cfg.get("x", "__time__")
         x_is_time = (x_id == "__time__")
@@ -8832,7 +9081,7 @@ class CustomChart(QWidget):
             yh = _year_hours(tres)
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             cat_by_id = {v["id"]: v for v in
                          _custom_catalog(_open_scenario(h5f, bp, scenarios[0][0]))}
             # Every year is concatenated into ONE continuous series per
@@ -8903,10 +9152,10 @@ class CustomChart(QWidget):
                 })
 
         if not series_out:
-            return {"error": "No data for the selected variables/years"}
+            return {"error": tr("results_charts.err_no_data_selection")}
 
         if x_is_time:
-            x_title = "Year"
+            x_title = tr("results_charts.axis_year")
         else:
             xc = cat_by_id.get(x_id, {})
             x_title = f"{xc.get('label', x_id)} ({xc.get('unit', '')})"
@@ -8965,7 +9214,7 @@ class _UCChartBridge(QObject):
     def get_data(self) -> str:
         import json
         if self._payload is None:
-            return json.dumps({"error": "No data loaded"})
+            return json.dumps({"error": tr("results_charts.err_no_data_loaded")})
         try:
             return json.dumps(self._payload)
         except Exception as e:
@@ -9046,7 +9295,7 @@ class UCHourlyPriceChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -9060,14 +9309,14 @@ class UCHourlyPriceChart(QWidget):
         with _open_h5(h5_path) as h5f:
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             idx = _uc_select_year_idx(h5f, bp, year_range)
             if idx < 0:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             sc_key, year = scenarios[idx]
             sc = _open_scenario(h5f, bp, sc_key)
             if "electricity_prices" not in sc:
-                return {"error": "electricity_prices missing — run UC with dual recovery"}
+                return {"error": tr("results_charts.err_prices_missing_dual", name="electricity_prices")}
             sys_avg = sc["electricity_prices"][:]
             hours = list(range(int(len(sys_avg))))
             node_min = node_max = None
@@ -9085,14 +9334,30 @@ class UCHourlyPriceChart(QWidget):
         }
 
 
+def num_units_at(ds, node: int) -> int:
+    """Units of a generator's ``gen_status`` / ``gen_startup`` dataset *ds*
+    at global node *node*: the ``num_units`` the runner records on it (one
+    for older files, which held 0/1 status)."""
+    try:
+        units = ds.attrs.get("num_units")
+    except Exception:  # noqa: BLE001 - shims without attributes
+        units = None
+    if units is None:
+        return 1
+    units = np.atleast_1d(np.asarray(units))
+    if not 0 <= node < len(units):
+        return 1
+    return max(1, int(units[node]))
+
+
 class UCCommitmentHeatmapChart(QWidget):
-    """Binary commitment heatmap: units × hours, on/off per cell.
+    """Commitment heatmap: plants × hours, units online per cell.
 
     The signature visualization of a UC run. Filters to committable
-    units (gen_status present + at least one transition or some hours
-    off) — pure renewables would be flat 1s and add noise. Units are
-    labelled ``"<tech> @ node_X"`` so the user can see which physical
-    asset is committing where.
+    plants (gen_status present and changing) — pure renewables would be
+    flat and add noise. Rows are labelled ``"<tech> @ node_X"`` so the
+    user can see which physical asset is committing where; a plant of
+    several units (``num_units``) shows the share of them online.
     """
 
     TITLE = "Commitment Heatmap"
@@ -9135,7 +9400,7 @@ class UCCommitmentHeatmapChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -9149,12 +9414,12 @@ class UCCommitmentHeatmapChart(QWidget):
         with _open_h5(h5_path) as h5f:
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             idx = _uc_select_year_idx(h5f, bp, year_range)
             sc_key, year = scenarios[idx]
             sc = _open_scenario(h5f, bp, sc_key)
             if "gen_status" not in sc:
-                return {"error": "gen_status missing — not a UC run"}
+                return {"error": tr("results_charts.err_not_uc_run", name="gen_status")}
             status_grp = sc["gen_status"]
             # Each entry is [nodes, hours]. Flatten to per-node rows but
             # only keep rows that actually commit (mix of 0s and 1s) so
@@ -9162,32 +9427,34 @@ class UCCommitmentHeatmapChart(QWidget):
             rng = _system_node_range(h5f, bp)
             units: list[str] = []
             rows: list[list[int]] = []
+            num_units: list[int] = []
             n_hours = 0
             for gen_name in sorted(status_grp.keys()):
-                arr = status_grp[gen_name][:]
+                ds = status_grp[gen_name]
+                arr = ds[:]
                 if arr.ndim < 2:
                     continue
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
-                    node_offset = lo
-                else:
-                    node_offset = 0
+                # Already this system's nodes (_open_scenario); the label
+                # keeps the global node index
+                node_offset = rng[0] if rng is not None else 0
                 if n_hours == 0:
                     n_hours = arr.shape[1]
                 for n_i in range(arr.shape[0]):
-                    row = arr[n_i, :]
-                    if not (row.max() > 0.5 and row.min() < 0.5):
-                        # Always-on or always-off — not interesting
-                        # for the commitment heatmap.
+                    row = np.round(arr[n_i, :].astype(float))
+                    if row.max() < 0.5 or row.min() == row.max():
+                        # Never on, or the same units online all along —
+                        # not interesting for the commitment heatmap.
                         continue
                     units.append(f"{gen_name} @ n{node_offset + n_i}")
-                    rows.append([int(round(float(v))) for v in row])
+                    rows.append([int(v) for v in row])
+                    num_units.append(max(num_units_at(ds, node_offset + n_i),
+                                         int(row.max())))
         return {
             "year": int(year),
             "hours": list(range(n_hours)),
             "units": units,
             "status": rows,
+            "num_units": num_units,
         }
 
 
@@ -9241,7 +9508,7 @@ class UCDispatchStackChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -9255,34 +9522,26 @@ class UCDispatchStackChart(QWidget):
         with _open_h5(h5_path) as h5f:
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             idx = _uc_select_year_idx(h5f, bp, year_range)
             sc_key, year = scenarios[idx]
             sc = _open_scenario(h5f, bp, sc_key)
             if "generation" not in sc:
-                return {"error": "generation missing"}
-            rng = _system_node_range(h5f, bp)
+                return {"error": tr("results_charts.err_dataset_missing", name="generation")}
 
-            # Build fuel/tech maps the same way the dashboard mix does.
-            gen_configs = _load_gen_configs(h5f, bp)
+            # Build fuel/tech maps the same way the dashboard mix does:
+            # each dataset finds its unit's config (fuel) by name
+            unit_config = _gen_config_resolver(h5f, bp)
             gen_data = _load_gen_data(sc)
-            # Iterate generators in insertion order; positional index
-            # into gen_configs gives the config dict with name/fuel.
             tech_series: dict[str, np.ndarray] = {}
             n_hours = 0
             for gi, (gen_name, arr) in enumerate(gen_data.items()):
                 if arr.ndim < 2:
                     continue
-                if rng is not None:
-                    lo, hi = rng
-                    sliced = arr[lo:hi]
-                else:
-                    sliced = arr
-                hourly = sliced.sum(axis=0)
+                hourly = arr.sum(axis=0)
                 if n_hours == 0:
                     n_hours = int(hourly.shape[0])
-                cfg = gen_configs[gi] if gi < len(gen_configs) else {}
-                tech = _tech_bucket_for_gen(cfg, gen_name)
+                tech = _tech_bucket_for_gen(unit_config(gen_name, gi), gen_name)
                 if tech in tech_series:
                     tech_series[tech] = tech_series[tech] + hourly
                 else:
@@ -9297,9 +9556,6 @@ class UCDispatchStackChart(QWidget):
                 for arr in grp.values():
                     if arr.ndim < 2:
                         continue
-                    if rng is not None:
-                        lo, hi = rng
-                        arr = arr[lo:hi]
                     s = arr.sum(axis=0)
                     if len(s) < n_hours:
                         s = np.pad(s, (0, n_hours - len(s)))
@@ -9314,9 +9570,12 @@ class UCDispatchStackChart(QWidget):
                 arr = sc[key][:]
                 if arr.ndim < 2:
                     return arr[:n_hours] if arr.size else np.zeros(n_hours)
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
+                # ``demand`` is stored (hours, nodes) unlike every other
+                # per-node array — without this the sum below collapses the
+                # HOUR axis and the demand line becomes the 24 h total of the
+                # first n_hours nodes (a curve matching neither the forecast
+                # nor the dispatch).
+                arr = orient_to_node_hours(arr, n_hours)
                 s = arr.sum(axis=0)
                 if len(s) < n_hours:
                     s = np.pad(s, (0, n_hours - len(s)))
@@ -9334,26 +9593,23 @@ class UCDispatchStackChart(QWidget):
             palette, default_color = {}, "#95A5A6"
         tech_colors = {}
         for tech in tech_series:
-            tl = tech.lower()
-            picked = default_color
-            for key, clr in palette.items():
-                if key.lower() in tl:
-                    picked = clr
-                    break
-            tech_colors[tech] = picked
+            tech_colors[tech] = _bucket_color(tech, palette, default_color)
 
         return {
             "year": int(year),
             "hours": list(range(n_hours)),
+            # Keys are the fuel buckets of _tech_bucket_for_gen, shown
+            # translated (the JS uses them as names and colour keys).
             "gen_by_tech": {
-                t: [float(v) for v in s] for t, s in tech_series.items()
+                _series_label(t): [float(v) for v in s]
+                for t, s in tech_series.items()
             },
             "bat_charge": [float(v) for v in bat_charge],
             "bat_discharge": [float(v) for v in bat_discharge],
             "curtailment": [float(v) for v in curtailment],
             "load_shed": [float(v) for v in load_shed],
             "demand": [float(v) for v in demand],
-            "tech_colors": tech_colors,
+            "tech_colors": {_series_label(t): c for t, c in tech_colors.items()},
         }
 
 
@@ -9404,6 +9660,29 @@ def _tech_bucket_for_gen(cfg: dict, gen_name: str) -> str:
         if kw in nl:
             return label
     return "Other"
+
+
+# Palette entry of the buckets whose name is not a palette key
+# ("Gas" would otherwise miss "Gas turbine" and fall to the grey of
+# "Other").
+_BUCKET_PALETTE_KEY = {
+    "Gas": "Gas turbine",
+    "Fuel oil": "Fuel Oil",
+    "Hydrogen": "Hydrogen_FuelCell",
+}
+
+
+def _bucket_color(bucket: str, palette: dict[str, str], default: str) -> str:
+    """Colour of a :func:`_tech_bucket_for_gen` bucket, the same in every
+    UC chart."""
+    key = _BUCKET_PALETTE_KEY.get(bucket, bucket)
+    if key in palette:
+        return palette[key]
+    bl = bucket.lower()
+    for k, clr in palette.items():
+        if k.lower() in bl:
+            return clr
+    return default
 
 
 class UCLoadShedCurtailmentChart(QWidget):
@@ -9460,7 +9739,7 @@ class UCLoadShedCurtailmentChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -9474,20 +9753,13 @@ class UCLoadShedCurtailmentChart(QWidget):
         with _open_h5(h5_path) as h5f:
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             idx = _uc_select_year_idx(h5f, bp, year_range)
             sc_key, year = scenarios[idx]
             sc = _open_scenario(h5f, bp, sc_key)
-            rng = _system_node_range(h5f, bp)
 
-            # ``rng`` is a NODE index range (used to isolate one system in a
-            # multi-system file). It applies only to per-NODE arrays such as
-            # ``demand``. Per-BUS arrays (``loss_load``, ``curtailment`` —
-            # first dim = bus count, which for a bus-level / reduced network
-            # is far larger than the node count) must NOT be sliced with it,
-            # or the total is truncated to the first few buses (which read the
-            # shed as a tiny fraction of demand). Detect the node dimension
-            # from the demand array and slice only matching arrays.
+            # A subsystem's scenario is already sliced to its nodes
+            # (_open_scenario): the arrays are summed as read.
             #
             # ``demand`` is stored (hours, nodes) while the per-node result
             # arrays are (nodes, hours); orient everything to (nodes, hours)
@@ -9500,10 +9772,6 @@ class UCLoadShedCurtailmentChart(QWidget):
                    if "electricity_prices" in sc
                    and len(sc["electricity_prices"].shape) == 1 else None)
 
-            _n_nodes = None
-            if "demand" in sc and len(sc["demand"].shape) >= 2:
-                _n_nodes = orient_to_node_hours(sc["demand"][:], _nh).shape[0]
-
             def _hourly_total(key: str) -> np.ndarray:
                 if key not in sc:
                     return np.zeros(0)
@@ -9511,10 +9779,6 @@ class UCLoadShedCurtailmentChart(QWidget):
                 if arr.ndim < 2:
                     return arr.astype(float)
                 arr = orient_to_node_hours(arr, _nh)
-                if (rng is not None and _n_nodes is not None
-                        and arr.shape[0] == _n_nodes):
-                    lo, hi = rng
-                    arr = arr[lo:hi]
                 return arr.sum(axis=0).astype(float)
 
             ls = _hourly_total("loss_load")
@@ -9523,7 +9787,7 @@ class UCLoadShedCurtailmentChart(QWidget):
 
         n_hours = max(len(ls), len(curt), len(dem))
         if n_hours == 0:
-            return {"error": "No timeline data"}
+            return {"error": tr("results_charts.err_no_timeline")}
 
         def _fit(a: np.ndarray) -> np.ndarray:
             if len(a) >= n_hours:
@@ -9610,7 +9874,7 @@ class UCMarginalTechChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }"
             )
@@ -9624,16 +9888,16 @@ class UCMarginalTechChart(QWidget):
         with _open_h5(h5_path) as h5f:
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             idx = _uc_select_year_idx(h5f, bp, year_range)
             sc_key, year = scenarios[idx]
             sc = _open_scenario(h5f, bp, sc_key)
             rng = _system_node_range(h5f, bp)
 
-            gen_configs = _load_gen_configs(h5f, bp)
+            unit_config = _gen_config_resolver(h5f, bp)
             gen_data = _load_gen_data(sc)
-            status_grp = sc.get("gen_status") if hasattr(sc, "get") else None
-            # Per-hour system-wide load shed (sliced to system nodes).
+            status_grp = sc["gen_status"] if "gen_status" in sc else None
+            # Per-hour system-wide load shed (the system's nodes).
             # When this is > 0 the balance constraint is pegged to VOLL
             # and the marginal "unit" is the load-shed variable itself,
             # not whichever thermal is dispatching at its rated power.
@@ -9641,9 +9905,6 @@ class UCMarginalTechChart(QWidget):
             if "loss_load" in sc:
                 ls_arr = sc["loss_load"][:]
                 if ls_arr.ndim >= 2:
-                    if rng is not None:
-                        lo, hi = rng
-                        ls_arr = ls_arr[lo:hi]
                     ls_hourly = ls_arr.sum(axis=0).astype(float)
                 else:
                     ls_hourly = ls_arr.astype(float)
@@ -9653,9 +9914,6 @@ class UCMarginalTechChart(QWidget):
                     arr = status_grp[k][:]
                     if arr.ndim < 2:
                         continue
-                    if rng is not None:
-                        lo, hi = rng
-                        arr = arr[lo:hi]
                     status_by_gen[k] = arr
 
             # Determine common hour count from generation.
@@ -9664,7 +9922,7 @@ class UCMarginalTechChart(QWidget):
                 if arr.ndim >= 2:
                     n_hours = max(n_hours, int(arr.shape[1]))
             if n_hours == 0:
-                return {"error": "No generation data"}
+                return {"error": tr("results_charts.err_no_generation_data")}
 
             # LMPs for hover (already in USD/MWh after the convert step).
             hour_lmp = None
@@ -9672,9 +9930,9 @@ class UCMarginalTechChart(QWidget):
                 ep = sc["electricity_prices"][:]
                 hour_lmp = [float(v) for v in ep[:n_hours]]
 
-            # Per-gen rated capacity (max of fuel_cost-scaled gen_output
-            # would be circular; pull from config "rated_power" when
-            # available, else from the per-hour max observed).
+            # Per-gen capacity: its MW in service over the system's nodes
+            # (config rated_power for older files), else the per-hour max
+            # observed.
             def _max_node(arr: np.ndarray) -> np.ndarray:
                 # Sliced array shape [nodes_in_sys, hours]; for marginal
                 # logic we collapse to system-level total per gen.
@@ -9692,9 +9950,6 @@ class UCMarginalTechChart(QWidget):
                 arr = gen_data[gname]
                 if arr.ndim < 2:
                     continue
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
                 tot = _max_node(arr)
                 if len(tot) < n_hours:
                     tot = np.pad(tot, (0, n_hours - len(tot)))
@@ -9710,17 +9965,18 @@ class UCMarginalTechChart(QWidget):
                 else:
                     # No gen_status — treat as ON whenever output > 0.
                     gen_on[gi, :] = gen_total[gi, :] > 1e-3
-                cfg = gen_configs[gi] if gi < len(gen_configs) else {}
+                cfg = unit_config(gname, gi, power_in_service(sc["generation"], gname)
+                                  if "generation" in sc else None)
                 fc = _attr_scalar(cfg, "fuel_cost")
                 mc = _attr_scalar(cfg, "maintenance_cost")
                 var_costs[gi] = fc + mc
-                # Rated power: prefer config attr, fall back to observed max.
-                rp = _attr_scalar(cfg, "rated_power")
+                # MW in service, fall back to observed max.
+                rp = _config_mw(cfg, "rated_power", rng)
                 rated[gi] = rp if rp > 0 else float(np.max(gen_total[gi, :]))
                 techs.append(_tech_bucket_for_gen(cfg, gname))
 
         if n_gen == 0:
-            return {"error": "No generators"}
+            return {"error": tr("results_charts.err_no_generators")}
 
         # Build tech label index. We add a synthetic "Load shed" bucket
         # so hours with zero ON gens have a colour.
@@ -9741,13 +9997,7 @@ class UCMarginalTechChart(QWidget):
             if lbl == SHED:
                 tech_colors.append("#E74C3C")
                 continue
-            ll = lbl.lower()
-            picked = default_color
-            for key, clr in palette.items():
-                if key.lower() in ll:
-                    picked = clr
-                    break
-            tech_colors.append(picked)
+            tech_colors.append(_bucket_color(lbl, palette, default_color))
 
         # Per-hour: find marginal gen.
         marginal_idx = np.full(n_hours, label_to_idx[SHED], dtype=int)
@@ -9781,10 +10031,14 @@ class UCMarginalTechChart(QWidget):
             "year": int(year),
             "hours": list(range(n_hours)),
             "tech_indices": list(range(len(unique_techs))),
-            "tech_labels": unique_techs,
+            # Buckets and "Load shed" shown translated; the JS matches
+            # hours_marginal keys against tech_labels, so both use it.
+            "tech_labels": [_series_label(t) for t in unique_techs],
             "tech_colors": tech_colors,
             "marginal_idx": [int(v) for v in marginal_idx],
-            "hours_marginal": hours_marginal,
+            "hours_marginal": {
+                _series_label(t): n for t, n in hours_marginal.items()
+            },
             "hour_lmp": hour_lmp,
         }
 
@@ -9838,7 +10092,7 @@ class UCPriceDurationChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }")
 
@@ -9851,15 +10105,15 @@ class UCPriceDurationChart(QWidget):
         with _open_h5(h5_path) as h5f:
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             idx = _uc_select_year_idx(h5f, bp, year_range)
             sc_key, year = scenarios[idx]
             sc = _open_scenario(h5f, bp, sc_key)
             if "electricity_prices" not in sc:
-                return {"error": "electricity_prices missing"}
+                return {"error": tr("results_charts.err_dataset_missing", name="electricity_prices")}
             prices = np.asarray(sc["electricity_prices"][:], dtype=float)
         if prices.size == 0:
-            return {"error": "Empty price series"}
+            return {"error": tr("results_charts.err_empty_price_series")}
         sorted_prices = np.sort(prices)[::-1]
         n = len(sorted_prices)
         # Resample to 0–100% in 1pp steps so the chart is always 101
@@ -9932,7 +10186,7 @@ class UCStorageSOCChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }")
 
@@ -9945,19 +10199,19 @@ class UCStorageSOCChart(QWidget):
         with _open_h5(h5_path) as h5f:
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             idx = _uc_select_year_idx(h5f, bp, year_range)
             sc_key, year = scenarios[idx]
             sc = _open_scenario(h5f, bp, sc_key)
             rng = _system_node_range(h5f, bp)
             tres = _get_temporal_res(h5f)
-            bat_configs = _load_bat_configs(h5f, bp)
+            bat_config = _bat_config_resolver(h5f, bp)
             soc = _load_bat_data(sc, "battery_soc")
             charge = _load_bat_data(sc, "battery_charge")
             discharge = _load_bat_data(sc, "battery_discharge")
 
         if not soc and not charge and not discharge:
-            return {"error": "No battery data in scenario"}
+            return {"error": tr("results_charts.err_no_battery_in_scenario")}
 
         # Determine hours from any battery (they should all share n_hours).
         ref = next(
@@ -9966,35 +10220,27 @@ class UCStorageSOCChart(QWidget):
                  next((a for a in discharge.values() if a.ndim >= 2), None)),
         )
         if ref is None:
-            return {"error": "Battery arrays empty"}
+            return {"error": tr("results_charts.err_battery_arrays_empty")}
         n_hours = ref.shape[1]
 
         steps_per_day = max(1, int(24 / max(1, tres)))
         n_days = max(1, n_hours // steps_per_day)
         usable = n_days * steps_per_day
 
-        def _slice_sys(arr: np.ndarray) -> np.ndarray:
-            if arr.ndim < 2:
-                return arr
-            if rng is not None:
-                lo, hi = rng
-                return arr[lo:hi]
-            return arr
-
         bat_names = sorted(set(soc.keys()) | set(charge.keys()) | set(discharge.keys()))
         out: dict[str, dict] = {
             "soc_pct": {}, "daily_cycles": {}, "totals": {},
         }
         for bi, bname in enumerate(bat_names):
-            soc_arr = _slice_sys(soc.get(bname, np.zeros((1, n_hours))))
-            ch_arr  = _slice_sys(charge.get(bname, np.zeros((1, n_hours))))
-            dh_arr  = _slice_sys(discharge.get(bname, np.zeros((1, n_hours))))
-            cfg = bat_configs[bi] if bi < len(bat_configs) else {}
-            # Capacity (MWh): prefer per-node max of soc; fall back to
-            # the config's rated_capacity attr.
+            soc_arr = soc.get(bname, np.zeros((1, n_hours)))
+            ch_arr  = charge.get(bname, np.zeros((1, n_hours)))
+            dh_arr  = discharge.get(bname, np.zeros((1, n_hours)))
+            # Capacity (MWh): prefer the peak of the summed SOC; fall back
+            # to the battery's configured energy capacity over the system's
+            # nodes (its config found by name)
             cap_mwh = float(soc_arr.sum(axis=0).max()) if soc_arr.size else 0.0
             if cap_mwh <= 0:
-                cap_mwh = _attr_scalar(cfg, "rated_capacity", 0.0)
+                cap_mwh = _config_mw(bat_config(bname, bi), "capacity", rng)
             soc_total = soc_arr.sum(axis=0)[:n_hours]
             soc_pct = (
                 (soc_total / cap_mwh * 100.0) if cap_mwh > 0
@@ -10072,7 +10318,7 @@ class UCNetLoadDurationChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }")
 
@@ -10085,25 +10331,21 @@ class UCNetLoadDurationChart(QWidget):
         with _open_h5(h5_path) as h5f:
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             idx = _uc_select_year_idx(h5f, bp, year_range)
             sc_key, year = scenarios[idx]
             sc = _open_scenario(h5f, bp, sc_key)
             if "demand" not in sc:
-                return {"error": "demand missing"}
-            rng = _system_node_range(h5f, bp)
-            dem_arr = sc["demand"][:]
+                return {"error": tr("results_charts.err_dataset_missing", name="demand")}
+            dem_arr = _demand_node_hours(sc)
             if dem_arr.ndim >= 2:
-                if rng is not None:
-                    lo, hi = rng
-                    dem_arr = dem_arr[lo:hi]
                 demand = dem_arr.sum(axis=0).astype(float)
             else:
                 demand = dem_arr.astype(float)
             n_hours = demand.size
             # Sum RE generation: walk gen_data and accept generators
             # whose canonical bucket matches one of the renewable labels.
-            gen_configs = _load_gen_configs(h5f, bp)
+            unit_config = _gen_config_resolver(h5f, bp)
             gen_data = _load_gen_data(sc)
             re_total = np.zeros(n_hours)
             RE_LABELS = {"Wind", "Solar", "Hydro", "Biomass", "OTEC",
@@ -10111,19 +10353,15 @@ class UCNetLoadDurationChart(QWidget):
             for gi, (gname, arr) in enumerate(gen_data.items()):
                 if arr.ndim < 2:
                     continue
-                cfg = gen_configs[gi] if gi < len(gen_configs) else {}
-                tech = _tech_bucket_for_gen(cfg, gname)
+                tech = _tech_bucket_for_gen(unit_config(gname, gi), gname)
                 if tech not in RE_LABELS:
                     continue
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
                 hourly = arr.sum(axis=0).astype(float)
                 if len(hourly) < n_hours:
                     hourly = np.pad(hourly, (0, n_hours - len(hourly)))
                 re_total += hourly[:n_hours]
         if n_hours == 0:
-            return {"error": "Empty horizon"}
+            return {"error": tr("results_charts.err_empty_horizon")}
         net_load = demand - re_total
         demand_sorted = np.sort(demand)[::-1]
         net_sorted = np.sort(net_load)[::-1]
@@ -10192,7 +10430,7 @@ class UCRampDistributionChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }")
 
@@ -10205,23 +10443,18 @@ class UCRampDistributionChart(QWidget):
         with _open_h5(h5_path) as h5f:
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             idx = _uc_select_year_idx(h5f, bp, year_range)
             sc_key, year = scenarios[idx]
             sc = _open_scenario(h5f, bp, sc_key)
-            rng = _system_node_range(h5f, bp)
-            gen_configs = _load_gen_configs(h5f, bp)
+            unit_config = _gen_config_resolver(h5f, bp)
             gen_data = _load_gen_data(sc)
             # Aggregate ramp magnitudes per tech bucket.
             ramps_by_tech: dict[str, list[float]] = {}
             for gi, (gname, arr) in enumerate(gen_data.items()):
                 if arr.ndim < 2:
                     continue
-                cfg = gen_configs[gi] if gi < len(gen_configs) else {}
-                tech = _tech_bucket_for_gen(cfg, gname)
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
+                tech = _tech_bucket_for_gen(unit_config(gname, gi), gname)
                 # System-level hourly output for this generator, then
                 # |ΔP| between consecutive hours.
                 hourly = arr.sum(axis=0).astype(float)
@@ -10234,7 +10467,7 @@ class UCRampDistributionChart(QWidget):
                     continue
                 ramps_by_tech.setdefault(tech, []).extend(float(v) for v in d)
         if not ramps_by_tech:
-            return {"error": "No ramping generators"}
+            return {"error": tr("results_charts.err_no_ramping")}
 
         # Order techs by P95 descending so the most aggressive techs
         # land on the left of the box plot.
@@ -10253,20 +10486,15 @@ class UCRampDistributionChart(QWidget):
             palette, default_color = {}, "#95A5A6"
         tech_colors = {}
         for tech in techs_sorted:
-            tl = tech.lower()
-            picked = default_color
-            for key, clr in palette.items():
-                if key.lower() in tl:
-                    picked = clr
-                    break
-            tech_colors[tech] = picked
+            tech_colors[tech] = _bucket_color(tech, palette, default_color)
 
         return {
             "year": int(year),
-            "techs": techs_sorted,
-            "ramps": {t: ramps_by_tech[t] for t in techs_sorted},
-            "p95": p95,
-            "tech_colors": tech_colors,
+            # Fuel buckets, shown translated (keys of the dicts below).
+            "techs": [_series_label(t) for t in techs_sorted],
+            "ramps": {_series_label(t): ramps_by_tech[t] for t in techs_sorted},
+            "p95": {_series_label(t): v for t, v in p95.items()},
+            "tech_colors": {_series_label(t): c for t, c in tech_colors.items()},
         }
 
 
@@ -10318,7 +10546,7 @@ class UCLMPByNodeChart(QWidget):
             self._loaded = True
         except Exception as e:
             logger.warning(f"Chart {self.TITLE} failed: {e}")
-            self._bridge.set_payload({"error": f"Failed to load data: {e}"})
+            self._bridge.set_payload({"error": tr("results_charts.err_failed_load", error=e)})
             self._view.page().runJavaScript(
                 "if (typeof refresh === 'function') { refresh(); }")
 
@@ -10331,22 +10559,19 @@ class UCLMPByNodeChart(QWidget):
         with _open_h5(h5_path) as h5f:
             scenarios = list(_sorted_scenarios(h5f, bp))
             if not scenarios:
-                return {"error": "No scenarios"}
+                return {"error": tr("results_charts.err_no_scenarios")}
             idx = _uc_select_year_idx(h5f, bp, year_range)
             sc_key, year = scenarios[idx]
             sc = _open_scenario(h5f, bp, sc_key)
             if "nodal_electricity_prices" not in sc:
-                return {"error": "nodal_electricity_prices missing"}
+                return {"error": tr("results_charts.err_dataset_missing", name="nodal_electricity_prices")}
             nodal = np.asarray(sc["nodal_electricity_prices"][:], dtype=float)
             rng = _system_node_range(h5f, bp)
             if nodal.ndim != 2:
-                return {"error": "nodal prices not 2-D"}
-            if rng is not None:
-                lo, hi = rng
-                nodal = nodal[lo:hi]
-                node_offset = lo
-            else:
-                node_offset = 0
+                return {"error": tr("results_charts.err_dataset_not_2d", name="nodal_electricity_prices")}
+            # Rows and node names are already this system's (_open_scenario,
+            # _open_system_config); the fallback label keeps the global index
+            node_offset = rng[0] if rng is not None else 0
             # Try to pull node names from system_configuration.
             node_labels: list[str] = []
             sc_cfg = _open_system_config(h5f, bp)
@@ -10356,20 +10581,20 @@ class UCLMPByNodeChart(QWidget):
                     names = sc_cfg["nodes"]["name"][:]
                     for i in range(nodal.shape[0]):
                         gi = node_offset + i
-                        if gi < len(names):
-                            v = names[gi]
+                        if i < len(names):
+                            v = names[i]
                             if isinstance(v, bytes):
                                 v = v.decode(errors="replace")
                             node_labels.append(str(v))
                         else:
-                            node_labels.append(f"Node {gi}")
+                            node_labels.append(_default_node_label(gi))
             except Exception:
                 node_labels = []
             if not node_labels:
-                node_labels = [f"Node {node_offset + i}" for i in range(nodal.shape[0])]
+                node_labels = [_default_node_label(node_offset + i) for i in range(nodal.shape[0])]
 
         if nodal.size == 0:
-            return {"error": "Empty LMP matrix"}
+            return {"error": tr("results_charts.err_empty_lmp")}
 
         return {
             "year": int(year),

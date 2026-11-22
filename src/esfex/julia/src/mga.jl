@@ -95,6 +95,8 @@ function compute_frequency_scores(
             # Transmission investments
             if haskey(alt.transfer_investment, y_idx)
                 for ((i, j), inv_value) in alt.transfer_investment[y_idx]
+                    # One decision per corridor (both directions are held equal)
+                    haskey(alt.transfer_investment[y_idx], (j, i)) && j < i && continue
                     if inv_value > investment_threshold
                         key = "trans_$(i)_$(j)_$(y_idx)"
                         counts[key] = get(counts, key, 0) + 1
@@ -199,6 +201,8 @@ function set_spores_objective!(
     # Transmission investments
     for y_idx in 1:ypp:num_years
         for ((i, j), var) in vars.transfer_investment[y_idx]
+            # One decision per corridor (both directions are held equal)
+            haskey(vars.transfer_investment[y_idx], (j, i)) && j < i && continue
             x_max = input.network.transference_invest_max[i]
             if x_max <= 0
                 continue
@@ -259,7 +263,7 @@ function run_mga_spores(
         input;
         use_representative_days = use_representative_days
     )
-    optimize!(model)
+    optimize_master!(model)
 
     status = termination_status(model)
     if status != MOI.OPTIMAL && status != MOI.LOCALLY_SOLVED
@@ -273,6 +277,8 @@ function run_mga_spores(
 
     # Extract cost-optimal solution
     optimal_solution = extract_master_solution(model, vars, input)
+    # Alternatives curtail above the annual limit no more than this plan
+    hold_curtailment_excess!(model)
 
     @info "MGA/SPORES: Optimal cost = $(optimal_cost)"
     @info "MGA/SPORES: Near-optimal bound = $(optimal_cost * (1 + slack_fraction))"
@@ -306,7 +312,7 @@ function run_mga_spores(
         set_spores_objective!(model, vars, input, freq_scores)
 
         # Solve
-        optimize!(model)
+        optimize_master!(model)
 
         status = termination_status(model)
         if status != MOI.OPTIMAL && status != MOI.LOCALLY_SOLVED
@@ -417,7 +423,8 @@ function set_min_build_objective!(
         for bt in 1:n_bat_tech, n in 1:n_buses
             add_to_expression!(obj, vars.bat_tech_power_investment[y_idx][bt][n], 1.0)
         end
-        for ((_i, _j), var) in vars.transfer_investment[y_idx]
+        for ((i, j), var) in vars.transfer_investment[y_idx]
+            haskey(vars.transfer_investment[y_idx], (j, i)) && j < i && continue
             add_to_expression!(obj, var, 1.0)
         end
     end
@@ -702,7 +709,7 @@ function run_spores(
         input;
         use_representative_days = use_representative_days,
     )
-    optimize!(model)
+    optimize_master!(model)
     status = termination_status(model)
     if status != MOI.OPTIMAL && status != MOI.LOCALLY_SOLVED
         error("SPORES: Cost-optimal solve failed: $status")
@@ -711,6 +718,8 @@ function run_spores(
     optimal_cost = objective_value(model)
     total_cost_expr = objective_function(model)
     optimal_solution = extract_master_solution(model, vars, input)
+    # Alternatives curtail above the annual limit no more than this plan
+    hold_curtailment_excess!(model)
 
     @info "SPORES: Optimal cost = $(optimal_cost)"
     @info "SPORES: Near-optimal bound = $(optimal_cost * (1 + slack_fraction))"
@@ -742,7 +751,7 @@ function run_spores(
             frequency_scores = freq_scores,
             reference_solution = optimal_solution,
         )
-        optimize!(model)
+        optimize_master!(model)
 
         status = termination_status(model)
         if status != MOI.OPTIMAL && status != MOI.LOCALLY_SOLVED

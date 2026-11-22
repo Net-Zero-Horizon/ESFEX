@@ -107,10 +107,10 @@ function build_ybus(lines::Vector{TransmissionLineData},
     # Process transmission lines
     for line in lines
         i, j = line.from_node, line.to_node
-        # Effective impedance per circuit (parallel circuits reduce impedance)
-        r = line.resistance_pu / line.num_circuits
-        x = line.reactance_pu / line.num_circuits
-        b_sh = line.susceptance_pu * line.num_circuits
+        # Whole-line values (all circuits together)
+        r = line.resistance_pu
+        x = line.reactance_pu
+        b_sh = line.susceptance_pu
 
         if abs(x) < 1e-12 && abs(r) < 1e-12
             continue  # Skip zero-impedance lines
@@ -165,7 +165,8 @@ end
 
 Classify buses for AC power flow:
 - Type 3 (Slack): Reference bus — known |V| and θ
-- Type 2 (PV): Generator buses with active non-renewable generation — known P and |V|
+- Type 2 (PV): Generator buses with active dispatchable generation (any unit
+  but a variable renewable, see `is_variable_renewable`) — known P and |V|
 - Type 1 (PQ): Load buses — known P and Q
 """
 function classify_buses(gen_output_t::Matrix{Float64},
@@ -176,11 +177,10 @@ function classify_buses(gen_output_t::Matrix{Float64},
 
     n_gen = length(generators)
     for g in 1:n_gen
-        if generators[g].type != "Renewable"
-            for b in 1:num_buses
-                if gen_output_t[g, b] > 1e-3
-                    bus_types[b] = 2  # PV (dispatchable generator)
-                end
+        for b in 1:num_buses
+            is_variable_renewable(generators[g], b) && continue
+            if gen_output_t[g, b] > 1e-3
+                bus_types[b] = 2  # PV (dispatchable generator)
             end
         end
     end
@@ -355,9 +355,9 @@ function calculate_line_flows(V::Vector{Float64}, theta::Vector{Float64},
     # Transmission lines (standard π-model)
     for (k, line) in enumerate(lines)
         i, j = line.from_node, line.to_node
-        r = line.resistance_pu / line.num_circuits
-        x = line.reactance_pu / line.num_circuits
-        b_sh = line.susceptance_pu * line.num_circuits
+        r = line.resistance_pu
+        x = line.reactance_pu
+        b_sh = line.susceptance_pu
 
         if abs(x) < 1e-12 && abs(r) < 1e-12
             continue
@@ -533,7 +533,7 @@ function run_ac_power_flow(input::PowerSystemInput, result::PowerSystemResult,
     line_overloads = Tuple{Int,Float64,Float64}[]
     for (k, line) in enumerate(lines)
         flow = max(abs(p_from[k]), abs(p_to[k]))
-        cap = line.capacity_mw * line.num_circuits
+        cap = line.capacity_mw
         if cap > 0 && flow > cap
             push!(line_overloads, (k, flow, cap))
         end

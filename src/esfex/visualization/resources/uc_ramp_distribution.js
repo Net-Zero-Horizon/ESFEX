@@ -32,30 +32,33 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { _ucClearPlot(); showStatus("Bad payload: " + e.message, true); return; }
-        if (!data || data.error) { _ucClearPlot(); showStatus(data && data.error ? data.error : "No data", false); return; }
-        if (!data.techs || !data.techs.length) { _ucClearPlot(); showStatus("No ramp data", false); return; }
+        catch (e) { _ucClearPlot(); showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
+        if (!data || data.error) { _ucClearPlot(); showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return; }
+        if (!data.techs || !data.techs.length) { _ucClearPlot(); showStatus(_t("web.charts.uc_ramp_distribution.no_data"), false); return; }
         try { renderRamps(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 function showStatus(t, e) { const s = document.getElementById("status"); s.textContent = t; s.style.display = "block"; s.style.color = e ? "#c0392b" : "#7F8C8D"; }
 function hideStatus() { document.getElementById("status").style.display = "none"; }
 
 function renderRamps(data) {
+    resetLabelFits();
     const traces = [];
-    for (const tech of data.techs) {
+    const boxTechs = data.techs.filter(t => data.ramps[t] && data.ramps[t].length);
+    const boxNames = legendNames({ traces: boxTechs.map((_, i) => i), labels: boxTechs,
+                                   fraction: 0.18, fontSize: 10, reservePx: 50 });
+    boxTechs.forEach((tech, i) => {
         const ramps = data.ramps[tech];
-        if (!ramps || !ramps.length) continue;
         traces.push({
             y: ramps, x: ramps.map(() => tech),
-            type: "box", name: tech,
+            type: "box", name: boxNames[i],
             marker: { color: (data.tech_colors || {})[tech] || "#95A5A6" },
             boxpoints: "outliers",
             jitter: 0.3, pointpos: 0,
             hovertemplate: "%{y:,.1f} MW<extra>" + tech + "</extra>",
         });
-    }
+    });
 
     // P95 markers overlaid as a scatter trace — quick visual ranking.
     const p95Techs = data.techs.filter(t => data.p95[t] != null);
@@ -67,33 +70,31 @@ function renderRamps(data) {
             name: "P95",
             marker: { symbol: "diamond", size: 12, color: "#922B21",
                       line: { color: "#000", width: 1 } },
-            hovertemplate: "%{x} P95: %{y:,.1f} MW<extra></extra>",
+            hovertemplate: _t("web.charts.uc_ramp_distribution.hover_p95") + "<extra></extra>",
         });
     }
 
     const layout = {
-        margin: { t: 100, r: 30, b: 70, l: 70 },
+        margin: { t: 70, r: 30, b: 20, l: 70 },
         showlegend: true,
         annotations: [
-            { text: `<b>Ramp Distribution by Technology — Year ${data.year}</b>`,
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.10, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
-            { text: "Hour-to-hour |ΔP|, MW &nbsp;|&nbsp; red diamond = P95",
+            { text: _t("web.charts.uc_ramp_distribution.note_metric") + " &nbsp;|&nbsp; " + _t("web.charts.uc_ramp_distribution.note_p95"),
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.04, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 11, color: "#5D6D7E" } },
         ],
         legend: { font: { size: 10 } },
-        xaxis: { title: "<b>Technology</b>", tickangle: -25 },
-        yaxis: { title: "<b>|ΔP| per hour (MW)</b>", rangemode: "tozero" },
+        xaxis: Object.assign({ title: "<b>" + _t("web.charts.uc_ramp_distribution.axis_technology") + "</b>" },
+            labelAxis({ axis: "xaxis", labels: data.techs, fontSize: 11,
+                        fraction: 0.25, maxChars: 24, angle: -25 })),
+        yaxis: { title: "<b>" + _t("web.charts.uc_ramp_distribution.axis_ramp") + "</b>", rangemode: "tozero" },
         boxmode: "group",
     };
     Plotly.purge("plot");
     Plotly.newPlot("plot", traces, layout, {
         responsive: true, displaylogo: false,
         modeBarButtonsToRemove: ["lasso2d", "select2d"],
-    });
+    }).then(refitLabels);
 }
 
 window.addEventListener("resize", () => {

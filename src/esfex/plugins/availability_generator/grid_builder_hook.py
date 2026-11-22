@@ -12,6 +12,9 @@ Wind / solar units use the existing weather-data backends
 (``solarex`` / ``windrex``).  Everything else falls back to the
 synthetic profiles in :mod:`synthetic_cf`, which are cheap (no I/O)
 and good enough for typical screening studies.
+
+Weather-derived profiles come in UTC and are saved on the model clock
+(:mod:`esfex.utils.model_clock`).
 """
 
 from __future__ import annotations
@@ -20,15 +23,22 @@ import concurrent.futures
 import logging
 import os
 import random
+import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional, Union
 
 import numpy as np
 
 from esfex.plugins.availability_generator.synthetic_cf import (
     compute_synthetic_cf,
     is_synthetic_fuel,
+)
+from esfex.utils.model_clock import (
+    ModelClock,
+    resolve_for_nodes,
+    resolve_model_clock,
+    weather_to_model_clock,
 )
 
 if TYPE_CHECKING:
@@ -62,6 +72,16 @@ _WEATHER_CELL_DEG = 0.1
 # Override with the ESFEX_AVAILABILITY_WORKERS environment variable.
 _WEATHER_SAFE_WORKERS = 4
 
+
+
+def tr(key: str, **kwargs) -> str:
+    """GUI translation; English when no language is set (CLI, agents)."""
+    from esfex.visualization.i18n import tr as _tr
+    return _tr(key, **kwargs)
+
+
+def _kind_label(kind: str) -> str:
+    return tr(f"availability_generator.kind_{kind}")
 
 def _default_max_workers() -> int:
     return _WEATHER_SAFE_WORKERS
@@ -106,6 +126,7 @@ def generate_for_grid_build(
     weather_year: int = 2023,
     weather_source: str = "open_meteo",
     progress_callback: Optional[Callable[[int, str], None]] = None,
+    model_clock: Union[ModelClock, str] = "auto",
 ) -> dict[str, Path]:
     """Generate hourly availability CSVs for every generator in *state*.
 
@@ -120,9 +141,11 @@ def generate_for_grid_build(
     use_weather_data
         When True, wind and solar generators query the weather backend
         for their (lat, lng) — realistic, but network-bound. Queries are
-        de-duplicated per ~11 km grid cell and run concurrently, so the
-        cost scales with the number of *distinct* locations, not the
-        generator count. If a query fails (or the backend is unavailable),
+        de-duplicated per ~11 km grid cell, so the cost scales with the
+        number of *distinct* locations, not the generator count. With
+        ``open_meteo`` one request per cell serves solar and wind, requests
+        are paced to the free tier's per-minute quota, and downloaded cells
+        are cached on disk (see :mod:`open_meteo_weather`). If a query fails (or the backend is unavailable),
         that wind/solar unit is left **without** an availability profile —
         no flat or synthetic value is fabricated — and the omission is
         reported. When False (fast builds) wind/solar use a flat
@@ -135,6 +158,11 @@ def generate_for_grid_build(
         Weather backend: ``open_meteo`` / ``nasa_power`` / ``era5_atlite``.
     progress_callback
         Optional ``callback(percent, message)``.
+    model_clock
+        Clock the weather profiles are saved on (they come in UTC). ``auto``
+        resolves it from *state*'s nodes; the caller records the clock used
+        (``temporal.model_clock``). Flat and synthetic profiles have no time
+        of day and are written as they are.
 
     Returns
     -------
@@ -152,7 +180,7 @@ def generate_for_grid_build(
     gens = list(state.generators.items())
     if not gens:
         if progress_callback:
-            progress_callback(100, "No generators to process.")
+            progress_callback(100, tr("availability_generator.progress_no_generators"))
         return {}
 
     # Classify once: (gid, gen, canonical_fuel, kind).
@@ -170,6 +198,21 @@ def generate_for_grid_build(
         weather_cache = _prefetch_weather_cfs(
             classified, weather_year, weather_source, progress_callback,
         )
+        nodes = list(getattr(state, "nodes", None) or [])
+        if isinstance(model_clock, ModelClock):
+            clock = model_clock
+        elif nodes:
+            clock = resolve_for_nodes(model_clock, nodes)
+        else:  # no nodes: the generators' own sites decide
+            clock = resolve_model_clock(
+                model_clock, [(g.latitude, g.longitude) for _, g, _, _ in classified])
+        logger.info("Weather availability on the model clock: %s", clock.label)
+        # key = (kind, lat, lng, year, source): one shift per weather cell.
+        weather_cache = {
+            k: weather_to_model_clock(v, weather_source, k[2], clock,
+                                      weather_year)
+            for k, v in weather_cache.items()
+        }
 
     from esfex.plugins.availability_generator.synthetic_cf import (
         compute_constant_cf,
@@ -181,7 +224,9 @@ def generate_for_grid_build(
     for idx, (gid, gen, canonical, kind) in enumerate(classified):
         pct = int(100 * (idx + 1) / total)
         if progress_callback:
-            progress_callback(pct, f"Profile {idx + 1}/{total}: {gid} ({kind})")
+            progress_callback(pct, tr("availability_generator.progress_profile",
+                                    i=idx + 1, n=total, gen=gid,
+                                    kind=_kind_label(kind)))
 
         if use_weather_data and kind in ("solar", "wind"):
             cf = weather_cache.get(
@@ -192,7 +237,7 @@ def generate_for_grid_build(
                 # file and report it, so the gap is visible rather than faked.
                 logger.warning(
                     "No weather data for %s (%s) — leaving it without an "
-                    "availability profile (no synthetic fallback).", gid, kind)
+                    "availability profile.", gid, kind)
                 skipped.append(gid)
                 continue
         else:
@@ -224,7 +269,8 @@ def generate_for_grid_build(
             "%d wind/solar generator(s) had no weather data available; left "
             "without an availability profile: %s", len(skipped), shown)
     if progress_callback:
-        progress_callback(100, f"Wrote {len(written)} availability CSV(s).")
+        progress_callback(100, tr("availability_generator.progress_wrote",
+                                    n=len(written)))
     return written
 
 
@@ -237,18 +283,16 @@ def _weather_cache_key(
     weather_year: int,
     weather_source: str,
 ) -> tuple:
-    """A dedup key for one weather query.
+    """A dedup key for one weather query: ``(kind, lat, lng, year, source)``.
 
     Coordinates are bucketed to a ~11 km grid cell (see ``_WEATHER_CELL_DEG``).
-    Wind capacity factors also depend on the rated power (turbine power-curve
-    scaling), so the rounded rating joins the key; solar does not.
+    The unit's rating is not part of the key: ``windrex`` is called without a
+    power curve, so every wind unit uses its default turbine and the capacity
+    factor of a cell does not depend on the unit's rated power.
     """
     lat = round(gen.latitude / _WEATHER_CELL_DEG) * _WEATHER_CELL_DEG
     lng = round(gen.longitude / _WEATHER_CELL_DEG) * _WEATHER_CELL_DEG
-    cell = (round(lat, 3), round(lng, 3), weather_year, weather_source)
-    if kind == "wind":
-        return ("wind", *cell, round(max(gen.rated_power, 1.0)))
-    return ("solar", *cell)
+    return (kind, round(lat, 3), round(lng, 3), weather_year, weather_source)
 
 
 def _prefetch_weather_cfs(
@@ -279,8 +323,12 @@ def _prefetch_weather_cfs(
     if not total:
         return cache
 
+    if weather_source == "open_meteo":
+        return _prefetch_open_meteo(keys, weather_year, progress_callback)
+
     if progress_callback:
-        progress_callback(0, f"Fetching weather for {total} location(s)…")
+        progress_callback(0, tr("availability_generator.progress_fetching_weather",
+                                  n=total))
 
     def _work(key: tuple):
         return key, _fetch_one_weather_cf(
@@ -303,12 +351,96 @@ def _prefetch_weather_cfs(
             if progress_callback:
                 progress_callback(
                     int(100 * done / total),
-                    f"Weather {done}/{total} location(s)…")
+                    tr("availability_generator.progress_weather_n",
+                       done=done, n=total))
 
     logger.info(
         "Weather availability: %d unique location(s) fetched for the build.",
         len(cache),
     )
+    return cache
+
+
+def _prefetch_open_meteo(
+    keys: list[tuple],
+    weather_year: int,
+    progress_callback: Optional[Callable[[int, str], None]],
+) -> dict[tuple, np.ndarray]:
+    """Open-Meteo path: one quota-paced request per grid cell serves both the
+    solar and the wind units in it, with a disk cache across builds."""
+    from esfex.plugins.availability_generator import open_meteo_weather as om
+
+    try:  # the CF models live in solarex / windrex
+        import solarex  # noqa: F401
+        import windrex  # noqa: F401
+    except ImportError:
+        logger.debug("solarex / windrex unavailable — no weather profiles")
+        return {}
+
+    cells: dict[tuple, list[tuple]] = {}
+    for key in keys:
+        cells.setdefault((key[1], key[2]), []).append(key)
+
+    cache_dir = om.default_cache_dir()
+    to_download = [c for c in cells
+                   if not om._cache_path(cache_dir, *c, weather_year).exists()]
+    n_cells = len(cells)
+    if progress_callback:
+        if to_download:
+            per_min = om.CALLS_PER_MINUTE_BUDGET / om.year_request_cost(weather_year)
+            minutes = len(to_download) / per_min
+            msg = tr("availability_generator.progress_weather_download",
+                     n=n_cells, download=len(to_download),
+                     minutes=max(1, round(minutes)))
+        else:
+            msg = tr("availability_generator.progress_weather_cached", n=n_cells)
+        progress_callback(0, msg)
+
+    limiter = om.MinuteRateLimiter()
+    stop = threading.Event()
+    quota_reason: list[str] = []
+
+    def _work(cell):
+        weather = om.fetch_cell_weather(cell[0], cell[1], weather_year,
+                                        limiter, cache_dir, stop)
+        if weather is None:
+            return cell, {}
+        out = {}
+        for key in cells[cell]:
+            cf = om.solar_cf(weather) if key[0] == "solar" else om.wind_cf(weather)
+            if np.any(cf):
+                out[key] = cf
+        return cell, out
+
+    cache: dict[tuple, np.ndarray] = {}
+    done = 0
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=_resolve_max_workers(n_cells)
+    ) as ex:
+        futures = [ex.submit(_work, c) for c in cells]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                _cell, cfs = fut.result()
+                cache.update(cfs)
+            except om.OpenMeteoQuotaExhausted as exc:
+                if not stop.is_set():
+                    quota_reason.append(str(exc))
+                    stop.set()  # the rest would only draw more 429s
+            except Exception as exc:
+                logger.warning("Weather fetch failed: %s", exc)
+            done += 1
+            if progress_callback:
+                progress_callback(int(100 * done / n_cells),
+                                  tr("availability_generator.progress_weather_n",
+                                     done=done, n=n_cells))
+
+    if quota_reason:
+        logger.warning(
+            "Open-Meteo quota exhausted (%s). Locations downloaded so far are "
+            "cached in %s; re-run the build later to fetch the rest.",
+            quota_reason[0], cache_dir)
+    logger.info("Weather availability: %d of %d location(s) available.",
+                len({(k[1], k[2]) for k in cache}), n_cells)
     return cache
 
 

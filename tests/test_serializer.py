@@ -91,7 +91,6 @@ _2N = 2  # number of nodes for test fixtures
 def _make_generator(
     name: str, gen_type: str, fuel: str,
     rated_power: list[float] | None = None,
-    invest_max_power: list[float] | None = None,
     technology: str | None = None,
 ) -> GeneratorConfig:
     n = _2N
@@ -120,7 +119,6 @@ def _make_generator(
         fixed_cost=[6.6] * n,
         maintenance_cost=[28.8] * n,
         invest_cost=[3_900_000.0] * n,
-        invest_max_power=invest_max_power or [0.0] * n,
     )
 
 
@@ -129,7 +127,6 @@ def _make_battery(
     rated_power: list[float] | None = None,
     capacity: list[float] | None = None,
     invest_max_power: list[float] | None = None,
-    invest_max_capacity: list[float] | None = None,
 ) -> BatteryConfig:
     n = _2N
     rp = rated_power or [25.0, 40.0]
@@ -155,9 +152,7 @@ def _make_battery(
         fixed_cost=[5.0] * n,
         maintenance_cost=[5.0] * n,
         invest_cost=[200_000.0] * n,
-        invest_cost_energy=[150_000.0] * n,
         invest_max_power=invest_max_power or [50.0] * n,
-        invest_max_capacity=invest_max_capacity or [100.0] * n,
         efficiency_charge=[0.95] * n,
         efficiency_discharge=[0.95] * n,
         soc_initial=[0.5] * n,
@@ -199,7 +194,7 @@ def _make_system_config(sys_name: str = "TestSystem") -> SystemConfig:
             ),
         },
         penalties=PenaltiesConfig(
-            loss_of_load=10_000_000, curtailment=100.0, co2_cost=10.0,
+            loss_of_load=10_000_000, curtailment_cost=20.0, co2_cost=10.0,
         ),
         co2_budget=CO2BudgetConfig(enabled=True, annual_budget=100_000),
         generators={
@@ -210,13 +205,11 @@ def _make_system_config(sys_name: str = "TestSystem") -> SystemConfig:
             "solar": _make_generator(
                 "Solar", "Renewable", "Sun",
                 rated_power=[50.0, 80.0],
-                invest_max_power=[200.0, 200.0],
                 technology="Solar PV",
             ),
             "wind": _make_generator(
                 "Wind", "Renewable", "Wind",
                 rated_power=[30.0, 60.0],
-                invest_max_power=[100.0, 100.0],
                 technology="Wind turbine",
             ),
         },
@@ -289,7 +282,7 @@ def _build_minimal_gui_state() -> GuiSystemState:
         ),
         penalties=GuiPenalties(
             loss_of_load=10e6,
-            curtailment=100.0,
+            curtailment_cost=20.0,
         ),
     )
 
@@ -997,7 +990,7 @@ class TestConfigToGuiStates:
         states = config_to_gui_states(config)
         state = states["TestSystem"]
         assert state.penalties.loss_of_load == 10_000_000
-        assert state.penalties.curtailment == 100.0
+        assert state.penalties.curtailment_cost == 20.0
         assert state.penalties.co2_cost == 10.0
 
     def test_co2_budget_in_settings(self):
@@ -1015,7 +1008,7 @@ class TestConfigToGuiStates:
             e for e in state.investment_portfolio.values()
             if e.technology_type == "generator"
         ]
-        # solar and wind have invest_max_power > 0
+        # every generator has an invest_cost (it prices life extension)
         assert len(gen_investments) >= 2
 
     def test_battery_investment_in_portfolio(self):
@@ -1209,6 +1202,16 @@ class TestGuiStateToYaml:
         assert "systems" in data
         assert "MinimalSystem" in data["systems"]
 
+    def test_removed_loss_demand_threshold_not_written(self):
+        """No constraint ever used LOSS_DEMAND_TRHESHOLD; it was removed
+        and the Studio does not write it."""
+        state = _build_minimal_gui_state()
+        config = _make_esfex_config()
+        data = self._export_and_parse({"MinimalSystem": state}, config)
+        sys_dict = data["systems"]["MinimalSystem"]
+        assert "LOSS_DEMAND_TRHESHOLD" not in sys_dict
+        assert "loss_demand_threshold" not in sys_dict
+
     def test_output_contains_generators(self):
         state = _build_minimal_gui_state()
         config = _make_esfex_config()
@@ -1291,7 +1294,11 @@ class TestGuiStateToYaml:
         sys_data = data["systems"]["MinimalSystem"]
         assert "penalties" in sys_data
         assert sys_data["penalties"]["LOSS_OF_LOAD"] == 10e6
-        assert sys_data["penalties"]["Curtailment"] == 100.0
+        # Removed (they priced nothing): no longer written
+        for key in ("Curtailment", "coupling_slack_penalty", "transport_congestion",
+                    "storage_violation", "curtailment_excess_penalty",
+                    "re_excess_penalty"):
+            assert key not in sys_data["penalties"]
 
     def test_node_names_exported(self):
         state = _build_minimal_gui_state()
@@ -1393,12 +1400,6 @@ class TestGlobalSettingsToConfigDict:
         d: dict[str, Any] = {}
         global_settings_to_config_dict(gs, d)
         assert d["solver"]["verbose"] is True
-
-    def test_solver_scale_constraints(self):
-        gs = GuiGlobalSettings(solver_scale_constraints=False)
-        d: dict[str, Any] = {}
-        global_settings_to_config_dict(gs, d)
-        assert d["solver"]["scale_constraints"] is False
 
     def test_solver_specific_options(self):
         gs = GuiGlobalSettings(solver_specific_options={"mip_gap": 0.005})
@@ -1503,10 +1504,11 @@ class TestGlobalSettingsToConfigDict:
 class TestStochasticScenarioToConfigDict:
     """Tests for applying stochastic scenarios to a system dict."""
 
-    def test_empty_scenarios_no_change(self):
-        sys_dict: dict[str, Any] = {}
+    def test_empty_scenarios_write_empty_list(self):
+        # Deleting every scenario in the GUI must persist on save.
+        sys_dict: dict[str, Any] = {"stochastic_scenarios": [{"name": "old"}]}
         stochastic_scenarios_to_config_dict([], sys_dict)
-        assert "stochastic_scenarios" not in sys_dict
+        assert sys_dict["stochastic_scenarios"] == []
 
     def test_single_scenario(self):
         scenarios = [
@@ -1539,15 +1541,16 @@ class TestStochasticScenarioToConfigDict:
         scenarios = [
             GuiStochasticScenario(
                 name="Multi", probability=0.5,
-                multipliers={"demand": 1.1, "fuel_cost": 1.3, "invest": 0.9},
+                multipliers={"demand_growth": 1.1, "fuel_cost": 1.3,
+                             "invest_cost_renewables": 0.9},
             ),
         ]
         sys_dict: dict[str, Any] = {}
         stochastic_scenarios_to_config_dict(scenarios, sys_dict)
         m = sys_dict["stochastic_scenarios"][0]["multipliers"]
-        assert m["demand"] == pytest.approx(1.1)
+        assert m["demand_growth"] == pytest.approx(1.1)
         assert m["fuel_cost"] == pytest.approx(1.3)
-        assert m["invest"] == pytest.approx(0.9)
+        assert m["invest_cost_renewables"] == pytest.approx(0.9)
 
     def test_empty_multipliers(self):
         scenarios = [
@@ -1641,7 +1644,7 @@ class TestRoundTrip:
         data = self._round_trip(config)
         pen = data["systems"]["TestSystem"]["penalties"]
         assert pen["LOSS_OF_LOAD"] == 10_000_000
-        assert pen["Curtailment"] == 100.0
+        assert pen["curtailment_cost"] == 20.0
         assert pen["CO2_cost"] == 10.0
 
     def test_round_trip_preserves_settings(self):
@@ -1650,6 +1653,29 @@ class TestRoundTrip:
         sys_data = data["systems"]["TestSystem"]
         assert sys_data["discount_rate"] == pytest.approx(0.05)
         assert sys_data["target_re_penetration"] == pytest.approx(0.5)
+
+    def test_round_trip_npv_retirement_settings(self):
+        """The NPV-based retirement settings load into Studio and save back,
+        edits included."""
+        sys_cfg = _make_system_config("TestSystem").model_copy(update={
+            "npv_retirement": True, "npv_retirement_max_iterations": 3,
+            "npv_retirement_threshold": -5e5, "npv_annual_return_rate": 0.08})
+        config = _make_esfex_config(sys_cfg)
+        settings = config_to_gui_states(config)["TestSystem"].settings
+        assert settings.npv_retirement is True
+        assert settings.npv_retirement_max_iterations == 3
+        assert settings.npv_retirement_threshold == pytest.approx(-5e5)
+        assert settings.npv_annual_return_rate == pytest.approx(0.08)
+        sys_data = self._round_trip(config)["systems"]["TestSystem"]
+        assert sys_data["npv_retirement"] is True
+        assert sys_data["npv_retirement_max_iterations"] == 3
+        assert sys_data["npv_retirement_threshold"] == pytest.approx(-5e5)
+        assert sys_data["npv_annual_return_rate"] == pytest.approx(0.08)
+        # Defaults: off
+        default = config_to_gui_states(_make_esfex_config())["TestSystem"].settings
+        assert default.npv_retirement is False
+        assert default.npv_retirement_max_iterations == 5
+        assert default.npv_retirement_threshold == 0.0
 
     def test_round_trip_preserves_fuel_properties(self):
         config = _make_esfex_config()
@@ -1665,12 +1691,17 @@ class TestRoundTrip:
         assert co2["enabled"] is True
         assert co2["annual_budget"] == 100_000
 
-    def test_round_trip_preserves_investment_max(self):
+    def test_round_trip_preserves_investment_fields(self):
         config = _make_esfex_config()
         data = self._round_trip(config)
         solar = data["systems"]["TestSystem"]["generators"]["solar"]
-        assert solar["invest_max_power"][0] == 200.0
-        assert solar["invest_max_power"][1] == 200.0
+        assert solar["invest_cost"] == [3_900_000.0, 3_900_000.0]
+        # Existing generators have no build limit (new capacity comes from
+        # technologies): nothing the dispatch alone used to read is written
+        assert "invest_max_power" not in solar
+        bat = data["systems"]["TestSystem"]["batteries"]["li_ion"]
+        assert bat["invest_max_power"] == [50.0, 50.0]
+        assert "invest_cost_energy" not in bat and "invest_max_capacity" not in bat
 
     def test_round_trip_with_global_settings(self):
         config = _make_esfex_config()

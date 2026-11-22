@@ -37,6 +37,8 @@ This section provides the full bibliography for the ESFEX documentation. Referen
 
 <a id="ref47"></a>**[47]** Thurner L, Scheidler A, Schäfer F, Menke JH, Dollichon J, Meier F, Meinecke S, Braun M. pandapower — an Open-Source Python Tool for Convenient Modeling, Analysis, and Optimization of Electric Power Systems. *IEEE Transactions on Power Systems* 2018;33(6):6510–6521. [doi:10.1109/TPWRS.2018.2829021](https://doi.org/10.1109/TPWRS.2018.2829021). Repository: [github.com/e2nIEE/pandapower](https://github.com/e2nIEE/pandapower)
 
+<a id="ref86"></a>**[86]** Soto Calvo M, Lee HS. ESFEX: an open-source framework for multi-model power-system optimization and energy-flexibility analysis. *SoftwareX* 2026;36:103244. [doi:10.1016/j.softx.2026.103244](https://doi.org/10.1016/j.softx.2026.103244). Repository: [github.com/Net-Zero-Horizon/ESFEX](https://github.com/Net-Zero-Horizon/ESFEX)
+
 ## Power Systems Analysis and Optimization
 
 <a id="ref5"></a>**[5]** Kundur P. *Power System Stability and Control*. New York: McGraw-Hill; 1994.
@@ -102,6 +104,8 @@ This section provides the full bibliography for the ESFEX documentation. Referen
 <a id="ref23"></a>**[23]** Hoffmann M, Kotzur L, Stolten D, Robinius M. A Review on Time Series Aggregation Methods for Energy System Models. *Energies* 2020;13(3):641. [doi:10.3390/en13030641](https://doi.org/10.3390/en13030641)
 
 <a id="ref37"></a>**[37]** Nahmmacher P, Schmid E, Hirth L, Knopf B. Carpe diem: A novel approach to select representative days for long-term power system planning. *Energy* 2016;112:430–442. [doi:10.1016/j.energy.2016.06.081](https://doi.org/10.1016/j.energy.2016.06.081)
+
+<a id="ref85"></a>**[85]** Kotzur L, Markewitz P, Robinius M, Stolten D. Time series aggregation for energy system design: Modeling seasonal storage. *Applied Energy* 2018;213:123–135. [doi:10.1016/j.apenergy.2018.01.023](https://doi.org/10.1016/j.apenergy.2018.01.023)
 
 ## Capacity Expansion Planning
 

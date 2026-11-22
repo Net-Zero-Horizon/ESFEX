@@ -12,14 +12,15 @@ The module is GUI-independent and can be used from scripts and notebooks. The [F
 ```
 HDF5 results file (from Orchestrator.run())
     │
-    ├── /cost_breakdown/year_YYYY/    ──→  granular cost components (preferred)
-    │   (27 component attributes)
+    ├── /cost_breakdown/year_YYYY/                ──→  granular cost components (preferred)
+    │   (one attribute per cost component)
     │
-    ├── /detailed_results/year_YYYY/  ──→  generation, prices, investments
-    │   (gen_output, electricity_prices, ...)
+    ├── /detailed_results/year_YYYY_threshold_0/  ──→  generation, prices, investments
+    │   (generation/, nodal_electricity_prices, electricity_prices,
+    │    demand, curtailment, loss_load, CO2_emissions, gen_startup/)
     │
-    └── /system_configuration/        ──→  fuel costs, invest costs, lifetimes
-        (generators/, batteries/)
+    └── /system_configuration/                    ──→  fuel costs, invest costs, lifetimes
+        (generators/, batteries/, technologies/, battery_technologies/)
 
         ↓
     FinancialAssumptions  +  HDF5 data
@@ -27,7 +28,7 @@ HDF5 results file (from Orchestrator.run())
     SystemFinancials / TechnologyFinancials / SensitivityResult / MonteCarloResult
 ```
 
-When the `/cost_breakdown/` group is present in HDF5 (see [HDF5 schema](../reference/hdf5-output-schema.md#cost_breakdown)), granular per-component costs are used directly. Otherwise, costs are recalculated from generation output and system configuration (fuel cost × generation, O&M × generation, etc.).
+When the `/cost_breakdown/` group is present in HDF5 (see [HDF5 schema](../reference/hdf5-output-schema.md#cost_breakdown)), granular per-component costs are used directly. Scenario groups are matched to years through their `year` attribute, not their name. Otherwise, costs are recalculated from generation output and system configuration (fuel cost × generation, O&M × generation, etc.).
 
 ---
 
@@ -92,7 +93,7 @@ class FinancialAssumptions:
 |-------|---------|-------------|
 | `ppa_price` | 0.0 | Power Purchase Agreement price (\$/MWh). When 0, nodal prices from the optimization (shadow prices of the power balance constraint) are used as the revenue basis. |
 | `ppa_escalation` | 0.02 | Annual PPA price escalation rate. Price in year \(y\): \(P_0 (1 + e)^y\). |
-| `capacity_payment` | 0.0 | Annual capacity payment (\$/MW-year). Multiplied by total installed capacity. |
+| `capacity_payment` | 0.0 | Annual capacity payment (\$/MW-year). Multiplied by each year's generator MW in service over all nodes (the `rated_power` attribute of the results' generation datasets; older files: the configured `rated_power`). |
 | `rec_price` | 0.0 | Renewable Energy Certificate price (\$/MWh). Applied to renewable generation only. |
 
 ### Environmental
@@ -136,11 +137,12 @@ Compute system-level financial analysis from simulation results.
 
 1. Load system configuration (generators, batteries, technologies) and year list from HDF5.
 2. For each year, load generation output, investment decisions, and electricity prices.
-3. Compute annual costs: if `/cost_breakdown/year_YYYY/` exists, read directly; otherwise recalculate from generation × unit cost parameters.
-4. Compute annual revenue from energy sales (PPA or nodal prices), carbon credits, RECs, and capacity payments.
-5. Compute WACC, depreciation schedule, debt service, and tax.
-6. Build the annual cash flow table and discount all flows to NPV.
-7. Compute IRR, MIRR, payback, DSCR, LLCR, and system LCOE.
+3. Compute annual costs: if `/cost_breakdown/year_YYYY/` exists, read directly; otherwise recalculate from generation × unit cost parameters. A unit's `fuel_cost` grows with its fuel's `price_growth_rate`, `(1 + rate)^(year − base_year)`, as the dispatch charges it (`system_configuration/fuel_price_growth`; files written without it are valued at the flat `fuel_cost`, with a note in the log).
+4. Capital cost of the units the master built: each year's builds (the `investment_*` attributes of the year's results group) × their technology's `invest_cost` (batteries: `invest_cost_power` and `invest_cost_energy`), so a build that replaces retired or degraded capacity is paid for. Files without build records book it on the growth of the built units' MW in service.
+5. Compute annual revenue from energy sales (PPA or nodal prices), carbon credits, RECs, and capacity payments.
+6. Compute WACC, depreciation schedule, debt service, and tax.
+7. Build the annual cash flow table and discount all flows to NPV.
+8. Compute IRR, MIRR, payback, DSCR, LLCR, and system LCOE.
 
 **Example:**
 
@@ -194,7 +196,8 @@ NPV_k = \sum_{y=0}^{N-1} \frac{C_{k,y}}{(1 + r)^y}
 | `npv_decommissioning` | `float` | NPV of decommissioning costs (\$). |
 | `npv_penalties` | `float` | NPV of penalty costs: load shedding, curtailment, RE shortfall (\$). |
 | `npv_revenue` | `float` | NPV of energy revenue (\$). |
-| `npv_tax_benefits` | `float` | NPV of tax depreciation benefits + ITC + PTC (\$). |
+| `npv_tax` | `float` | NPV of income tax paid (\$). |
+| `npv_tax_benefits` | `float` | NPV of ITC + PTC (\$). Depreciation enters through `tax`. |
 | `npv_salvage` | `float` | NPV of residual asset value (\$). |
 | `npv_total` | `float` | Net project NPV: revenue + tax benefits + salvage − all costs (\$). |
 
@@ -202,7 +205,7 @@ NPV_k = \sum_{y=0}^{N-1} \frac{C_{k,y}}{(1 + r)^y}
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `cash_flows` | `pd.DataFrame` | Annual pro-forma cash flow table. Columns: `year`, `revenue`, `fuel_cost`, `om_cost`, `insurance`, `capex`, `depreciation`, `tax`, `ptc_benefit`, `debt_service`, `net_cash_flow`, `equity_cash_flow`, `cumulative_npv`, `dscr`. |
+| `cash_flows` | `pd.DataFrame` | Annual pro-forma cash flow table. Columns: `year`, `revenue`, `fuel_cost`, `om_cost`, `insurance`, `carbon_cost`, `penalties`, `capex`, `depreciation`, `tax`, `ptc_benefit`, `itc_benefit`, `debt_service`, `net_cash_flow`, `equity_cash_flow`, `cumulative_npv`, `dscr`. |
 
 ### Return Metrics
 
@@ -234,6 +237,19 @@ NPV_k = \sum_{y=0}^{N-1} \frac{C_{k,y}}{(1 + r)^y}
 | `lcos_by_battery` | `dict` | Per-battery levelized cost of storage: `{name: float}`. |
 | `valcoe_by_tech` | `dict` | Per-technology VALCOE: `{name: float}`. |
 | `tech_financials` | `dict` | Per-technology detailed financials: `{name: TechnologyFinancials}`. |
+
+### Investment-Only Metrics
+
+Metrics for new capacity only (the `Investment …` virtual units): their revenue, fuel and O&M against their CAPEX, with the same tax, depreciation and debt treatment as the system view. Pre-existing plants are excluded.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `investment_npv` | `float` | NPV of the new-investment cash flows (\$). |
+| `investment_irr` | `float` | Project IRR of the new-investment cash flows. |
+| `investment_equity_irr` | `float` | Equity IRR (after debt service). |
+| `investment_payback` | `float` | Simple payback period (years); `inf` if never reached. |
+| `investment_capex` | `float` | Total undiscounted CAPEX of new capacity (\$). |
+| `investment_lcoe` | `float` | LCOE of new capacity (\$/MWh). |
 
 ---
 
@@ -496,6 +512,16 @@ print(f"P(NPV > 0):  {(mc.npv_samples > 0).mean():.0%}")
 | `npv_cvar_5` | `float` | Conditional VaR at 5%: mean NPV of the worst 5% outcomes. |
 | `irr_mean` | `float` | Mean IRR. |
 | `irr_std` | `float` | Standard deviation of IRR. |
+
+---
+
+## load_price_series
+
+```python
+def load_price_series(h5_path: Path | str, year: int | None = None) -> np.ndarray
+```
+
+Return a 1-D electricity price series for one year (the first simulated year if `year` is `None` or not found). Uses `nodal_electricity_prices` flattened over nodes and hours, falling back to `electricity_prices`. Returns an empty array if the file has no prices. Used by the Market Analysis price-duration curve.
 
 ---
 

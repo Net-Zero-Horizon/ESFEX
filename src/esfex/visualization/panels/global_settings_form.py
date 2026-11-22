@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -77,7 +78,7 @@ class GlobalSettingsForm(QWidget):
 
         self._enable_uc_in_dispatch = QCheckBox(tr("common.enable"))
         self._enable_uc_in_dispatch.toggled.connect(self._on_changed)
-        sl.addRow("Enable UC", self._enable_uc_in_dispatch)
+        sl.addRow(tr("global_form.enable_uc"), self._enable_uc_in_dispatch)
 
         self._date_start = QLineEdit()
         self._date_start.setPlaceholderText(tr("global_form.date_placeholder"))
@@ -116,6 +117,9 @@ class GlobalSettingsForm(QWidget):
         self._overlap.setRange(0, 720)
         self._overlap.editingFinished.connect(self._on_changed)
         tl.addRow(tr("global_form.overlap"), self._overlap)
+        # The overlap must stay shorter than the window (schema rejects otherwise).
+        self._rolling_horizon.valueChanged.connect(
+            lambda v: self._overlap.setMaximum(min(720, max(0, v - 1))))
 
         self._inv_resolution = QSpinBox()
         self._inv_resolution.setRange(1, 87600)
@@ -131,13 +135,21 @@ class GlobalSettingsForm(QWidget):
         self._use_rolling.toggled.connect(self._on_changed)
         tl.addRow(tr("global_form.use_rolling"), self._use_rolling)
 
+        # Time base of every hourly series ('auto' until the Grid Builder or
+        # the availability generator resolves it from the nodes).
+        self._model_clock = QLineEdit()
+        self._model_clock.setPlaceholderText(tr("global_form.model_clock_auto"))
+        self._model_clock.setToolTip(tr("global_form.model_clock_tip"))
+        self._model_clock.editingFinished.connect(self._on_changed)
+        tl.addRow(tr("global_form.model_clock"), self._model_clock)
+
         content_layout.addWidget(group_temp)
 
         # ── Section 3: Power Flow formulation ──
         # Placed BEFORE the solver section on purpose: the OPF formulation
         # constrains which solvers are valid (AC-OPF NLP modes need Ipopt,
-        # acopf_sdp needs SCS/Mosek, convex relaxations work with HiGHS/
-        # Gurobi), so the user picks the formulation first. The OPF formulation
+        # acopf_sdp needs SCS/Mosek, SOC/QC relaxations need a conic solver:
+        # Clarabel/SCS/Gurobi), so the user picks the formulation first. The OPF formulation
         # is also a MODEL-WIDE choice — multi-system configs merge into a
         # single network solved with one formulation (runner._merge_systems) —
         # hence Global Settings, not per-System. Data stays on model.state
@@ -263,12 +275,7 @@ class GlobalSettingsForm(QWidget):
         # the solver-specific sub-group below them. The user-facing label
         # reflects the unification — "Solver Options" instead of two
         # separate "Solver" + "Solver-Specific Options" panels.
-        group_solver = QGroupBox(tr("global_form.solver_options")
-                                  if hasattr(tr("global_form.solver_options"), "__class__")
-                                  else "Solver Options")
-        # tr() returns a str always; the conditional above is defensive
-        # in case the key is missing — fall back to literal "Solver Options".
-        group_solver.setTitle("Solver Options")
+        group_solver = QGroupBox(tr("global_form.solver_options_group"))
         svl = QFormLayout(group_solver)
         svl.setContentsMargins(6, 6, 6, 6)
         svl.setSpacing(4)
@@ -293,7 +300,9 @@ class GlobalSettingsForm(QWidget):
         svl.addRow(tr("global_form.threads"), self._solver_threads)
 
         self._solver_time = QSpinBox()
-        self._solver_time.setRange(1, 86400)
+        # 0 = no limit (solver.time_limit); the YAML may hold more than a day
+        self._solver_time.setRange(0, 10_000_000)
+        self._solver_time.setSpecialValueText(tr("global_form.time_limit_none"))
         self._solver_time.editingFinished.connect(self._on_changed)
         svl.addRow(tr("global_form.time_limit"), self._solver_time)
 
@@ -306,10 +315,6 @@ class GlobalSettingsForm(QWidget):
         self._solver_verbose = QCheckBox(tr("global_form.verbose"))
         self._solver_verbose.toggled.connect(self._on_changed)
         svl.addRow("", self._solver_verbose)
-
-        self._solver_scale = QCheckBox(tr("global_form.scale_constraints"))
-        self._solver_scale.toggled.connect(self._on_changed)
-        svl.addRow("", self._solver_scale)
 
         # Solver-specific options live INSIDE the unified group as a
         # sub-section, so collapsing/showing them when the chosen solver
@@ -339,6 +344,16 @@ class GlobalSettingsForm(QWidget):
         self._n1_enabled.toggled.connect(self._on_changed)
         n1l.addRow("", self._n1_enabled)
 
+        # Simulation modes the N-1 constraints apply to (apply_to_modes).
+        n1_modes_row = QHBoxLayout()
+        self._n1_apply_dev = QCheckBox(tr("global_form.n1_apply_dev"))
+        self._n1_apply_uc = QCheckBox(tr("global_form.n1_apply_uc"))
+        for cb in (self._n1_apply_dev, self._n1_apply_uc):
+            cb.toggled.connect(self._on_changed)
+            n1_modes_row.addWidget(cb)
+        n1_modes_row.addStretch(1)
+        n1l.addRow(tr("global_form.n1_apply_modes"), n1_modes_row)
+
         self._n1_trans_enabled = QCheckBox(tr("global_form.enable"))
         self._n1_trans_enabled.toggled.connect(self._on_changed)
         n1l.addRow(tr("global_form.n1_trans"), self._n1_trans_enabled)
@@ -349,11 +364,6 @@ class GlobalSettingsForm(QWidget):
         self._n1_trans_reserve.editingFinished.connect(self._on_changed)
         n1l.addRow(tr("global_form.n1_trans_reserve"), self._n1_trans_reserve)
 
-        self._n1_crit_line = QDoubleSpinBox()
-        self._n1_crit_line.setRange(0, 1)
-        self._n1_crit_line.setDecimals(3)
-        self._n1_crit_line.editingFinished.connect(self._on_changed)
-        n1l.addRow(tr("global_form.n1_crit_line"), self._n1_crit_line)
 
         self._n1_gen_enabled = QCheckBox(tr("global_form.enable"))
         self._n1_gen_enabled.toggled.connect(self._on_changed)
@@ -362,7 +372,6 @@ class GlobalSettingsForm(QWidget):
         self._n1_gen_type = QComboBox()
         self._n1_gen_type.addItem(tr("global_form.reserve_largest"), "largest_unit")
         self._n1_gen_type.addItem(tr("global_form.reserve_percentage"), "percentage")
-        self._n1_gen_type.addItem(tr("global_form.reserve_fixed"), "fixed_mw")
         self._n1_gen_type.currentIndexChanged.connect(self._on_changed)
         n1l.addRow(tr("global_form.n1_gen_type"), self._n1_gen_type)
 
@@ -376,20 +385,8 @@ class GlobalSettingsForm(QWidget):
         self._n1_scopf_enabled = QCheckBox(tr("global_form.n1_scopf"))
         self._n1_scopf_enabled.setToolTip(
             tr("global_form.n1_scopf_tip"))
-        self._n1_scopf_enabled.toggled.connect(self._on_n1_scopf_toggled)
+        self._n1_scopf_enabled.toggled.connect(self._on_changed)
         n1l.addRow("", self._n1_scopf_enabled)
-
-        self._n1_scopf_max_iter = QSpinBox()
-        self._n1_scopf_max_iter.setRange(1, 20)
-        self._n1_scopf_max_iter.editingFinished.connect(self._on_changed)
-        n1l.addRow(tr("global_form.n1_scopf_max_iter"), self._n1_scopf_max_iter)
-
-        self._n1_scopf_tol = QDoubleSpinBox()
-        self._n1_scopf_tol.setRange(0, 1)
-        self._n1_scopf_tol.setDecimals(4)
-        self._n1_scopf_tol.setSingleStep(0.001)
-        self._n1_scopf_tol.editingFinished.connect(self._on_changed)
-        n1l.addRow(tr("global_form.n1_scopf_tol"), self._n1_scopf_tol)
 
         self._n1_corrective = QCheckBox(tr("global_form.n1_corrective"))
         self._n1_corrective.setToolTip(
@@ -397,7 +394,25 @@ class GlobalSettingsForm(QWidget):
         self._n1_corrective.toggled.connect(self._on_changed)
         n1l.addRow("", self._n1_corrective)
 
-        # ── N-k Depth & Analysis Options ──
+        self._n1_security_cost = QCheckBox(tr("global_form.n1_security_cost"))
+        self._n1_security_cost.setToolTip(tr("global_form.n1_security_cost_tip"))
+        self._n1_security_cost.toggled.connect(self._on_changed)
+        n1l.addRow("", self._n1_security_cost)
+
+        # ── SLD contingency analysis (Run All N-1 / Screening) ──
+        # Not part of the optimisation: defaults of the SLD Analysis panel.
+        n1_sld_header = QLabel(tr("global_form.n1_sld_header"))
+        n1_sld_header.setToolTip(tr("global_form.n1_sld_header_tip"))
+        n1_sld_header.setWordWrap(True)
+        n1l.addRow(n1_sld_header)
+
+        self._n1_crit_line = QDoubleSpinBox()
+        self._n1_crit_line.setRange(0, 1)
+        self._n1_crit_line.setDecimals(3)
+        self._n1_crit_line.setToolTip(tr("global_form.n1_crit_line_tip"))
+        self._n1_crit_line.editingFinished.connect(self._on_changed)
+        n1l.addRow(tr("global_form.n1_crit_line"), self._n1_crit_line)
+
         self._n1_depth = QComboBox()
         self._n1_depth.addItem("N-1", "n1")
         self._n1_depth.addItem("N-1-1", "n1_1")
@@ -432,10 +447,6 @@ class GlobalSettingsForm(QWidget):
         self._n1_battery_ctg.toggled.connect(self._on_changed)
         n1l.addRow("", self._n1_battery_ctg)
 
-        # Initial visibility
-        self._n1_scopf_max_iter.setEnabled(False)
-        self._n1_scopf_tol.setEnabled(False)
-
         # group_n1 added in the canonical ordering block at end of __init__.
 
         # ── Section 5: Master Problem ──
@@ -457,6 +468,23 @@ class GlobalSettingsForm(QWidget):
         self._mp_min_sep.setRange(0, 365)
         self._mp_min_sep.editingFinished.connect(self._on_changed)
         mpl.addRow(tr("global_form.mp_min_sep"), self._mp_min_sep)
+
+        self._mp_critical_days = QSpinBox()
+        self._mp_critical_days.setRange(0, 365)
+        self._mp_critical_days.setToolTip(tr("global_form.mp_critical_days_tip"))
+        self._mp_critical_days.editingFinished.connect(self._on_changed)
+        mpl.addRow(tr("global_form.mp_critical_days"), self._mp_critical_days)
+
+        # 0 shows "Auto": derived from the data
+        self._mp_storage_firm_hours = QDoubleSpinBox()
+        self._mp_storage_firm_hours.setDecimals(1)
+        self._mp_storage_firm_hours.setRange(0.0, 8760.0)
+        self._mp_storage_firm_hours.setSuffix(" h")
+        self._mp_storage_firm_hours.setSpecialValueText(
+            tr("global_form.mp_storage_firm_hours_auto"))
+        self._mp_storage_firm_hours.setToolTip(tr("global_form.mp_storage_firm_hours_tip"))
+        self._mp_storage_firm_hours.editingFinished.connect(self._on_changed)
+        mpl.addRow(tr("global_form.mp_storage_firm_hours"), self._mp_storage_firm_hours)
 
         # Master-problem solver method: monolithic (default) or Benders
         # decomposition. The two Benders settings below only apply to "benders".
@@ -492,7 +520,9 @@ class GlobalSettingsForm(QWidget):
         mpl.addRow(tr("global_form.mp_tsam_num_periods"), self._mp_tsam_num_periods)
 
         self._mp_tsam_method = QComboBox()
-        self._mp_tsam_method.addItems(["kmedoids", "kmeans"])
+        # Method names (tsam identifiers) are shown as they are.
+        for method in ("kmedoids", "kmeans"):
+            self._mp_tsam_method.addItem(method, method)
         self._mp_tsam_method.currentIndexChanged.connect(self._on_changed)
         mpl.addRow(tr("global_form.mp_tsam_method"), self._mp_tsam_method)
 
@@ -584,8 +614,9 @@ class GlobalSettingsForm(QWidget):
         rl.addRow(tr("global_form.risk_measure"), self._risk_measure)
 
         self._risk_cvar_alpha = QDoubleSpinBox()
-        self._risk_cvar_alpha.setRange(0.01, 0.99)
-        self._risk_cvar_alpha.setDecimals(2)
+        # risk.cvar_alpha is in (0, 1), as in the Risk Workbench
+        self._risk_cvar_alpha.setDecimals(3)
+        self._risk_cvar_alpha.setRange(0.001, 0.999)
         self._risk_cvar_alpha.setSingleStep(0.05)
         self._risk_cvar_alpha.editingFinished.connect(self._on_changed)
         rl.addRow(tr("global_form.risk_cvar_alpha"), self._risk_cvar_alpha)
@@ -800,6 +831,7 @@ class GlobalSettingsForm(QWidget):
         self._inv_resolution.setValue(g.investment_resolution)
         self._pe_resolution.setValue(g.primary_energy_resolution)
         self._use_rolling.setChecked(g.use_rolling_horizon)
+        self._model_clock.setText(g.model_clock)
 
         # Solver – find by key, not display text
         solver_key = g.solver_name.lower()
@@ -814,7 +846,6 @@ class GlobalSettingsForm(QWidget):
         self._solver_time.setValue(g.solver_time_limit)
         self._solver_gap.setValue(g.solver_gap)
         self._solver_verbose.setChecked(g.solver_verbose)
-        self._solver_scale.setChecked(g.solver_scale_constraints)
 
         # Solver-specific options
         self._rebuild_solver_options(solver_key)
@@ -822,6 +853,8 @@ class GlobalSettingsForm(QWidget):
 
         # N-1
         self._n1_enabled.setChecked(g.n1_enabled)
+        self._n1_apply_dev.setChecked("development" in g.n1_apply_to_modes)
+        self._n1_apply_uc.setChecked("unit_commitment" in g.n1_apply_to_modes)
         self._n1_trans_enabled.setChecked(g.n1_transmission_enabled)
         self._n1_trans_reserve.setValue(g.n1_transmission_reserve_factor)
         self._n1_crit_line.setValue(g.n1_critical_line_threshold)
@@ -831,11 +864,8 @@ class GlobalSettingsForm(QWidget):
             self._n1_gen_type.setCurrentIndex(idx)
         self._n1_gen_pct.setValue(g.n1_generation_reserve_percentage)
         self._n1_scopf_enabled.setChecked(g.n1_scopf_enabled)
-        self._n1_scopf_max_iter.setValue(g.n1_scopf_max_iterations)
-        self._n1_scopf_tol.setValue(g.n1_scopf_violation_tolerance)
         self._n1_corrective.setChecked(g.n1_corrective_enabled)
-        self._n1_scopf_max_iter.setEnabled(g.n1_scopf_enabled)
-        self._n1_scopf_tol.setEnabled(g.n1_scopf_enabled)
+        self._n1_security_cost.setChecked(g.n1_compute_security_cost)
         idx = self._n1_depth.findData(g.n1_contingency_depth)
         if idx >= 0:
             self._n1_depth.setCurrentIndex(idx)
@@ -850,6 +880,8 @@ class GlobalSettingsForm(QWidget):
         self._mp_stochastic.setChecked(g.mp_stochastic)
         self._mp_rep_days.setValue(g.mp_representative_days)
         self._mp_min_sep.setValue(g.mp_min_day_separation)
+        self._mp_critical_days.setValue(g.mp_critical_days)
+        self._mp_storage_firm_hours.setValue(g.mp_storage_firm_hours)
         _sm_idx = self._mp_solver_method.findData(g.mp_solver_method)
         self._mp_solver_method.setCurrentIndex(_sm_idx if _sm_idx >= 0 else 0)
         self._mp_benders_max_iter.setValue(g.mp_benders_max_iterations)
@@ -857,7 +889,7 @@ class GlobalSettingsForm(QWidget):
         self._update_benders_enabled()
         self._mp_use_tsam.setChecked(g.mp_use_tsam)
         self._mp_tsam_num_periods.setValue(g.mp_tsam_num_periods)
-        idx = self._mp_tsam_method.findText(g.mp_tsam_method)
+        idx = self._mp_tsam_method.findData(g.mp_tsam_method)
         if idx >= 0:
             self._mp_tsam_method.setCurrentIndex(idx)
         self._mp_tsam_inter_period_linking.setChecked(g.mp_tsam_inter_period_linking)
@@ -932,12 +964,6 @@ class GlobalSettingsForm(QWidget):
         self._update_ac_visibility()
         self._refresh_solver_compat()
 
-    def _on_n1_scopf_toggled(self, checked: bool):
-        """Enable/disable SCOPF iteration fields and trigger change."""
-        self._n1_scopf_max_iter.setEnabled(checked)
-        self._n1_scopf_tol.setEnabled(checked)
-        self._on_changed()
-
     def _on_tsam_toggled(self, checked: bool):
         """Enable/disable TSAM-specific fields and trigger change."""
         self._update_tsam_enabled(checked)
@@ -959,9 +985,9 @@ class GlobalSettingsForm(QWidget):
         self._mp_tsam_num_periods.setEnabled(enabled)
         self._mp_tsam_method.setEnabled(enabled)
         self._mp_tsam_inter_period_linking.setEnabled(enabled)
-        # Disable legacy rep-days fields when TSAM is active
+        # Disable the representative-day count when TSAM is active (the
+        # separation still spaces the critical days)
         self._mp_rep_days.setEnabled(not enabled)
-        self._mp_min_sep.setEnabled(not enabled)
 
     def _on_mga_toggled(self, checked: bool):
         """Enable/disable MGA-specific fields and trigger change."""
@@ -1077,6 +1103,12 @@ class GlobalSettingsForm(QWidget):
         g.investment_resolution = self._inv_resolution.value()
         g.primary_energy_resolution = self._pe_resolution.value()
         g.use_rolling_horizon = self._use_rolling.isChecked()
+        from esfex.utils.model_clock import normalize_clock_setting
+        try:
+            g.model_clock = normalize_clock_setting(self._model_clock.text())
+        except ValueError:
+            pass  # not a known zone: keep the previous clock
+        self._model_clock.setText(g.model_clock)
 
         # Solver – store the key, not the display text
         idx = self._solver_name.currentIndex()
@@ -1088,13 +1120,20 @@ class GlobalSettingsForm(QWidget):
         g.solver_time_limit = self._solver_time.value()
         g.solver_gap = self._solver_gap.value()
         g.solver_verbose = self._solver_verbose.isChecked()
-        g.solver_scale_constraints = self._solver_scale.isChecked()
 
         # Solver-specific options
         g.solver_specific_options = self._collect_solver_options()
 
         # N-1
         g.n1_enabled = self._n1_enabled.isChecked()
+        # Keep modes this form does not show (e.g. economic_dispatch).
+        modes = [m for m in g.n1_apply_to_modes
+                 if m not in ("development", "unit_commitment")]
+        if self._n1_apply_dev.isChecked():
+            modes.append("development")
+        if self._n1_apply_uc.isChecked():
+            modes.append("unit_commitment")
+        g.n1_apply_to_modes = modes
         g.n1_transmission_enabled = self._n1_trans_enabled.isChecked()
         g.n1_transmission_reserve_factor = self._n1_trans_reserve.value()
         g.n1_critical_line_threshold = self._n1_crit_line.value()
@@ -1102,9 +1141,8 @@ class GlobalSettingsForm(QWidget):
         g.n1_generation_reserve_type = self._n1_gen_type.currentData() or "largest_unit"
         g.n1_generation_reserve_percentage = self._n1_gen_pct.value()
         g.n1_scopf_enabled = self._n1_scopf_enabled.isChecked()
-        g.n1_scopf_max_iterations = self._n1_scopf_max_iter.value()
-        g.n1_scopf_violation_tolerance = self._n1_scopf_tol.value()
         g.n1_corrective_enabled = self._n1_corrective.isChecked()
+        g.n1_compute_security_cost = self._n1_security_cost.isChecked()
         g.n1_contingency_depth = self._n1_depth.currentData() or "n1"
         g.n1_redistribution_mode = self._n1_redispatch.currentData() or "pro_rata"
         g.n1_pi_screening_threshold = self._n1_pi_threshold.value()
@@ -1115,12 +1153,14 @@ class GlobalSettingsForm(QWidget):
         g.mp_stochastic = self._mp_stochastic.isChecked()
         g.mp_representative_days = self._mp_rep_days.value()
         g.mp_min_day_separation = self._mp_min_sep.value()
+        g.mp_critical_days = self._mp_critical_days.value()
+        g.mp_storage_firm_hours = self._mp_storage_firm_hours.value()
         g.mp_solver_method = self._mp_solver_method.currentData()
         g.mp_benders_max_iterations = self._mp_benders_max_iter.value()
         g.mp_benders_tolerance = self._mp_benders_tol.value()
         g.mp_use_tsam = self._mp_use_tsam.isChecked()
         g.mp_tsam_num_periods = self._mp_tsam_num_periods.value()
-        g.mp_tsam_method = self._mp_tsam_method.currentText()
+        g.mp_tsam_method = self._mp_tsam_method.currentData()
         g.mp_tsam_inter_period_linking = self._mp_tsam_inter_period_linking.isChecked()
 
         # MGA / SPORES

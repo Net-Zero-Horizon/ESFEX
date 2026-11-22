@@ -176,16 +176,26 @@ def test_estimate_line_pu_values():
 def test_transformer_impedance_branches():
     assert Q.estimate_transformer_impedance_pu(0) == 0.10
     assert Q.estimate_transformer_impedance_pu(-5) == 0.10
-    assert Q.estimate_transformer_impedance_pu(5) == 0.06
-    assert Q.estimate_transformer_impedance_pu(50) == 0.10
-    # large unit: 0.10 * 100 / 1000 = 0.01, within clamp
-    assert Q.estimate_transformer_impedance_pu(1000) == pytest.approx(0.01)
-    # very large → clamped to lower bound 0.005
-    assert Q.estimate_transformer_impedance_pu(100000) == 0.005
-    # just at 100 boundary → scaled branch: 0.10*100/100 = 0.10
+    # own-base 6 % below 10 MVA, 10 % above, × S_base / S_rated
+    assert Q.estimate_transformer_impedance_pu(5) == pytest.approx(1.2)
+    assert Q.estimate_transformer_impedance_pu(50) == pytest.approx(0.2)
     assert Q.estimate_transformer_impedance_pu(100) == pytest.approx(0.10)
+    assert Q.estimate_transformer_impedance_pu(1000) == pytest.approx(0.01)
+    # very large → floored at 0.005
+    assert Q.estimate_transformer_impedance_pu(100000) == 0.005
     # ratio arg is ignored
-    assert Q.estimate_transformer_impedance_pu(5, ratio=99) == 0.06
+    assert Q.estimate_transformer_impedance_pu(5, ratio=99) == pytest.approx(1.2)
+
+
+@pytest.mark.parametrize("rated, z_own", [(2.0, 0.06), (8.0, 0.06),
+                                          (20.0, 0.10), (60.0, 0.10),
+                                          (250.0, 0.10)])
+@pytest.mark.parametrize("base", [10.0, 100.0, 1000.0])
+def test_transformer_impedance_scales_with_rating_and_base(rated, z_own, base):
+    """Every size is referred to the system base: z_own × S_base / S_rated
+    (units under 100 MVA used to get a flat 0.06 / 0.10 p.u.)."""
+    z = Q.estimate_transformer_impedance_pu(rated, 2.0, base)
+    assert z == pytest.approx(max(0.005, z_own * base / rated))
 
 
 # ── estimate_transformer_losses_fraction ─────────────────────────────
@@ -250,6 +260,75 @@ def test_generator_defaults_known_and_unknown():
 ])
 def test_infer_frequency(lat, lng, expected):
     assert Q.infer_frequency_hz(lat, lng) == expected
+
+
+@pytest.mark.parametrize("lat,lng,expected,place", [
+    # South America: the old "northern South America" box also covered the
+    # 50 Hz Southern Cone and Bolivia.
+    (-34.60, -58.38, 50.0, "Buenos Aires"),
+    (-34.90, -56.19, 50.0, "Montevideo"),
+    (-25.30, -57.64, 50.0, "Asunción"),
+    (-16.50, -68.15, 50.0, "La Paz"),
+    (-33.45, -70.67, 50.0, "Santiago"),
+    (-34.05, -53.55, 50.0, "Punta del Diablo (Uruguay)"),
+    (4.93, -52.33, 50.0, "Cayenne (French Guiana)"),
+    (-23.55, -46.63, 60.0, "São Paulo"),
+    (-30.03, -51.23, 60.0, "Porto Alegre"),
+    (-12.05, -77.04, 60.0, "Lima"),
+    (-0.18, -78.47, 60.0, "Quito"),
+    (4.71, -74.07, 60.0, "Bogotá"),
+    (10.49, -66.88, 60.0, "Caracas"),
+    (5.85, -55.20, 60.0, "Paramaribo"),
+    (6.80, -58.16, 60.0, "Georgetown"),
+    (-0.74, -90.31, 60.0, "Galápagos"),
+    # Middle East: only Saudi Arabia is 60 Hz.
+    (24.71, 46.68, 60.0, "Riyadh"),
+    (21.49, 39.19, 60.0, "Jeddah"),
+    (26.43, 50.10, 60.0, "Dammam"),
+    (29.37, 47.98, 50.0, "Kuwait City"),
+    (26.23, 50.59, 50.0, "Manama"),
+    (25.29, 51.53, 50.0, "Doha"),
+    (24.45, 54.37, 50.0, "Abu Dhabi"),
+    (31.95, 35.93, 50.0, "Amman"),
+    (15.37, 44.19, 50.0, "Sanaa"),
+    (19.62, 37.22, 50.0, "Port Sudan"),
+    # Caribbean: mixed.
+    (23.11, -82.37, 60.0, "Havana"),
+    (18.47, -69.89, 60.0, "Santo Domingo"),
+    (10.65, -61.51, 60.0, "Port of Spain"),
+    (12.52, -70.03, 60.0, "Oranjestad (Aruba)"),
+    (17.97, -76.79, 50.0, "Kingston (Jamaica)"),
+    (13.10, -59.61, 50.0, "Bridgetown (Barbados)"),
+    (14.60, -61.07, 50.0, "Fort-de-France (Martinique)"),
+    (12.11, -68.93, 50.0, "Willemstad (Curaçao)"),
+    # North America edges.
+    (14.90, -92.26, 60.0, "Tapachula (Mexico)"),
+    (64.18, -51.72, 50.0, "Nuuk (Greenland)"),
+    (66.94, -53.67, 50.0, "Sisimiut (Greenland)"),
+    (63.75, -68.52, 60.0, "Iqaluit (Canada)"),
+    (21.31, -157.86, 60.0, "Honolulu"),
+    # Asia.
+    (5.98, 116.07, 50.0, "Kota Kinabalu (Sabah)"),
+    (6.92, 122.08, 60.0, "Zamboanga"),
+    (43.12, 131.89, 50.0, "Vladivostok"),
+    (26.21, 127.68, 60.0, "Naha (Okinawa)"),
+    (34.69, 135.50, 60.0, "Osaka"),
+    (35.68, 139.69, 50.0, "Tokyo"),
+    (24.48, 118.08, 50.0, "Xiamen"),
+    (24.43, 118.32, 60.0, "Kinmen"),
+    (22.63, 120.30, 60.0, "Kaohsiung"),
+    # West Africa: Liberia's neighbours are 50 Hz.
+    (6.30, -10.80, 60.0, "Monrovia"),
+    (7.75, -8.82, 50.0, "Nzérékoré (Guinea)"),
+    (7.41, -7.55, 50.0, "Man (Côte d'Ivoire)"),
+    (7.88, -11.19, 50.0, "Kenema (Sierra Leone)"),
+    # Pacific.
+    (13.45, 144.78, 60.0, "Guam"),
+    (-17.53, -149.57, 60.0, "Papeete"),
+    (-13.83, -171.76, 50.0, "Apia (Samoa)"),
+])
+def test_infer_frequency_cities(lat, lng, expected, place):
+    assert Q.infer_frequency_hz(lat, lng) == expected, place
 
 
 # ── apply_realistic_generator_defaults ───────────────────────────────
@@ -516,7 +595,7 @@ def test_repair_bus_roles_empty():
     state = make_state()
     assert Q.repair_bus_roles_and_demand(state) == {
         "buses_role_changed": 0, "buses_demand_changed": 0,
-        "nodes_redistributed": 0}
+        "nodes_redistributed": 0, "nodes_without_demand_bus": 0}
 
 
 def test_repair_bus_roles_supply_makes_mixed():

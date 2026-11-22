@@ -1,5 +1,6 @@
 # Single-Line Diagram Analysis
-Three levels of dynamic analysis overlaid on the Single-Line Diagram (SLD) topology, extending the base operational overlay with simulation results and post-contingency calculations.
+
+The **Single-Line Diagram** tab draws the electrical schematic of the current system. On top of it, three levels of overlay can be shown: operational results from a simulation, post-contingency states and a frequency-response gauge. An analysis mode computes the same overlays from a dispatch you type in, without simulation results.
 
 
 ---
@@ -7,31 +8,86 @@ Three levels of dynamic analysis overlaid on the Single-Line Diagram (SLD) topol
 
 ## Prerequisites
 
-1. Build your system in the Geographic View with at least one node, generators, and (optionally) transmission lines
-2. Switch to the **SLD View** tab
-3. Click **Load Results** and select an HDF5 results file from a completed simulation
-4. The operational toolbar becomes active with year/hour controls, playback, and contingency selection
+1. Build the system in the **Geographic View** with buses, generators and (optionally) lines and transformers.
+2. Switch to the **Single-Line Diagram** tab. The drawing tools are disabled there (the view is read-only) and the operational toolbar appears above the diagram.
+3. Either click **Load Results** and pick an HDF5 results file from a completed simulation, or click **Analysis** (see [Real-Time Analysis Mode](#real-time-analysis-mode)).
+
+### Operational Toolbar
+
+| Control | Function |
+|---------|----------|
+| **Analysis** | Toggle real-time analysis mode |
+| **Load Results** | Open an HDF5 results file (`*.h5`, `*.hdf5`) |
+| **Year** | Simulation year to show |
+| **Hour** slider and spin box | Hour of the year |
+| **▶** / **⏸** | Play / pause the hourly animation |
+| **1x / 2x / 5x / 10x** | Playback speed |
+| **Contingency** | Select a contingency to overlay (Level 2) |
+| **Export SVG** | Save the diagram, with overlays, as an SVG file |
+| **Clear** | Remove all overlays, unload the results and leave analysis mode |
+
+Year, hour, playback, Export SVG and Clear are enabled once results are loaded.
+
+### How the Diagram Is Laid Out
+
+When the buses have map coordinates, the diagram follows the geography of the system:
+
+- **Substations.** Buses on the same site are drawn together inside one dashed frame. A site is a set of buses joined by a transformer whose two ends are less than 5 km apart, or lying within 300 m of each other. Inside the frame, higher-voltage bars sit above lower-voltage ones and each transformer is drawn vertically between its two bars. A transformer that would cut through a bar in between (a 220/110 kV unit with a 187 kV bar between its two bars) goes around that bar instead, with its symbol on the run beside it. Each bar's equipment hangs below it, where no transformer drops to a lower bar. A bus name too long for its bar is shortened with an ellipsis; hover the bar to see it in full.
+- **Junctions.** A bus with no equipment and no transformer (a tee or tap point on a line) is drawn as a short bar without a frame. Its name appears in the tooltip.
+- **Placement.** Each frame is placed as close as possible to its map position, on a grid that keeps a clear channel between frames. Long empty stretches, such as sea, are shortened.
+- **Lines** between sites leave their bar vertically and follow the channels between frames, so they never cross another substation. A line leaves from the top or bottom of its bar, whichever faces the other end, as long as it does not have to cut through another bar of the same substation. If a bar is covered above and below by other bars, it is drawn longer so its lines have a clear way out.
+- **Parallel lines.** Lines sharing a channel run side by side, 10 px apart. A channel with many lines is widened instead of packing them tighter. Their order in the channel follows where each line turns next, as on a metro map: two lines cross at most once. Parallel circuits between the same two bars follow the same path, as one ribbon.
+- **Long transformers.** A transformer whose two ends are more than 5 km apart links two frames. Its symbol is drawn on the connecting line, at a spot not taken by another symbol.
+
+The layout is the same every time the same system is opened. If no bus has coordinates, the diagram falls back to one column per node, with voltage levels in rows.
+
+### Zoom and Detail
+
+What the diagram shows depends on the zoom, so it stays readable from the whole system down to a single bay:
+
+| Zoom | Shown |
+|------|-------|
+| Whole system (far) | Substation frames (lightly shaded), busbars and lines, at a constant on-screen width |
+| Region (middle) | Adds generators, loads and the other equipment symbols |
+| Close (scale 0.55 and above) | Everything: voltages, bus and equipment names, line labels, results overlays |
+
+While the diagram's own text is too small to read, the substation names are drawn at a fixed size instead. Higher-voltage and larger substations come first, and a name that would overlap another is left out until you zoom in. Names that are only an imported identifier, such as `Substation way/424481948`, give way to real names.
+
+Parts of the diagram far outside the view are not drawn, so panning stays smooth on systems with thousands of buses. The minimap in the bottom-left corner shows where the view is; click or drag on it to move.
+
+**Export SVG** saves the whole diagram at full detail, whatever the current zoom.
+
+### Open a Substation
+
+Double-click a substation frame to open that substation on its own. Its busbars, equipment and internal transformers are drawn at full detail, however small the substation is on screen. Double-clicking anywhere else zooms in.
+
+Each line to another substation is cut to a short straight stub that leaves its busbar and ends in the far substation's name, for example `→ Bayamo 220 kV`. Click the name to open that substation. A line that reaches a tap point outside any substation names the nearest substations behind the tap, up to two (`→ A / B +1`), and opens the first one. Hover a stub to see the line's own label.
+
+The breadcrumb at the top left shows where you are (**System › Bayamo 220 kV**). Click **System**, or press Esc or Backspace, to go back to the whole system at the zoom you left it at. Selecting an element in the Element Tree that is not in the open substation also goes back.
+
+Selection, the results overlays and the contingency overlay work the same in a substation as in the whole system. **Export SVG** in a substation saves only that substation.
 
 
 ---
 
 
-## Level 1: Enhanced Operational Overlay
+## Level 1: Operational Overlay
 
-Fields read directly from HDF5 simulation results, displayed alongside generation, demand, and price data.
+Values read from the HDF5 results for the selected year and hour, shown with generation, demand and price data.
 
 ### Generator Status Indicators
-
-Each generator on the SLD shows its commitment status:
 
 | Status | Visual | Meaning |
 |--------|--------|---------|
 | **Online** | Normal color + utilization bar | Generator is committed and producing |
 | **Offline** | Gray circle overlay + "OFF" label | Generator is not committed for this hour |
-| **Starting up** | Green upward arrow badge | Generator is starting up this hour |
-| **Shutting down** | Red downward arrow badge | Generator is shutting down this hour |
+| **Starting up** | Green upward arrow badge | Generator starts up this hour |
 
-Offline generators show no utilization bar, since they have zero output.
+On/off and start-up data come from the `gen_status` and `gen_startup` datasets, which unit-commitment runs write for the committed generators. Without them, every generator is shown online; variable renewables (PV, wind, run-of-river hydro) are not committed and have none.
+
+### Line Flows
+
+The results store one flow per pair of nodes (`power_flow`), so a line between two nodes shows the net flow between them, positive in the line's drawn direction. When several lines join the same two nodes they share that flow: in proportion to their susceptance (1/X) when all of them have a reactance, otherwise in proportion to their capacity, so each shows the loading of the pair. A line's loading is its share of the flow over its own capacity. Earlier versions gave every such line the whole flow of the pair (counted in one direction only) over that line's own capacity.
 
 ### Reserve Badges
 
@@ -45,36 +101,34 @@ Format: `R: static/dynamic MW`. Badge color indicates adequacy:
 
 | Color | Meaning |
 |-------|---------|
-| **Green** | No reserve loss -- reserves are fully met |
-| **Red** | Reserve loss detected -- reserves are insufficient |
+| **Green** | No reserve shortfall |
+| **Red** | Static or dynamic reserve shortfall above 0.1 MW |
 
 ### Voltage Angle Labels
 
 Per-bus voltage angle label:
 
 ```
-\u03B8=2.3\u00B0
+θ=2.3°
 ```
 
 Color coding:
 
 | Color | Range | Interpretation |
 |-------|-------|----------------|
-| **Green** | < 10\u00B0 | Normal operating range |
-| **Yellow** | 10\u00B0--20\u00B0 | Elevated, monitor stability |
-| **Red** | > 20\u00B0 | High angle, potential stability concern |
-
-### CO\u2082 per Node
-
-Per-node CO\u2082 emissions included in the system info bar.
+| **Green** | < 10° | Normal operating range |
+| **Yellow** | 10°–20° | Elevated, monitor stability |
+| **Red** | > 20° | High angle, potential stability concern |
 
 ### System Info Bar
 
-Fixed bar at the bottom, extended with frequency metrics (when available):
+Fixed bar at the bottom of the diagram:
 
 ```
-Year 2030 | Hour 100 | RE: 42.0% | Demand: 300 MW | Gen: 295 MW | CO\u2082: 15.2 t | ROCOF: 0.83 Hz/s | Nadir: 49.3 Hz | H: 1250 MW\u00B7s
+Year 2030 | Hour 100 | RE: 42.0% | Demand: 300 MW | Gen: 295 MW | CO₂: 15.2 t | ROCOF: 0.83 Hz/s | Nadir: 49.3 Hz | H: 1250 MW·s
 ```
+
+CO₂ is the system total for the hour. The frequency items appear when a frequency estimate is available (Level 3). In AC analysis mode the bar also shows losses and the number of voltage violations.
 
 
 ---
@@ -82,22 +136,18 @@ Year 2030 | Hour 100 | RE: 42.0% | Demand: 300 MW | Gen: 295 MW | CO\u2082: 15.2
 
 ## Level 2: N-1 Contingency Analysis
 
-Simulate the loss of any generator or transmission line and see the post-contingency impact on the SLD.
+Simulate the loss of one element and see the post-contingency state on the diagram. The contingency calculation uses a DC power flow.
 
 ### Using the Contingency Combo
 
-**Contingency** dropdown in the SLD toolbar:
+The **Contingency** dropdown lists the contingencies for the current hour, sorted by impact (MW lost or MW of flow on the element, highest first):
 
-```
-... | Contingency: [None \u25BC] | ...
-```
+- **Generators** with output above 0.1 MW: "Loss: gen_id (X MW)"
+- **Lines**: "Loss: line_id (X MW cap)"
+- **Transformers**: "Loss: transformer name (X MVA)"
+- **Batteries** that are discharging
 
-Populated with all N-1 contingencies sorted by impact (highest first):
-
-- **Generator contingencies**: "Loss: gen_name (X MW)" -- loss of generation output
-- **Line contingencies**: "Loss: line_name (X MW cap)" -- loss of transmission capacity
-
-Select a contingency to overlay the post-contingency state.
+Select a contingency to overlay the post-contingency state. Select "None" to remove the overlay.
 
 ### Contingency Overlay
 
@@ -108,26 +158,22 @@ Select a contingency to overlay the post-contingency state.
 | **Load shedding** | Red "Shed: X MW" badge on affected nodes |
 | **Security status** | Badge in upper right: green "N-1 SECURE" or red "N-1 INSECURE" |
 
-Select "None" to remove the overlay and return to base operational view.
+When a frequency estimate is available, the status badge also shows the post-contingency ROCOF and nadir.
 
 ### Generator Loss Analysis
 
-Generator trip sequence:
-
-1. The lost generation is redistributed pro-rata among remaining generators based on their available headroom (rated capacity minus current output)
-2. Renewable generators do not participate in redistribution
-3. If total headroom is insufficient, load shedding is applied proportionally to demand at each node
-4. The DC power flow is solved with updated injections to find new line flows
-5. Lines exceeding thermal capacity are flagged as overloaded
+1. The lost output is redistributed among the remaining online generators in proportion to their headroom (rated power minus current output).
+2. Renewable generators do not take part in the redistribution.
+3. If total headroom is insufficient, load is shed in proportion to the demand at each node.
+4. The DC power flow is solved with the new injections.
+5. Lines above their thermal capacity are flagged as overloaded.
 
 ### Line Loss Analysis
 
-Line trip sequence:
-
-1. The network susceptance matrix is rebuilt without the tripped line
-2. New voltage angles and line flows are computed using DC power flow
-3. Lines exceeding thermal capacity are flagged as overloaded
-4. Generation dispatch is unchanged (only flows redistribute)
+1. The network susceptance matrix is rebuilt without the tripped line.
+2. New voltage angles and line flows are computed with the DC power flow.
+3. Lines above their thermal capacity are flagged as overloaded.
+4. Generation dispatch is unchanged (only flows redistribute).
 
 
 ---
@@ -135,32 +181,26 @@ Line trip sequence:
 
 ## Level 3: Frequency Response Gauge
 
-Compact frequency stability gauge in the upper-right corner, computed from the center-of-inertia model.
+Compact frequency stability gauge in the upper-right corner, computed with a center-of-inertia model for the loss of the largest online generator.
 
 ### Frequency Gauge
 
-Displays:
-
-1. **Frequency bar** (48--52 Hz): Color-coded zones with a needle at the predicted nadir
-   - Red zones: < 49 Hz and > 51 Hz
-   - Yellow zones: 49--49.5 Hz and 50.5--51 Hz
-   - Green zone: 49.5--50.5 Hz
-
-2. **Metrics**:
-   - ROCOF (Hz/s) -- colored green if within limits, red if exceeded
-   - System inertia H (MW\u00B7s) and power imbalance \u0394P (MW)
-
-3. **Border color**: Green if the system is frequency-stable (nadir above limit), red if unstable
-
-Automatically uses the largest online generator's output as the worst-case N-1 power imbalance.
+1. **Frequency bar** from nominal − 2 Hz to nominal + 2 Hz, with a needle at the predicted nadir:
+    - Red zones: more than 1 Hz from nominal
+    - Yellow zones: 0.5 to 1 Hz from nominal
+    - Green zone: within 0.5 Hz of nominal
+2. **Metrics**: ROCOF (Hz/s), green if within the limit and red if not; system inertia H (MW·s) and power imbalance ΔP (MW).
+3. **Border color**: green if the nadir stays above the limit, red if not.
 
 ### Interpretation
 
+Values for a 50 Hz system:
+
 | Metric | Healthy | Warning | Critical |
 |--------|---------|---------|----------|
-| ROCOF | < 1.0 Hz/s | 1.0--2.0 Hz/s | > 2.0 Hz/s |
-| Nadir | > 49.5 Hz | 49.0--49.5 Hz | < 49.0 Hz |
-| Steady-state | > 49.5 Hz | 49.0--49.5 Hz | < 49.0 Hz |
+| ROCOF | < 1.0 Hz/s | 1.0–2.0 Hz/s | > 2.0 Hz/s |
+| Nadir | > 49.5 Hz | 49.0–49.5 Hz | < 49.0 Hz |
+| Steady-state | > 49.5 Hz | 49.0–49.5 Hz | < 49.0 Hz |
 
 High renewable penetration reduces system inertia (lower H), leading to higher ROCOF and lower nadir values.
 
@@ -172,22 +212,24 @@ High renewable penetration reduces system inertia (lower H), leading to higher R
 
 ### Generator Parameters
 
-Per-generator droop and governor parameters in YAML:
+Per-generator inertia, droop and governor parameters in YAML. They are also in the Electrical group of the generator form (**Inertia H (s)**, **Droop R (pu)**, **Governor T (s)**):
 
 ```yaml
 generators:
   unit_0:
     name: Diesel
     type: Non-renewable
-    inertia: [5.0]              # Inertia constant H (seconds) -- already existing
+    inertia: [5.0]              # Inertia constant H (seconds)
     droop: [0.05]               # Governor droop R (pu), 5% is typical
     governor_time_const: [5.0]  # Governor time constant T_g (seconds)
     # ... other parameters
 ```
 
+With results loaded, the gauge reads these values from the HDF5 file. In analysis mode it reads them from the editor.
+
 ### System Parameters
 
-System-level frequency parameters:
+The gauge reads the system-level frequency keys of the system being edited:
 
 ```yaml
 systems:
@@ -198,7 +240,7 @@ systems:
     frequency_nadir_limit: 49.0   # Min frequency threshold (Hz)
 ```
 
-All parameters have sensible defaults. See [Frequency Stability](../formulation/frequency-stability.md) for the mathematical formulation.
+Both with results loaded and in analysis mode, `load_damping` and `rocof_limit` are used as set. The keys are read from the system being edited, also for the results of a multi-system run, so a 50 Hz and a 60 Hz system linked in one run each keep their own values; the optimisation itself does not use them. A `frequency_nominal` left at the default 50 Hz is replaced by the frequency of the first bus that has one (so a 60 Hz grid works without the key), and a `frequency_nadir_limit` left at the default 49 Hz becomes 1 Hz below the nominal frequency. Systems created in the Studio, which does not edit these keys, get the defaults, except that on save `frequency_nominal` becomes the frequency the system's AC buses run at when it is none of theirs, with `frequency_nadir_limit` moved by the same amount. See [Frequency Stability](../formulation/frequency-stability.md) for the mathematical formulation.
 
 
 ---
@@ -206,7 +248,7 @@ All parameters have sensible defaults. See [Frequency Stability](../formulation/
 
 ## Playback
 
-All overlays update automatically during animated playback. Use play/pause and speed selector:
+All overlays update during playback. When the last hour is reached, playback restarts at hour 0.
 
 | Speed | Interval | Use case |
 |-------|----------|----------|
@@ -215,7 +257,7 @@ All overlays update automatically during animated playback. Use play/pause and s
 | 5x | 200 ms/hour | Quick scan |
 | 10x | 100 ms/hour | Overview |
 
-The contingency overlay is static -- shows the post-contingency state for the selected hour only.
+The contingency selected in the combo is evaluated for the hour shown when it is selected; it is not recomputed at each playback step.
 
 
 ---
@@ -223,60 +265,97 @@ The contingency overlay is static -- shows the post-contingency state for the se
 
 ## Real-Time Analysis Mode
 
-Runs frequency and contingency analysis directly from the editor state without simulation results.
+Runs frequency, power-flow and contingency analysis on the editor state, without simulation results.
 
 ### Activating Analysis Mode
 
-1. Switch to the **SLD View** tab
-2. Click the **Analysis** toggle button in the toolbar
-3. A dispatch scenario panel appears on the right side of the SLD
+1. Switch to the **Single-Line Diagram** tab.
+2. Click the **Analysis** toggle button in the toolbar.
+3. The **Dispatch Scenario** panel appears to the right of the diagram, and the properties panel is collapsed to make room.
 
 ### Dispatch Scenario Panel
 
-Two editable tables:
+**Analysis Mode** selector at the top:
 
-**Generator Dispatch Table:**
+| Mode | Available when | What it does |
+|------|----------------|--------------|
+| **DC Power Flow** | Always | DC power flow, contingencies and frequency gauge |
+| **AC Power Flow** | Julia (`juliacall`) is installed, or else pandapower | Adds an AC Newton-Raphson power flow of the scenario |
+| **Short Circuit** | pandapower is installed | AC power flow plus an IEC 60909 short-circuit calculation |
+
+**Generator Dispatch** table:
 
 | Generator | Rated (MW) | Output (MW) | On |
 |-----------|-----------|-------------|-----|
 | Diesel_0  | 100       | [80.0]      | [✓] |
-| Solar_1   | 200       | [150.0]     | [✓] |
+| Solar_1   | 200       | [100.0]     | [✓] |
 
-- Output: Adjustable spinbox (0 to rated power)
-- Status: On/Off checkbox per generator
-- Quick-set buttons: "All On", "100%", "80%"
+- Output: spin box from 0 to rated power. Initial value: 80% of rated power, or 50% for renewables.
+- On: on/off checkbox per generator.
+- Quick-set buttons: **All On**, **100%**, **80%**.
 
-**Demand Table:**
+**Node Demand** table:
 
 | Node   | Demand (MW) |
 |--------|-------------|
 | Node 0 | [120.0]     |
 | Node 1 | [180.0]     |
 
-- "Balance Demand" button sets each node's demand equal to its generation
+- Initial demand of each node equals the generation at that node.
+- **Balance Demand** sets each node's demand equal to its generation.
+
+A summary line below shows total generation, total demand and the balance.
 
 ### Real-Time Updates
 
-Changes trigger (after 300 ms debounce):
+Changes trigger, after a 300 ms debounce:
 
-1. A snapshot is built from the scenario
-2. The `FrequencyAnalyzer` computes ROCOF, nadir, steady-state using the largest online generator's output as the worst-case contingency
-3. The SLD overlays (frequency gauge, info bar, generation/demand indicators) update immediately
-4. If a contingency is selected in the combo, the post-contingency overlay updates too
+1. A snapshot is built from the scenario.
+2. In AC or Short Circuit mode, the AC power flow runs (see below).
+3. The frequency analyzer computes ROCOF, nadir and steady-state frequency, using the largest online generator's output as the lost power.
+4. The overlays (frequency gauge, info bar, generation and demand indicators) update.
+5. The contingency list is rebuilt, and the selected contingency, if any, is recomputed.
 
-### Generator Parameters
+### AC Power Flow Mode
 
-Uses parameters from the editor's property panel:
+The AC power flow uses the native Newton-Raphson solver in ESFEX's Julia package when `juliacall` can be imported; pandapower is used only when it cannot. The first run in a session starts Julia, which can take a while.
 
-- **Inertia H (s)**: Already existing field
-- **Droop R (pu)**: Governor droop characteristic (default 0.05 = 5%)
-- **Governor T (s)**: Governor time constant (default 5.0 s)
+How the network is built:
 
-Located in the Electrical group of the generator property editor.
+- The slack bus is the bus whose **Bus Type** is `slack`; if there is none, the first bus.
+- Loads have a fixed power factor of 0.95.
+- Lines without resistance or reactance get 0.001 pu and 0.01 pu.
+- Base power is 100 MVA and voltages outside 0.90–1.10 pu are counted as violations. The AC parameters in Global Settings (Power Flow group) are not used here.
+
+Results shown:
+
+- A status line under the mode selector: "AC PF: Converged (N iter) | Losses: X MW", plus "V violations: N" when there are any, or "AC PF: DIVERGED" in red.
+- Voltage magnitude badges per bus (`V=0.987 pu`): green within 0.95–1.05 pu, yellow within 0.90–1.10 pu, red outside.
+- Reactive flow (`Q: … Mvar`) and loss (`Loss: … MW`) labels on lines; the line flows and loadings are replaced by the AC values.
+- Losses and voltage-violation count in the info bar.
+
+If the power flow diverges or fails, the status line shows DIVERGED and the diagram keeps the DC values.
+
+Contingency overlays (Level 2) still use the DC contingency model in AC mode.
+
+In **Short Circuit** mode, pandapower also runs an IEC 60909 calculation and each bus gets a short-circuit power badge (`Sk: … MVA`).
+
+### N-k Analysis Options
+
+Group at the bottom of the panel:
+
+| Control | Description |
+|---------|-------------|
+| Contingency Depth | `N-1` or `N-1-1` |
+| Redistribution | `Pro-rata` or `Droop-based` (DC model; the AC model always redistributes pro rata) |
+| PI Screening Threshold | Performance-index threshold for **Run Screening**; 0 keeps every contingency |
+| **Run All N-1** | N-1: trips every contingency in the list and reports how many there are and how many are insecure (overload or load shedding). N-1-1: for each first outage, trips as second outage each line loaded at 80 % or more afterwards, and reports the first 20 such pairs and their violations (DC model, also in AC mode) |
+| **Run Screening** | Trips every contingency with the DC model, computes PI = Σ (flow / capacity)² over lines and transformers, and reports how many have PI at or above the threshold, out of how many, and the worst one |
+
+The depth, redistribution and threshold start from **Global Settings > N-1 Security** each time Analysis is switched on. The same section decides which elements are tripped: generators and lines always, transformers and discharging batteries when their options are on, and only lines and transformers loaded at or above the critical line threshold.
 
 ### Switching Between Modes
 
-- Analysis and Load Results modes are independent
-- Year/hour/play controls disabled during analysis
-- "Clear" exits analysis mode and clears overlays
-- Unchecking "Analysis" returns to normal mode, preserving HDF5 results
+- Analysis mode and loaded results are independent. Load Results, year, hour and playback controls are disabled while analysis mode is on.
+- Unchecking **Analysis** clears the analysis overlays and restores the properties panel. If a results file was loaded, its year, hour and playback controls come back and the diagram shows its current hour again.
+- **Clear** exits analysis mode and also unloads the results.

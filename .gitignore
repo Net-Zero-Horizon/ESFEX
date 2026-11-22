@@ -22,6 +22,9 @@ data/
 # not a data dump. The `data/` rule above otherwise catches it.
 !src/esfex/visualization/data/
 !src/esfex/visualization/data/**
+# ...but the re-include above also catches its bytecode caches.
+src/esfex/visualization/data/**/__pycache__/
+src/esfex/visualization/data/**/*.py[cod]
 *.h5
 *.hdf5
 *.nc
@@ -30,6 +33,8 @@ data/
 *.pt
 *.pth
 *.npz
+# shipped with the density model (cell inputs on the 0.25° grid)
+!src/esfex/assets/models/*.npz
 
 # ── Optimization / solver outputs ──
 results/
@@ -56,6 +61,8 @@ coverage.xml
 # A manifest pinned to one Julia release breaks buildpkg on another
 # (e.g. "Could not locate the source code for OpenSSL_jll").
 Manifest.toml
+# Backups made by the automatic dependency repair (bridge/julia_setup.py)
+Manifest.toml.bak-*
 # Coverage tracefiles emitted by `Pkg.test(coverage=true)`.
 *.cov
 lcov.info

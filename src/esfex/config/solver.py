@@ -387,14 +387,15 @@ THREADS_INERT_WHEN: dict[str, dict[str, list[str]]] = {
 # so picking an incompatible solver makes the operational solve fail. The GUI
 # greys out incompatible solvers once a formulation is selected.
 #   dcopf / dcopf_ac_verify : linear program → any LP/MIP solver
-#   acopf_soc / acopf_qc    : convex SOCP/QC  → conic-capable solvers
+#   acopf_soc / acopf_qc    : convex SOCP/QC  → conic-capable solvers (not HiGHS,
+#                             which rejects second-order cone constraints)
 #   acopf_sdp               : semidefinite    → SDP-capable conic solvers
 #   acopf_polar / acopf_rect: exact nonlinear → a general NLP solver (Ipopt)
 FORMULATION_SOLVERS: dict[str, set[str]] = {
     "dcopf":           {"highs", "gurobi", "glpk", "cbc", "scip", "cplex", "xpress"},
     "dcopf_ac_verify": {"highs", "gurobi", "glpk", "cbc", "scip", "cplex", "xpress"},
-    "acopf_soc":       {"highs", "gurobi", "cplex", "xpress", "clarabel", "scs"},
-    "acopf_qc":        {"highs", "gurobi", "cplex", "xpress", "clarabel", "scs"},
+    "acopf_soc":       {"gurobi", "cplex", "xpress", "clarabel", "scs"},
+    "acopf_qc":        {"gurobi", "cplex", "xpress", "clarabel", "scs"},
     "acopf_sdp":       {"scs", "clarabel"},
     "acopf_polar":     {"ipopt"},
     "acopf_rect":      {"ipopt"},
@@ -544,7 +545,8 @@ def get_julia_optimizer_string(config: Optional[SolverConfig] = None) -> str:
     """Generate Julia code string to create a configured optimizer.
 
     Includes generic options (threads, time_limit, gap, verbose) and
-    any solver-specific options stored in ``config.options``.
+    any solver-specific options stored in ``config.options``. A
+    ``time_limit`` of 0 sets no limit (the attribute is left out).
     """
     if config is None:
         config = SolverConfig()
@@ -555,57 +557,62 @@ def get_julia_optimizer_string(config: Optional[SolverConfig] = None) -> str:
     if solver_name == "highs":
         pkg, attrs = "HiGHS", [
             f'"threads" => {config.threads}',
-            f'"time_limit" => {float(config.time_limit)}',
             f'"mip_rel_gap" => {config.gap}',
             f'"output_flag" => {str(config.verbose).lower()}',
         ]
+        limit = ("time_limit", float(config.time_limit))
     elif solver_name == "gurobi":
         pkg, attrs = "Gurobi", [
             f'"Threads" => {config.threads}',
-            f'"TimeLimit" => {float(config.time_limit)}',
             f'"MIPGap" => {config.gap}',
             f'"OutputFlag" => {1 if config.verbose else 0}',
         ]
+        limit = ("TimeLimit", float(config.time_limit))
     elif solver_name == "cplex":
         pkg, attrs = "CPLEX", [
             f'"CPXPARAM_Threads" => {config.threads}',
-            f'"CPXPARAM_TimeLimit" => {float(config.time_limit)}',
             f'"CPXPARAM_MIP_Tolerances_MIPGap" => {config.gap}',
         ]
+        limit = ("CPXPARAM_TimeLimit", float(config.time_limit))
     elif solver_name == "glpk":
         pkg, attrs = "GLPK", [
-            f'"tm_lim" => {int(config.time_limit * 1000)}',
             f'"mip_gap" => {config.gap}',
             f'"msg_lev" => {3 if config.verbose else 0}',
         ]
+        limit = ("tm_lim", max(int(config.time_limit * 1000), 1))
     elif solver_name == "cbc":
         pkg, attrs = "Cbc", [
-            f'"seconds" => {float(config.time_limit)}',
             f'"ratioGap" => {config.gap}',
             f'"logLevel" => {1 if config.verbose else 0}',
             f'"threads" => {config.threads}',
         ]
+        limit = ("seconds", float(config.time_limit))
     elif solver_name == "scip":
         pkg, attrs = "SCIP", [
-            f'"limits/time" => {float(config.time_limit)}',
             f'"limits/gap" => {config.gap}',
             f'"display/verblevel" => {4 if config.verbose else 0}',
         ]
+        limit = ("limits/time", float(config.time_limit))
     elif solver_name == "xpress":
         pkg, attrs = "Xpress", [
             f'"THREADS" => {config.threads}',
-            f'"MAXTIME" => {int(config.time_limit)}',
             f'"MIPRELSTOP" => {config.gap}',
             f'"OUTPUTLOG" => {1 if config.verbose else 0}',
         ]
+        # At least 1 s: Xpress reads MAXTIME 0 as no limit
+        limit = ("MAXTIME", max(int(config.time_limit), 1))
     else:
         # Fallback to HiGHS
         pkg, attrs = "HiGHS", [
             f'"threads" => {config.threads}',
-            f'"time_limit" => {float(config.time_limit)}',
             f'"mip_rel_gap" => {config.gap}',
             f'"output_flag" => {str(config.verbose).lower()}',
         ]
+        limit = ("time_limit", float(config.time_limit))
+    # time_limit 0 = no limit: the solver's default (none), as
+    # ESFEX.create_optimizer
+    if config.time_limit > 0:
+        attrs.insert(1, f'"{limit[0]}" => {limit[1]}')
 
     # Append solver-specific options from config.options
     solver_opts = SOLVER_OPTIONS.get(solver_name, [])

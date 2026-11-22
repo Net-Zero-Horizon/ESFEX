@@ -1,316 +1,133 @@
-# Demand Distribution
+# Demand Forecast & Bus Distribution
 
-Spatial distribution of node-level electric demand among busbars using building footprint data and clustering analysis. Access via **Workflows > Demand Distribution**.
+Hourly demand forecast per node and spatial distribution of each node's demand among its buses. There is no separate menu entry; the panel is reached in two ways:
 
-The wizard takes a node's total demand (MW) and distributes it proportionally across the node's buses based on the geographic density and type of buildings surrounding each bus. It downloads building footprints from open data sources, classifies them by type (residential, commercial, industrial), groups them into spatial clusters, and maps those clusters to buses. Only the `demand_fraction` attribute on each bus is updated -- no elements are created or removed.
+- **Grid Builder, Step 3 "Demand"** (see [Grid Builder](grid-auto-mapping.md)): works on every node of the active system.
+- **Node attributes panel > Forecast**: opens the same panel in a dialog ("Demand forecast — *node*") scoped to that one node. The study region is the bounding box of the node's load buses (padded to at least about 0.3°), or a 0.5° box around the node centroid if it has no buses. The Bus Distribution section is shown only if the node has at least two load buses.
 
-The wizard supports **multiple nodes across multiple systems** in a single run and is organized as a single-phase, five-step workflow:
-
-1. **Target Selection** -- Choose which nodes to process.
-2. **Domain & Building Fetch** -- Define the geographic area and download building footprints.
-3. **Building Classification** -- Assign demand weights based on building type and size.
-4. **Spatial Clustering** -- Group buildings into demand zones.
-5. **Review & Apply** -- Map clusters to buses and commit the new fractions.
-
-All computations use the `esfex.visualization.workflows.demand_analysis` engine, which can also be used independently for scripting -- see [Scripting](#scripting).
+The panel has four sections: Demand Forecast, Forecast Results, Validate against observed demand (optional) and Bus Distribution. **Apply Demand & Fractions** writes the forecast to the nodes and the fractions to the buses; no other elements are created or removed.
 
 
 ---
 
 
-### Step 1: Target Selection
+### 1. Demand Forecast
 
-Select the nodes whose demand should be distributed among their buses.
+| Input | Default | Description |
+|-------|---------|-------------|
+| Country | -- | Country used for the World Bank indicators and the national total. **Auto-detect** finds it from the domain centroid (Nominatim). |
+| Base year | 2025 | First forecast year (2000 -- 2100). |
+| Horizon (years) | 25 | Number of forecast years (1 -- 50). |
+| ML engine | Auto (XGBoost) | **Auto (XGBoost)**, **XGBoost**, or **Archetype (no ML)**. |
+| National demand (GWh) | 0 = Auto-estimate | Base-year demand total. With the XGBoost engine, a value above 0 scales the base-year total of all nodes in scope to it, and 0 keeps the model's own magnitude; with the Archetype engine, 0 estimates the total from World Bank kWh per capita × population × electricity access. The value is applied to the nodes in scope, so for a domain smaller than the country enter the demand of the domain, not of the country. |
+| GDP scenario | SSP2 | Shared Socioeconomic Pathway (SSP1 -- SSP5) for the GDP and population trajectory. It also selects the climate scenario used for future temperatures. |
+| Elasticity | 0.80 | Demand-GDP elasticity (0 -- 2). |
+| Efficiency | 0.005 /yr | Annual efficiency improvement (0 -- 0.05). |
 
-**Hierarchical tree:**
+Click **Fetch and Forecast**. The button:
 
-A checkbox tree displays systems as top-level items and their nodes as children. Check the nodes you want to process.
+1. Fetches World Bank indicators (GDP per capita, population, urbanization, electricity access, electricity consumption per capita) and the hourly temperature of the year before the base year at the domain centre (ERA5, from the Open-Meteo archive). The fetch is skipped when data for the same country, domain and weather year is already loaded, so changing forecast parameters and running again does not hit the network.
+2. Runs the forecast on a background thread. The XGBoost engine predicts hourly demand density (MW per km² of land) in every 0.25° cell from the cell's population and GDP density, its long-run climate and how electricity is used there, the hour's temperature and the calendar, multiplies it by the cell's land in the domain, and sums the cells of each node, so each node gets its own spatially resolved profile. Every cell that overlaps the domain is used, not only those whose centre is inside it: a cell the domain boundary crosses counts with the share of its land inside the domain, so a coastal cell centred at sea still counts its land whole, and a cell on a land border is split between the countries on either side. The model and how its inputs are built are described in [Demand Density Model](../contributing/demand-density-model.md).
 
-| Column | Description |
-|--------|-------------|
-| Node | Node name and index |
-| Peak Demand | Peak demand (MW) from the node's demand profile |
-| Bus Count | Number of buses attached to this node |
+The XGBoost engine computes on UTC hours, the clock its training data were on: the hour of the day and the month are UTC, the weekday and holidays are those of the local date, and local solar time comes from the longitude. The temperature that goes with an hour is that instant's (ERA5 comes in UTC). Each node's result is then put on the node's local civil time (its time zone from its coordinates, with daylight saving time). The Archetype engine, and the simpler model the XGBoost engine falls back to without its density model, work in local civil time directly, with ERA5 put on each node's local time. 29 February is dropped from a leap weather year, and the calendar follows the real date of each hour. The forecast's hours are therefore each node's local civil time, whatever the engine; the saved demand is then put on the case's [model clock](../user-guide/configuration.md#model-clock).
 
-Nodes with fewer than 2 buses are disabled -- distribution requires at least 2 destinations. When a system-level checkbox is toggled, all eligible child nodes follow.
+The trained models ship with ESFEX, and with the density model the inputs of every 0.25° cell that do not change over the forecast: its population in 2020, its land area, its long-run climate and its electricity-use context. The gridded GDP (0.25°, historical and SSP) is downloaded the first time a forecast needs it, from the ESFEX data release, into `ESFEX_DATA_ROOT`: one file per year and SSP used, about 1 MB each. Later forecasts read it from disk. If a download fails, the forecast still runs, but the summary names the missing files and the cells without GDP get no demand. If the density model cannot be loaded, the forecast falls back to a simpler method, with no spatial cells, and the summary says so: first ESFEX's national demand model (XGBoost, shipped with ESFEX), which predicts the hourly shape of each node's demand, then, if that fails too, the Archetype method. A dataset of your own under `ESFEX_DATA_ROOT` is used as it is, and a complete copy of the density model in its `data/models` folder replaces the shipped one.
 
-**Summary panel:**
+The national demand model gets, for each node, the features it was trained on (see [`esfex train-demand-model`](../user-guide/cli.md#esfex-train-demand-model)): GDP per capita and population density sampled at the node from the same rasters as its training data (the historical GDP raster and GPW population density, downloaded on first use; a base year after 2020 samples the 2020 rasters), moved over the forecast years by the GDP and population growth rates; the GHSL settlement class when that raster is in `ESFEX_DATA_ROOT` (it is not downloaded; without it every node counts as rural, class 10, as training rows without it did); the country's code in the model and its public holidays; the node's coordinates; the hour's temperature with its day's maximum, minimum and range and the 1-, 7- and 30-day means; and degree hours on the model's own 18 °C and 24 °C bases. A node whose GDP or population cannot be sampled (open sea, a failed download), or whose temperature series has gaps, stops the national model, and the forecast falls back to the Archetype method. For a country the model was not trained on, it uses a country code no training row had and says so in the log.
 
-Below the tree, a summary lists each selected node with its peak demand and bus count, giving a quick confirmation of the processing scope before proceeding.
+Data sources: Wang, T. and Sun, F., *Global gridded GDP data set consistent with the shared socioeconomic pathways*, Scientific Data 9, 221 (2022), [doi:10.1038/s41597-022-01300-x](https://doi.org/10.1038/s41597-022-01300-x) (CC BY 4.0, published unchanged). The cell inputs shipped with the density model are the article's: WorldPop 2020 population counts (CC BY 4.0) summed per cell, Natural Earth 10m land, NEX-GDDP-CMIP6 daily temperature 2025-2029 (GFDL-ESM4, IPSL-CM6A-LR, MPI-ESM1-2-HR) for the climate normals, and the UN Energy Balances, Statistics Canada table 25-10-0029 and the EIA State Energy Data System for the electricity-use context. The licence, attribution and citation of each are in [Data Sources and Licences](../reference/data-sources.md).
 
-**Tips:**
-
-- Use **Select All** to check every eligible node, or **Clear All** to start over.
-- Selecting nodes across multiple systems is fully supported. Each node's demand fractions are computed and applied independently.
-- Nodes with only one bus already receive 100% of the node's demand and cannot benefit from redistribution.
+The temperature of each forecast year comes from CMIP6 daily maximum and minimum temperature, turned into an hourly curve with its minimum at 06:00 and its maximum at 14:00 local time (a leap year loses 29 February), read from the public Google Cloud (Pangeo) Zarr store and cached locally; years CMIP6 does not cover use the ERA5 weather year. The experiment follows the selected SSP (SSP1: ssp126, SSP2: ssp245, SSP3: ssp370, SSP4: ssp460, SSP5: ssp585). The default model is MPI-ESM1-2-HR; set the environment variable `ESFEX_CMIP6_MODEL` to use another. If the Zarr store cannot be used, the Open-Meteo climate API is the fallback; it ignores the SSP choice and is rate-limited.
 
 
-### Step 2: Domain & Building Fetch
+### 2. Forecast Results
 
-Define the geographic area that covers the selected nodes and download building footprint data.
+A table with one row per node: **Node**, **Peak (MW)**, **Annual (GWh)** and **Load Factor**, followed by a summary line. **View Demand…** opens a chart of the forecast profiles.
 
-**Domain definition:**
 
-Two methods are available:
+### 3. Validate against observed demand (optional)
 
-- **Draw on map** -- Click "Draw Rectangle", then click and drag on the map. The wizard minimizes during drawing and restores when the rectangle is complete. Coordinates populate automatically.
-- **Manual entry** -- Enter bounding box coordinates directly: South latitude, North latitude, West longitude, East longitude. Click "Apply Coords" to register the domain.
+Compare the forecast with your own measured demand:
 
-The approximate area of the domain (in km^2) is displayed using the projection:
+1. Select a node and click **Load observed CSV…**. The file (CSV or Excel, no header) holds one hourly series in its first column.
+2. The metrics table compares the series with the base-year forecast of that node: **MAPE %**, **RMSE (MW)**, **Peak err %**, **Energy err %** and **Corr** (correlation).
+3. **Overlay** plots the observed series on the forecast chart.
+4. **Apply month×hour correction** scales the forecast so that the base year matches the observation in each (month, hour) bin. The same factors are applied to every year, so the growth trajectory is kept. Unchecking it restores the raw forecast.
 
-\[
-A \approx (\Delta\phi \times 111.32) \times (\Delta\lambda \times 111.32 \times \cos\phi_{\text{mid}}) \tag{DD-1}
-\]
+**Clear all** removes the loaded series.
 
-where \(\Delta\phi\) and \(\Delta\lambda\) are the latitude and longitude spans in degrees, and \(\phi_{\text{mid}}\) is the mid-latitude. This is a flat-Earth approximation suitable for domains up to a few hundred kilometers.
 
-**Building data sources:**
+### 4. Bus Distribution
+
+Splits each node's demand among its buses by setting each bus's `demand_fraction`. Only nodes with two or more buses need a split. The eligible buses are the node's `load`/`mixed` buses; if a node has fewer than two of those, all of its buses are used.
+
+Select the method in the **Method** combo and click **Distribute demand**:
+
+**Spatial demand (default)**
+
+Uses the forecast's own per-cell demand, so it needs a completed forecast.
+
+1. Each forecast cell (clipped to the study domain) is assigned to its nearest node, which keeps the per-node totals of the forecast.
+2. Within a node with several buses, the cells' annual demand is allocated to the buses by a capacitated minimum-cost transport problem: minimize the total cell-to-bus distance, serve every cell, and keep each bus below its capacity. A bus's capacity is the sum of the MVA ratings of its transformers; buses without transformers get a capacity proportional to their voltage. Demand spills to the next bus once the nearest one is full.
+3. Single-bus nodes, which is every node after a level-2+ simplification in the Grid Builder, get fraction 1.0.
+
+**Building footprint proxy**
+
+Select one of the footprint databases under "Building footprint proxy":
 
 | Source | Description |
 |--------|-------------|
-| **Overture Maps** | Open dataset with global building footprints. Best coverage in urban areas. |
-| **Microsoft ML Buildings** | Machine learning-derived footprints from satellite imagery. 1.2 billion buildings worldwide. |
-| **Google Open Buildings** | Google's ML-derived dataset. Best coverage in Africa, South/Southeast Asia, and Latin America. |
+| **Microsoft ML** | Machine-learning footprints from satellite imagery. Spatially tiled, so downloads are fast. |
+| **Overture Maps** | Global building footprints. The query scans the global dataset and is slower. |
+| **Google Open Buildings** | ML footprints, strongest in Africa, South and Southeast Asia and Latin America. When the Google source is unavailable, the fetch falls back to Overture Maps automatically. |
 
-Click **Fetch** to download building footprints within the bounding box. A progress bar and status label show download progress. When complete, the map previews the downloaded buildings as small polygons.
-
-**Output:** A GeoDataFrame with columns `geometry` (building polygon) and `footprint_area_m2` (footprint area in square meters).
-
-**Tips:**
-
-- Choose a domain that covers all buses of the selected nodes with some margin. Buildings outside the domain are not counted.
-- The best data source depends on the region. Try Overture Maps first for global coverage; switch to Google Open Buildings for developing regions.
-- Large domains with dense urban areas may return hundreds of thousands of buildings. This is expected and the clustering step handles it efficiently.
-
-
-### Step 3: Building Classification
-
-Assign relative demand weights to each building based on its footprint area, using configurable classification rules.
-
-**Classification rules table:**
-
-Each row defines a building type with its area range and demand weight density:
+This method needs only the domain, not a forecast. The buildings are classified with an editable rules table:
 
 | Column | Description |
 |--------|-------------|
-| Name | Type label (e.g. "Residential", "Commercial") |
-| Area Min (m^2) | Minimum footprint area for this type |
-| Area Max (m^2) | Maximum footprint area for this type (use \(\infty\) for no upper bound) |
-| Weight Density (/m^2) | Demand weight per square meter of footprint |
-| Color | Display color for map visualization |
+| Type Name | Type label (e.g. "Residential") |
+| Area Min (m²) | Minimum footprint area |
+| Area Max (m²) | Maximum footprint area (∞ for no upper bound) |
+| Weight/m² | Demand weight per square meter of footprint |
 
-**Default rules:**
+Default rules:
 
-| Type | Area Range (m^2) | Weight Density (/m^2) | Color | Rationale |
-|------|------------------|-----------------------|-------|-----------|
-| Residential | 30 -- 300 | 0.05 | Blue | Houses and apartments. Low per-area demand. |
-| Commercial | 300 -- 2,000 | 0.08 | Orange | Offices, shops, hotels. Moderate demand intensity. |
-| Industrial | 2,000+ | 0.12 | Red | Factories, warehouses. High demand intensity. |
+| Type | Area range (m²) | Weight/m² |
+|------|-----------------|-----------|
+| Residential | 30 -- 300 | 0.05 |
+| Commercial | 300 -- 2,000 | 0.08 |
+| Industrial | 2,000+ | 0.12 |
 
-**Matching logic:** Rules are evaluated in table order. The first rule whose area range contains the building's footprint area wins. Buildings that match no rule receive the **fallback weight density** (default 0.03 /m^2).
-
-The demand weight for each building is computed as:
+Use **Add Rule** and **Remove Rule** to edit the table. Rules are evaluated in order and the first match wins; buildings matching no rule get the **Fallback weight/m²** (default 0.03). Each building's weight is
 
 \[
-w_b = A_b \times d_r \tag{DD-2}
+w_b = A_b \times d_r \tag{DD-1}
 \]
 
-where \(A_b\) is the building's footprint area (m^2) and \(d_r\) is the weight density for the matching rule \(r\). For unmatched buildings, \(d_r\) equals the fallback weight density.
+where \(A_b\) is the footprint area and \(d_r\) the weight per m² of the matching rule. Each building belongs to the node of its nearest bus (any bus of the system), and within that node it is assigned to the nearest eligible bus. A bus fraction is the bus's share of the weight of its node's buildings; a node with no buildings is split equally:
 
-**Optional floor-based classification:** If the building data includes a `num_floors` column, rules can additionally filter by floor count (`min_floors`, `max_floors`). When a building has floor data and a rule specifies a floor range, both area and floor criteria must be satisfied.
+\[
+f_i = \frac{\sum_{b \to i} w_b}{\sum_{b \in n} w_b} \tag{DD-2}
+\]
 
-Click **Classify** to apply the rules. A preview shows per-type statistics: building count, total area, and total weight.
+Weights are relative: scaling all of them by the same factor does not change the fractions.
+
+**Results and Apply**
+
+The results table lists **Node**, **Bus**, **Buildings** (building count for the footprint method, MWh/yr served for spatial demand), **Old Fraction** and **New Fraction**.
+
+**Apply Demand & Fractions**:
+
+- writes each node's forecast hourly series (all forecast years) to `demand_<node>.csv` under `<config_dir>/demand/` (or `./demand/` when no configuration file is loaded) and attaches it to the node, so it is exported as the system's demand path. The forecast is in each node's local civil time; the files are converted to the [model clock](../user-guide/configuration.md#model-clock), from each node's own time zone with its daylight saving time. When the clock is still `auto`, it becomes the standard time of the zone with the most forecast demand and is recorded in the project's global settings; the chart under **View Demand…** shows the forecast in local time;
+- sets each bus's `demand_fraction`. A bus with role `connection` that receives a non-zero share is promoted to `load`; a `connection` bus with a zero share is left unchanged.
+
+Writing the files takes a while on a large case (about 45 s for 136 nodes and 25 forecast years). It runs in the background: the bar beside the button shows the nodes written, and the window stays responsive. Back and Close wait until it ends; Cancel stops it, and nothing is applied. Earlier versions wrote the files on the interface thread, which froze the window with no progress shown.
 
 **Tips:**
 
-- Weights are **relative**, not absolute. They proportion each node's actual demand across buses. Doubling all weight densities has no effect on the final fractions.
-- Adjust area thresholds to match local building stock. In dense urban areas, apartments may exceed 300 m^2 but should still be classified as residential.
-- Add custom types (e.g. "Government", "Agricultural") with their own area ranges and weights for more granular control.
-- The fallback weight density (default 0.03 /m^2) ensures that small or unusual buildings are not ignored entirely.
-
-
-### Step 4: Spatial Clustering
-
-Group the classified buildings into spatial clusters that will be mapped to buses.
-
-**Algorithm selection:**
-
-| Algorithm | Parameters | Description |
-|-----------|-----------|-------------|
-| **DBSCAN** | `eps` (50--5,000 m, default 500), `min_samples` (1--100, default 5) | Density-based clustering. Automatically determines the number of clusters based on building density. Noise points (buildings too far from any cluster) are assigned to the nearest cluster. Good for irregular building distributions. |
-| **K-Means** | `n_clusters` (2--50, default = max bus count) | Partition-based clustering. Produces exactly the specified number of clusters by minimizing within-cluster distance. Best when building density is relatively uniform. Uses `n_init=10` for stability. |
-| **Agglomerative** | `n_clusters` (2--50, default = max bus count), `linkage` (ward / complete / average) | Hierarchical clustering. Merges buildings bottom-up using the selected linkage criterion. Ward linkage minimizes variance; complete linkage uses maximum pairwise distance; average linkage uses mean pairwise distance. |
-
-**Workflow:**
-
-1. **UTM projection** -- Building centroids are projected from geographic coordinates (WGS84) to the local UTM zone so that distances are measured in meters.
-2. **Clustering** -- The selected algorithm assigns each building to a cluster.
-3. **Centroid computation** -- Each cluster's centroid is computed in UTM and back-projected to WGS84 for map display.
-4. **Demand fraction computation** -- The demand fraction for each cluster is the ratio of its total demand weight to the global total:
-
-\[
-f_c = \frac{\displaystyle\sum_{b \in c} w_b}{\displaystyle\sum_{b} w_b} \tag{DD-3}
-\]
-
-5. **Normalization** -- Fractions are normalized so they sum exactly to 1.0:
-
-\[
-\sum_{c} f_c = 1 \tag{DD-4}
-\]
-
-Click **Run Clustering** to execute. A progress bar tracks the computation (projection, clustering, statistics). When complete, the results table shows per-cluster statistics:
-
-| Column | Description |
-|--------|-------------|
-| Cluster ID | Numeric identifier |
-| Building Count | Number of buildings in the cluster |
-| Total Weight | Sum of demand weights |
-| Demand Fraction | Proportion of total demand assigned to this cluster |
-| Color | Display color for map visualization |
-
-The map displays cluster centroids as colored markers for visual verification.
-
-**Tips:**
-
-- The default cluster count is set to the maximum bus count across all selected nodes. Adjust it if you want finer or coarser groupings.
-- For DBSCAN, increase `eps` (the neighborhood radius) if the algorithm produces too many small clusters, or decrease it to split large clusters.
-- K-Means works best when you know in advance how many demand zones you want. It always produces exactly `n_clusters` clusters.
-- Agglomerative clustering with ward linkage tends to produce compact, evenly sized clusters, similar to K-Means but based on hierarchical merging.
-
-
-### Step 5: Review & Apply
-
-Review the mapping between spatial clusters and buses, then commit the new demand fractions to the model.
-
-**Assignment logic:**
-
-For each target node, the wizard maps clusters to buses as follows:
-
-1. Clusters are sorted by demand fraction in **descending** order (heaviest cluster first).
-2. Buses are sorted by bus ID in **ascending** order.
-3. Clusters are mapped one-to-one to buses in order.
-4. **If there are more clusters than buses:** All remaining clusters are aggregated into the last bus. Their demand fractions are summed.
-5. **If there are fewer clusters than buses:** Extra buses receive a fraction of 0.
-6. **Normalization:** All fractions for a node are normalized to sum exactly to 1.0.
-
-**Assignment table:**
-
-| Column | Description |
-|--------|-------------|
-| System | System name |
-| Node | Node name |
-| Bus ID | Bus identifier |
-| Bus Name | Bus display name |
-| Cluster | Mapped cluster (or "--" if no cluster is assigned) |
-| Old Fraction | Current demand fraction before the wizard |
-| New Fraction | Proposed demand fraction from clustering |
-
-Below the table, a per-node sum verification line confirms that \(\Sigma = 1.0000\) for each node.
-
-**Actions:**
-
-| Button | Description |
-|--------|-------------|
-| **Apply** | Write the new demand fractions to the model. For the current system, fractions are updated through the model API (triggering proper UI refresh). For other systems, fractions are updated directly in the system state. |
-| **Export CSV** | Save the full assignment table to a CSV file. Columns: `system_name`, `node_name`, `bus_id`, `bus_name`, `old_fraction`, `new_fraction`. Available after applying. |
-
-**Tips:**
-
-- Review the old vs. new fractions before applying. Large changes may indicate that the classification rules or clustering parameters need adjustment.
-- The CSV export is useful for documentation and for comparing different clustering configurations.
-- After applying, you can re-run the wizard with different parameters. The old fractions shown will reflect the most recently applied values.
-
-
----
-
-
-## Mathematical Formulations
-
-
-### Domain Area Approximation
-
-\[
-A \approx (\Delta\phi \times 111.32) \times (\Delta\lambda \times 111.32 \times \cos\phi_{\text{mid}}) \tag{DD-1}
-\]
-
-| Symbol | Description |
-|--------|-------------|
-| \(\Delta\phi\) | Latitude span (degrees) |
-| \(\Delta\lambda\) | Longitude span (degrees) |
-| \(\phi_{\text{mid}}\) | Mid-latitude of the bounding box |
-| 111.32 | Approximate km per degree of latitude (or longitude at the equator) |
-
-This flat-Earth approximation is accurate to within a few percent for domains smaller than a few hundred kilometers at mid-latitudes.
-
-
-### Building Demand Weight
-
-\[
-w_b = A_b \times d_r \tag{DD-2}
-\]
-
-| Symbol | Description |
-|--------|-------------|
-| \(w_b\) | Demand weight of building \(b\) (dimensionless relative value) |
-| \(A_b\) | Footprint area of building \(b\) (m^2) |
-| \(d_r\) | Weight density of classification rule \(r\) that matches building \(b\) (/m^2) |
-
-The weight is proportional to the building's footprint area, scaled by a type-dependent density that reflects the expected demand intensity. For buildings matching no rule, \(d_r\) falls back to a configurable default (0.03 /m^2).
-
-
-### Cluster Demand Fraction
-
-\[
-f_c = \frac{\displaystyle\sum_{b \in c} w_b}{\displaystyle\sum_{b} w_b} \tag{DD-3}
-\]
-
-| Symbol | Description |
-|--------|-------------|
-| \(f_c\) | Demand fraction assigned to cluster \(c\) |
-| \(w_b\) | Demand weight of building \(b\) |
-| \(c\) | Set of buildings assigned to cluster \(c\) |
-
-The fraction represents the proportion of total demand weight concentrated in the cluster. After normalization, all fractions sum to 1.0.
-
-
-### Normalization Constraint
-
-\[
-\sum_{c} f_c = 1 \tag{DD-4}
-\]
-
-Ensures that the demand fractions form a valid probability distribution. Applied at two stages: once after clustering (across all clusters), and once after bus assignment (per node).
-
-
-### DBSCAN Clustering
-
-\[
-N_\varepsilon(p) = \{ q \in B : \|p - q\| \leq \varepsilon \}, \quad \text{core point if } |N_\varepsilon(p)| \geq \text{min\_samples} \tag{DD-5}
-\]
-
-| Symbol | Description |
-|--------|-------------|
-| \(N_\varepsilon(p)\) | \(\varepsilon\)-neighborhood of point \(p\) |
-| \(B\) | Set of all building centroids |
-| \(\varepsilon\) | Neighborhood radius (meters, parameter `eps`) |
-| \(\text{min\_samples}\) | Minimum number of points to form a core point |
-
-Buildings in the \(\varepsilon\)-neighborhood of a core point belong to the same cluster. Buildings that are not core points and not in any core point's neighborhood are classified as noise and are reassigned to the nearest cluster via nearest-neighbor lookup.
-
-
-### K-Means Objective
-
-\[
-\min \sum_{c=1}^{K} \sum_{b \in c} \| \mathbf{x}_b - \boldsymbol{\mu}_c \|^2 \tag{DD-6}
-\]
-
-| Symbol | Description |
-|--------|-------------|
-| \(K\) | Number of clusters (parameter `n_clusters`) |
-| \(\mathbf{x}_b\) | UTM coordinates of building \(b\)'s centroid |
-| \(\boldsymbol{\mu}_c\) | Centroid of cluster \(c\) |
-
-The algorithm iteratively assigns buildings to the nearest centroid and recomputes centroids until convergence. Uses 10 random initializations (`n_init=10`) and selects the result with the lowest objective value.
+- Prefer spatial demand. It uses the forecast's own spatial detail and respects substation capacities.
+- With the footprint method, choose a domain that covers all buses of the nodes with some margin; buildings outside it are not counted. Buildings are not limited to a node's own territory: in a multi-node domain, buildings in other nodes' areas also count towards each node's split, so the spatial demand method is the better choice there.
+- After applying, you can run the distribution again with other settings; the Old Fraction column then shows the values just applied.
 
 
 ---
@@ -318,59 +135,35 @@ The algorithm iteratively assigns buildings to the nearest centroid and recomput
 
 ## Scripting
 
-All wizard computations are available as Python functions for batch processing and Jupyter notebooks:
+The footprint classification is available as plain functions:
 
 ```python
 import geopandas as gpd
 from esfex.visualization.workflows.demand_analysis import (
     BuildingTypeRule,
     DEFAULT_RULES,
-    ClusteringWorker,
     classify_buildings,
     compute_classification_summary,
 )
 
-# 1. Load building footprints (e.g. from a GeoJSON file)
+# Building footprints with a 'footprint_area_m2' column
 buildings = gpd.read_file("buildings.geojson")
-# Must have 'footprint_area_m2' column; compute if missing:
-buildings["footprint_area_m2"] = buildings.geometry.area  # if already projected
+if "footprint_area_m2" not in buildings:
+    buildings["footprint_area_m2"] = buildings.to_crs(
+        buildings.estimate_utm_crs()).geometry.area
 
-# 2. Classify buildings using default rules
 classified = classify_buildings(buildings, DEFAULT_RULES, fallback_weight_per_m2=0.03)
 print(compute_classification_summary(classified))
 
-# 3. Custom rules
 custom_rules = [
     BuildingTypeRule(name="Small Residential", area_min_m2=20, area_max_m2=150,
-                     weight_per_m2=0.04, color="#3498db"),
-    BuildingTypeRule(name="Large Residential", area_min_m2=150, area_max_m2=400,
-                     weight_per_m2=0.06, color="#2ecc71"),
-    BuildingTypeRule(name="Commercial", area_min_m2=400, area_max_m2=2000,
-                     weight_per_m2=0.10, color="#e67e22"),
+                     weight_per_m2=0.04),
+    BuildingTypeRule(name="Commercial", area_min_m2=150, area_max_m2=2000,
+                     weight_per_m2=0.10),
     BuildingTypeRule(name="Industrial", area_min_m2=2000, area_max_m2=float("inf"),
-                     weight_per_m2=0.15, color="#e74c3c"),
+                     weight_per_m2=0.15),
 ]
 classified_custom = classify_buildings(buildings, custom_rules, fallback_weight_per_m2=0.02)
-
-# 4. Run clustering (synchronous usage outside the GUI)
-import numpy as np
-from sklearn.cluster import KMeans
-
-gdf = classified_custom.copy()
-utm_crs = gdf.estimate_utm_crs()
-gdf_utm = gdf.to_crs(utm_crs)
-coords = np.column_stack([gdf_utm.geometry.centroid.x, gdf_utm.geometry.centroid.y])
-
-km = KMeans(n_clusters=5, n_init=10, random_state=42)
-gdf["cluster_id"] = km.fit_predict(coords)
-
-# 5. Compute demand fractions per cluster
-total_weight = gdf["demand_weight"].sum()
-fractions = gdf.groupby("cluster_id")["demand_weight"].sum() / total_weight
-fractions = fractions / fractions.sum()  # normalize to exactly 1.0
-
-for cid, frac in fractions.items():
-    print(f"  Cluster {cid}: {frac:.4f} ({frac*100:.1f}%)")
 ```
 
-See the [Demand Analysis API](../api/workflows-demand-analysis.md) for full parameter documentation.
+The capacitated allocation used by the spatial method is `esfex.models.demand_density_ml.allocate_demand_capacitated(cell_lats, cell_lons, cell_demand, bus_lats, bus_lons, bus_cap)`, which returns the demand served by each bus.

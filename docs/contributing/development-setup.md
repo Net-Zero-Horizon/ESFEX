@@ -4,10 +4,12 @@
 
 | Requirement | Version | Purpose |
 |-------------|---------|---------|
-| Python | >= 3.10 | Runtime |
-| Julia | >= 1.9 | Optimization backend |
+| Python | >= 3.10, < 3.14 | Runtime |
+| Julia | >= 1.9 | Optimization backend (managed by `juliacall`; see [Installation](../getting-started/installation.md#julia-setup)) |
 | Git | Any recent | Version control |
 | pip | >= 22.0 | Package management |
+
+A `julia` executable on `PATH` is needed only to build the sysimage (`esfex precompile`) and to run the Julia test suite directly.
 
 
 ---
@@ -16,8 +18,8 @@
 ## Clone the Repository
 
 ```bash
-git clone https://github.com/your-org/esfex.git
-cd esfex
+git clone https://github.com/Net-Zero-Horizon/ESFEX.git
+cd ESFEX
 ```
 
 
@@ -41,13 +43,12 @@ Install in development mode:
 pip install -e ".[dev]"
 ```
 
-Included dependencies:
+All runtime dependencies are core dependencies in `pyproject.toml`; there are no optional extras besides `dev`. They include the numerical stack (numpy, pandas, scipy, h5py, pydantic, pyyaml), juliacall, typer and rich, the Studio (PySide6, which bundles Qt WebEngine, and superqt), plotting (matplotlib, plotly, kaleido), SALib, benchmarking tools (pypsa, pandapower), the GIS and resource-assessment stack (geopandas, shapely, pvlib, atlite, rasterio, osmium, xarray, …) and the demand-model library (xgboost). The install is large (several GB).
 
-- **Core**: numpy, pandas, scipy, h5py, pyyaml, pydantic, juliacall, typer, rich
-- **Visualization**: matplotlib, plotly
-- **GUI**: PySide6, PySide6-WebEngine
-- **Sensitivity**: SALib
-- **Dev tools**: pytest, pytest-cov, ruff, mypy, pre-commit
+The `dev` extra adds pytest, pytest-cov, black, ruff and mypy.
+
+!!! note "Editable installs and pytest"
+    CI installs the package non-editable (`pip install ".[dev]"`) because the setuptools editable finder can resolve some sub-modules (for example `esfex.visualization.i18n`) as namespace packages under pytest. If tests fail with "unknown location" import errors, reinstall without `-e`.
 
 
 ---
@@ -55,7 +56,7 @@ Included dependencies:
 
 ## Julia Environment
 
-Julia initializes automatically on first run. Manual setup:
+Julia initializes automatically on first run: ESFEX activates its own project in `src/esfex/julia` and installs missing packages. Manual setup:
 
 ```bash
 # From the project root
@@ -64,20 +65,17 @@ julia --project=src/esfex/julia -e 'using Pkg; Pkg.instantiate()'
 
 ### Julia Dependencies
 
-The Julia `Project.toml` includes:
+`src/esfex/julia/Project.toml` lists JuMP, MathOptInterface, the bundled solvers (HiGHS, GLPK, Ipopt, SCS, Clarabel), PowerModels, Graphs, PackageCompiler and a few standard libraries. The Julia tests have their own `src/esfex/julia/test/Project.toml`.
 
-- **JuMP** --- Mathematical programming framework
-- **HiGHS** --- Default LP/MIP solver
-- **LinearAlgebra** --- Matrix operations
+Commercial and other optional solvers are installed with the CLI:
 
-Optional solvers:
-
-```julia
-# In Julia REPL
-using Pkg
-Pkg.add("Gurobi")   # Requires Gurobi license
-Pkg.add("CPLEX")    # Requires CPLEX license
+```bash
+esfex add-solver gurobi      # gurobi, cplex, cbc, scip, xpress
+esfex list-solvers           # what is available
+esfex remove-solver gurobi
 ```
+
+`add-solver` installs the Julia package into a separate environment, `<depot>/environments/esfex_solvers` (default depot `~/.julia`), which ESFEX stacks on Julia's load path. Gurobi and CPLEX also need the vendor toolkit and licence to be discoverable (for example `GUROBI_HOME`). Do not `Pkg.add` solvers into `src/esfex/julia`: that changes the shipped project and is not the supported path.
 
 
 ---
@@ -88,10 +86,11 @@ Pkg.add("CPLEX")    # Requires CPLEX license
 Build a Julia system image for faster startup:
 
 ```bash
-esfex info --build-sysimage
+esfex precompile           # build if missing or stale
+esfex precompile --force   # rebuild
 ```
 
-Precompiles all Julia dependencies into a native image, reducing first-call latency from ~30s to ~2s.
+Builds `src/esfex/julia/ESFEX.so` (`.dll`/`.dylib` on other platforms) with JuMP, HiGHS and the ESFEX pipeline compiled in. The build takes several minutes and needs `julia` on `PATH`. ESFEX picks the image up automatically on later runs. It becomes stale when a `.jl` file under `src/esfex/julia/src` is newer than the image; a stale image is still used, so rebuild after editing Julia code.
 
 
 ---
@@ -134,11 +133,10 @@ Settings (`.vscode/settings.json`):
             "type": "debugpy",
             "request": "launch",
             "module": "esfex.cli",
-            "args": ["run", "-c", "${workspaceFolder}/configs/example.yaml"],
+            "args": ["run", "-c", "${workspaceFolder}/my_system.yaml", "--years", "1", "-v"],
             "cwd": "${workspaceFolder}",
             "env": {
-                "ESFEX_LOG_LEVEL": "DEBUG",
-                "ESFEX_JULIA_THREADS": "4"
+                "JULIA_NUM_THREADS": "4"
             },
             "justMyCode": false
         },
@@ -147,7 +145,7 @@ Settings (`.vscode/settings.json`):
             "type": "debugpy",
             "request": "launch",
             "module": "esfex.cli",
-            "args": ["studio", "-c", "${workspaceFolder}/configs/example.yaml"],
+            "args": ["studio", "-c", "${workspaceFolder}/my_system.yaml"],
             "cwd": "${workspaceFolder}",
             "justMyCode": false
         },
@@ -179,23 +177,12 @@ Settings (`.vscode/settings.json`):
             ],
             "cwd": "${workspaceFolder}",
             "justMyCode": false
-        },
-        {
-            "name": "ESFEX: Sensitivity Analysis",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "esfex.cli",
-            "args": [
-                "sensitivity",
-                "-c", "${workspaceFolder}/configs/example.yaml",
-                "--samples", "64"
-            ],
-            "cwd": "${workspaceFolder}",
-            "justMyCode": false
         }
     ]
 }
 ```
+
+`my_system.yaml` stands for any configuration, for example the one from the [Quickstart](../getting-started/quickstart.md). The repository has no example-config directory. There is no `sensitivity` CLI command; sensitivity analysis runs from the Studio or the Python API (see [Sensitivity Analysis](../tutorials/sensitivity-analysis.md)).
 
 Set breakpoints in `runner.py` or `adapters.py` to inspect the simulation loop. `justMyCode: false` enables stepping into library code (JuliaCall, Pydantic, etc.).
 
@@ -228,7 +215,7 @@ Set breakpoints in `runner.py` or `adapters.py` to inspect the simulation loop. 
         {
             "label": "Build Julia sysimage",
             "type": "shell",
-            "command": "python -m esfex.cli info --build-sysimage",
+            "command": "esfex precompile --force",
             "problemMatcher": []
         }
     ]
@@ -248,63 +235,44 @@ Set breakpoints in `runner.py` or `adapters.py` to inspect the simulation loop. 
 
 ## Project Structure
 
+Main directories (not every file is shown):
+
 ```
-esfex/
+ESFEX/
 ├── src/esfex/
-│   ├── __init__.py              # Package exports
+│   ├── __init__.py, __main__.py # Package exports; `python -m esfex`
 │   ├── cli.py                   # CLI (Typer)
-│   ├── runner.py                # Simulation orchestrator
-│   ├── config/
-│   │   ├── schema.py            # Pydantic models
-│   │   ├── loader.py            # YAML loading
-│   │   └── solver.py            # Solver configuration
-│   ├── bridge/
-│   │   ├── adapters.py          # Python→Julia adapters
-│   │   └── julia_setup.py       # Julia initialization
-│   ├── io/
-│   │   ├── demand.py            # Demand data loading
-│   │   └── exporter.py          # Results export
-│   ├── models/
-│   │   ├── ev.py                # EV fleet modeling
-│   │   └── solar_rooftop.py     # Rooftop PV modeling
-│   ├── plugins/
-│   │   ├── __init__.py          # Public API
-│   │   ├── protocol.py          # ESFEXPlugin base class
-│   │   ├── manager.py           # PluginManager singleton
-│   │   └── availability_generator/  # Built-in plugin
-│   ├── sensitivity/
-│   │   └── engine.py            # Sobol sensitivity analysis
+│   ├── runner.py                # Simulation orchestrator, HDF5 output
+│   ├── zones.py                 # Development zones
+│   ├── paths.py                 # Dataset paths (ESFEX_DATA_ROOT), shipped models
+│   ├── data_assets.py           # Rasters downloaded on first use (data release)
+│   ├── assets/                  # Shipped demand models, data-release manifest
+│   ├── logging_config.py
+│   ├── config/                  # schema.py (Pydantic), loader.py (YAML), solver.py
+│   ├── bridge/                  # adapters.py (Python→Julia), converters.py,
+│   │                            # julia_setup.py, topology_audit.py
+│   ├── analysis/                # N-1, AC contingency, frequency, pandapower/native AC bridges
+│   ├── topology/                # Network reduction and result expansion
+│   ├── io/                      # demand.py, exporter.py
+│   ├── models/                  # EV, rooftop PV, demand models, TSAM, climate, finance, …
+│   ├── plugins/                 # protocol.py, manager.py, availability_generator/ (built-in)
+│   ├── sensitivity/             # engine.py (Sobol), worker.py, lp_parser.py
+│   ├── utils/                   # helpers.py, temporal.py, paths.py
 │   ├── julia/
-│   │   ├── src/
-│   │   │   ├── ESFEX.jl        # Julia module entry
-│   │   │   ├── types.jl         # Type definitions
-│   │   │   ├── power_system.jl  # Operational dispatch
-│   │   │   ├── master_problem.jl # Capacity expansion
-│   │   │   ├── transmission_dc.jl # DC power flow
-│   │   │   ├── primary_energy.jl # Fuel supply chain
-│   │   │   └── electrolyzer.jl  # P2H2 modeling
-│   │   └── Project.toml         # Julia dependencies
-│   ├── utils/
-│   │   ├── helpers.py           # Boundary conditions, utilities
-│   │   └── temporal.py          # Rolling horizon, aggregation
+│   │   ├── Project.toml         # Julia dependencies
+│   │   ├── build_sysimage.jl, precompile_workload.jl
+│   │   ├── src/                 # ESFEX.jl and the model files (see Julia Development)
+│   │   └── test/                # runtests.jl, Project.toml
 │   └── visualization/           # Studio
-│       ├── app.py               # Application entry
-│       ├── main_window.py       # Main window
-│       ├── map_widget.py        # Leaflet map
-│       ├── data/
-│       │   ├── gui_model.py     # Data model
-│       │   └── serializer.py    # YAML ↔ GUI conversion
-│       ├── panels/              # Property forms (~24 files)
-│       ├── workflows/           # Analysis wizards
+│       ├── app.py, main_window.py, map_widget.py, sld_widget.py, …
+│       ├── data/                # gui_model.py, serializer.py, …
+│       ├── panels/              # Property forms and dialogs
+│       ├── workflows/           # Analysis wizards (Grid Builder, solar, wind, …)
+│       ├── translations/        # i18n JSON files
 │       └── resources/           # HTML, CSS, JS assets
-├── tests/
-│   ├── test_config.py
-│   ├── test_runner.py
-│   ├── test_adapters.py
-│   ├── test_plugins.py
-│   └── ...
+├── tests/                       # pytest suite (test_schema.py, test_runner.py, …)
+├── examples/plugins/            # Example plugin (custom constraint overlay)
 ├── docs/                        # Documentation (MkDocs)
-├── configs/                     # Example configurations
 ├── pyproject.toml               # Package configuration
 └── mkdocs.yml                   # Documentation config
 ```
@@ -330,12 +298,14 @@ ruff format src/
 ruff check --fix src/
 ```
 
-Key style rules:
+Key style rules (from `[tool.ruff]` in `pyproject.toml`):
 
-- Line length: 100 characters
-- Imports: sorted by isort (built into ruff)
+- Line length: 100 characters (`E501` is not enforced)
+- Rule sets: `E`, `F`, `I` (import sorting), `N`, `W`
 - Docstrings: Google style
 - Type hints: encouraged for public API
+
+The codebase is not yet ruff-clean; CI runs `ruff check --exit-zero`, so lint findings are reported but do not fail the build. There is no pre-commit configuration in the repository.
 
 ### Julia
 
@@ -351,25 +321,6 @@ Julia code follows standard conventions:
 ---
 
 
-## Pre-commit Hooks
-
-Install hooks:
-
-```bash
-pre-commit install
-```
-
-Hooks run automatically on `git commit`:
-
-1. **ruff** --- Lint and format Python code
-2. **mypy** --- Type checking (optional)
-3. **trailing-whitespace** --- Remove trailing spaces
-4. **end-of-file-fixer** --- Ensure newline at EOF
-
-
----
-
-
 ## Common Development Workflows
 
 ### Adding a New Configuration Option
@@ -378,12 +329,13 @@ Hooks run automatically on `git commit`:
 2. Set a sensible default value so existing configs remain valid
 3. Wire the field in `runner.py` or the relevant adapter
 4. Add a test in `tests/test_schema.py` for both the default and explicit cases
-5. Update the example configuration in `configs/`
+5. If the loader converts the section by hand (`config/loader.py`), make sure the new key is passed through
+6. Document the field in the configuration reference and any user-guide page that shows the section
 
 ```python
 # schema.py — example
 class PenaltiesConfig(BaseModel):
-    loss_of_load: float = 10e6
+    loss_of_load: float = 1e7
     max_curtailment_ratio: float = 0.05
     my_new_penalty: float = 1000.0  # Add with default
 ```
@@ -398,50 +350,55 @@ class PenaltiesConfig(BaseModel):
 ### Running a Quick End-to-End Test
 
 ```bash
-# Run a minimal 1-year single-node simulation
-esfex run -c configs/single_node_test.yaml --years 1
+# Run a minimal 1-year simulation (e.g. the Quickstart config)
+esfex run -c my_system.yaml --years 1 -o results
 
-# Check the output
-ls output/
-python -c "import h5py; f = h5py.File('output/results.h5', 'r'); print(list(f.keys()))"
+# Results go to results/<config_stem>_<ddmmyyyy>_<HHMM>.h5
+ls results/
+python -c "import glob, h5py; f = h5py.File(sorted(glob.glob('results/my_system_*.h5'))[-1], 'r'); print(list(f.keys()))"
 ```
+
+`esfex run -c my_system.yaml --dry-run -v` loads the config and prints the run plan without solving.
 
 ### Debugging Julia from Python
 
-Julia error tracebacks can be opaque when propagated to Python. Wrap calls for diagnostics:
+Julia error tracebacks can be opaque when propagated to Python. Useful aids:
+
+- The runner writes `window_infeasible_y<year>_w<window>.lp` to `<output>/logs/` when a dispatch window is not optimal.
+- `ESFEX_MASTER_DEBUG_LP=1` makes the runner write the perfect-foresight master (monolithic solver, without MGA) to `<output>/logs/master_problem_debug.lp` before solving it, e.g. for the LP-level sensitivity analysis. Without it no master LP is written (a large master's LP takes GB and minutes to write).
+- `PowerSystemAdapter.write_lp(path)` and `MasterProblemAdapter.write_lp(path)` export a built model.
+- With Gurobi, `ESFEX_DUMP_IIS=1` computes an irreducible infeasible subsystem for the first infeasible model and writes it to `ESFEX_IIS_DIR` (default `/tmp`).
+- `ESFEX_BENDERS_DEBUG_LP=1` makes Benders write the master and subproblem LPs that fail in its first five iterations (`benders_master_failed_iter<i>.lp`, `benders_sp_failed_y<y>_iter<i>.lp`) to `<output>/logs/`. Without it no LP is written.
+- When a myopic year's master is infeasible, the run stops and logs the constraints that cannot hold together, if the solver can compute them (HiGHS and Gurobi can).
+- `--verbose` raises the console log level. Each run also writes `<output>/logs/optimization_<timestamp>.log`.
 
 ```python
-# In adapters.py or runner.py, wrap Julia calls for better diagnostics
 from esfex.bridge.julia_setup import get_esfex_module
 
-jl = get_esfex_module()
-try:
-    result = jl.create_power_system(input_data)
-except Exception as e:
-    # Print the full Julia backtrace
-    print(f"Julia error: {e}")
-    # Write the model to file for offline inspection
-    jl.write_to_file(model, "/tmp/debug_model.lp")
-    raise
+ESFEX = get_esfex_module()
+model, vars = ESFEX.create_power_system(jl_input)   # jl_input built by the adapter
 ```
 
 ### Working with HDF5 Output
 
 ```python
+import glob
 import h5py
-import numpy as np
 
-with h5py.File("output/results_system.h5", "r") as f:
-    # List all groups
-    def print_tree(name, obj):
-        print(name)
-    f.visititems(print_tree)
+path = sorted(glob.glob("results/my_system_*.h5"))[-1]   # newest run
+with h5py.File(path, "r") as f:
+    # List all groups and datasets
+    f.visit(print)
 
-    # Read generation data for year 1
-    gen = f["year_1/generation"][:]
-    print(f"Shape: {gen.shape}")  # (generators, nodes, hours)
-    print(f"Total: {gen.sum():.1f} MWh")
+    # Per-year results: detailed_results/year_<YYYY>_threshold_0/
+    year_key = sorted(f["detailed_results"])[0]
+    gen_grp = f[f"detailed_results/{year_key}/generation"]
+    for name in gen_grp:                       # one dataset per generator
+        data = gen_grp[name][:]                # [nodes x hours], MW
+        print(name, data.shape, f"{data.sum():.1f} MWh")
 ```
+
+See the [HDF5 output schema](../reference/hdf5-output-schema.md) for the full layout.
 
 
 ---
@@ -449,13 +406,24 @@ with h5py.File("output/results_system.h5", "r") as f:
 
 ## Environment Variables
 
+Julia-related variables (`JULIA_NUM_THREADS`, `JULIA_DEPOT_PATH`, juliacall options) are described in [Installation](../getting-started/installation.md#environment-variables). ESFEX sets `JULIA_NUM_THREADS` to 4 and `PYTHON_JULIACALL_SYSIMAGE` to the sysimage path when they are unset. The solver is chosen with `--solver` or `solver.name`, and the console log level with `--verbose` or `logging.console_level`; there are no environment variables for these.
+
+ESFEX's own variables:
+
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ESFEX_JULIA_THREADS` | Julia thread count | 4 |
-| `ESFEX_SOLVER` | Override default solver | `highs` |
-| `ESFEX_SYSIMAGE` | Path to Julia system image | None |
-| `ESFEX_LOG_LEVEL` | Logging level | `INFO` |
-| `ESFEX_PLUGIN_PATH` | Extra plugin search directories (colon-separated) | None |
+| `ESFEX_PLUGIN_PATH` | Extra plugin search directories (`os.pathsep`-separated) | unset |
+| `ESFEX_DUMP_IIS` | `1` = write the IIS of the first infeasible model (Gurobi only) | unset |
+| `ESFEX_IIS_DIR` | Directory for the IIS / infeasible LP file | `/tmp` |
+| `ESFEX_BENDERS_DEBUG_LP` | `1` = Benders writes the master and subproblem LPs that fail to `<output>/logs/` | unset |
+| `ESFEX_MASTER_DEBUG_LP` | `1` = the perfect-foresight master LP is written to `<output>/logs/master_problem_debug.lp` before it is solved | unset |
+| `ESFEX_OPS_ONLY_YEARS` | Debug: run operational dispatch only for these years (comma- or space-separated); same as `Orchestrator.run(dispatch_years=...)`, which takes precedence | unset |
+| `ESFEX_DATA_ROOT` | Dataset root (`esfex.paths`): demand-model training data and the caches the Studio writes (Geofabrik extracts, OSM tiles, CMIP6 subsets, the forecast's population and GDP rasters); `~` is expanded. A model in its `data/models` folder replaces the one shipped in `esfex/assets/models` | `~/.esfex/data` |
+| `ESFEX_ASSETS_URL` | Base URL of the demand-forecast rasters (`esfex.data_assets`); the test suite points it at a missing local folder so tests never download | ESFEX `data-v1` release |
+| `ESFEX_XGB_DEVICE` | XGBoost device for demand models: `auto`, `cpu`, `cuda` | `auto` |
+| `ESFEX_CMIP6_MODEL` | CMIP6 model used for climate projections | `MPI-ESM1-2-HR` |
+| `ESFEX_OSM_BACKEND` | Grid Builder OSM source: `auto`, `geofabrik`, `overpass` | `auto` |
+| `ESFEX_AVAILABILITY_WORKERS` | Parallel weather fetches when generating availability profiles | 4 |
 
 
 ---
@@ -500,28 +468,18 @@ export CPLEX_STUDIO_DIR=/opt/ibm/ILOG/CPLEX_Studio
 Troubleshooting `juliacall` import or connection failures:
 
 ```bash
-# Ensure Julia is the correct version
-julia --version  # Must be >= 1.9
-
-# Rebuild juliacall's Julia environment
+# Check that juliacall can start Julia
 python -c "import juliacall; print(juliacall.Main)"
 
-# If still failing, remove the cached environment
-rm -rf ~/.julia/environments/pyjuliapkg/
-pip install -e ".[dev]"  # Reinstall to regenerate
+# Check that ESFEX's Julia module loads
+esfex info
 ```
+
+See [Installation: Troubleshooting](../getting-started/installation.md#troubleshooting) for package and environment errors.
 
 ### Out-of-Memory During Simulation
 
 Mitigation strategies for large multi-node, multi-year simulations:
 
-```bash
-# Reduce Julia threads (each thread has its own model copy)
-export ESFEX_JULIA_THREADS=2
-
-# Use a smaller rolling horizon window in config
-# temporal.window_hours: 48  (instead of 168)
-
-# Enable garbage collection hints
-export JULIA_GC_ALLOC_PERIOD=1
-```
+- Use a shorter rolling-horizon window (`temporal.rolling_horizon_hours`, default 48) or a coarser `temporal.resolution_hours`.
+- Reduce the network with network reduction, or use fewer representative days in the master problem.

@@ -85,3 +85,168 @@ def test_switching_method_reevaluates_button(step):
     assert step._btn_fetch_bld.isEnabled()
     _select(step, "spatial")           # currentIndexChanged → _on_dist_method_changed
     assert not step._btn_fetch_bld.isEnabled()
+
+
+# ── Unified 'Fetch and Forecast' button ─────────────────────────────────
+# The former 'Fetch WB + ERA5' and 'Forecast Demand' buttons were merged:
+# one click fetches the inputs and, once they arrive, runs the forecast.
+
+class _SyncThread:
+    """Runs the worker inline so the fetch → forecast chain is testable
+    without an event loop (``_ui_call`` then delivers directly)."""
+
+    def __init__(self, target, daemon=None):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+class _Resp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+def _fake_get(url, **kw):
+    if "worldbank" in url:
+        return _Resp([{}, [{"value": 1234.0}]])
+    return _Resp({"hourly": {"temperature_2m": [25.0] * 8760}})
+
+
+@pytest.fixture
+def ready_step(step):
+    step._combo_country.addItem("Cuba", {"iso2": "CU", "iso3": "CUB", "name": "Cuba"})
+    step._combo_country.setCurrentIndex(step._combo_country.count() - 1)
+    step._bounds = (20.0, -85.0, 23.0, -74.0)
+    return step
+
+
+def test_single_fetch_and_forecast_button(step):
+    assert step._btn_fetch_forecast.text() == "Fetch and Forecast"
+    assert step._btn_fetch_forecast.isEnabled()
+    assert not hasattr(step, "_btn_fetch_data")
+    assert not hasattr(step, "_btn_forecast")
+
+
+def test_fetch_then_forecast(ready_step, monkeypatch):
+    import threading
+    import requests
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+    monkeypatch.setattr(requests, "get", _fake_get)
+    calls = []
+    monkeypatch.setattr(ready_step, "_run_forecast", lambda: calls.append("forecast"))
+
+    ready_step._fetch_and_forecast()
+
+    assert calls == ["forecast"]
+    assert ready_step._wb_data["population"] == 1234.0
+    assert len(ready_step._era5_data["temperature_utc"]) == 8760
+
+
+def test_rerun_skips_fetch_when_inputs_unchanged(ready_step, monkeypatch):
+    import threading
+    import requests
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+    monkeypatch.setattr(requests, "get", _fake_get)
+    monkeypatch.setattr(ready_step, "_run_forecast", lambda: None)
+    ready_step._fetch_and_forecast()
+
+    fetches, forecasts = [], []
+    monkeypatch.setattr(ready_step, "_fetch_wb_era5",
+                        lambda on_done=None: fetches.append(1))
+    monkeypatch.setattr(ready_step, "_run_forecast", lambda: forecasts.append(1))
+    ready_step._fetch_and_forecast()
+    assert fetches == [] and forecasts == [1]
+
+    # A new base year changes the ERA5 weather year → fetch again.
+    ready_step._spin_base_year.setValue(ready_step._spin_base_year.value() - 1)
+    ready_step._fetch_and_forecast()
+    assert fetches == [1]
+
+
+def test_fetch_error_does_not_forecast(ready_step, monkeypatch):
+    import threading
+    import requests
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+    monkeypatch.setattr(requests, "get", _fake_get)
+    # Bounds missing → the ERA5 part fails inside the worker.
+    ready_step._bounds = None
+    calls = []
+    monkeypatch.setattr(ready_step, "_run_forecast", lambda: calls.append(1))
+    ready_step._fetch_and_forecast()
+    assert calls == []
+    assert ready_step._btn_fetch_forecast.isEnabled()
+    assert "Fetch error" in ready_step._lbl_forecast_status.text()
+
+
+def test_finished_forecast_enables_the_later_steps(step):
+    # A finished forecast must unlock the demand view, observed-data loading,
+    # the bus distribution and Apply. Once these enables sat, unreachable,
+    # after the return of a helper wedged into the method.
+    import types
+    _select(step, "spatial")
+    for b in (step._btn_view_demand, step._btn_load_observed,
+              step._btn_fetch_bld, step._btn_apply):
+        b.setEnabled(False)
+    node = types.SimpleNamespace(name="N1", centroid_lat=0.0, centroid_lng=0.0)
+    result = types.SimpleNamespace(
+        peak_mw=[10.0], annual_gwh=[50.0], load_factor=[0.57],
+        total_peak_mw=10.0, total_annual_gwh=50.0, total_load_factor=0.57,
+        demand_source="ml_density", warnings=[], demand_multi_year=None,
+        cell_annual_mwh=[1.0], cell_lats=[0.0], cell_lons=[0.0])
+    step._populate_forecast_results(result, [node], 1)
+    assert step._forecast_nodes == [node]
+    for b in (step._btn_view_demand, step._btn_load_observed,
+              step._btn_fetch_bld, step._btn_apply):
+        assert b.isEnabled()
+
+
+# ── Base-year temperature on the demand models' local clock (round 31) ──
+# ERA5 comes from Open-Meteo in UTC; the demand models' calendar features are
+# local hours. The temperature fed with local hour h must be that instant's.
+
+
+def test_forecast_temperature_is_on_each_nodes_local_time(ready_step, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from esfex.visualization.workflows import demand_estimation_analysis as dea
+
+    monkeypatch.setattr(threading, "Thread", _SyncThread)
+    captured = {}
+
+    class _Builder:
+        def __init__(self, cfg):
+            pass
+
+        def build(self, proxy, macro, meteo, progress_callback=None):
+            captured["meteo"] = meteo
+            raise RuntimeError("stop after capturing the inputs")
+
+    monkeypatch.setattr(dea, "DemandProfileBuilder", _Builder)
+    nodes = [SimpleNamespace(centroid_lat=23.13, centroid_lng=-82.38, name="Havana"),
+             SimpleNamespace(centroid_lat=19.43, centroid_lng=-99.13, name="CDMX")]
+    monkeypatch.setattr(ready_step, "_nodes_in_scope", lambda: nodes)
+    ready_step._model = SimpleNamespace(state=object())
+    ready_step._wb_data = {"population": 1.0}
+    utc = np.arange(8760.0)                      # value = UTC hour of 2023
+    ready_step._era5_data = {"temperature_utc": list(utc), "lat": 21.5,
+                             "lon": -79.5, "year": 2023}
+
+    ready_step._run_forecast()
+
+    meteo = captured["meteo"]
+    havana = meteo.node_temperature(0, 8760)
+    cdmx = meteo.node_temperature(1, 8760)
+    assert havana[0] == 5.0           # 00:00 CST (UTC-5) is 05:00 UTC
+    assert cdmx[0] == 6.0             # 00:00 in Mexico City (UTC-6) is 06:00 UTC
+    jul1_noon = 181 * 24 + 12
+    assert havana[jul1_noon] == jul1_noon + 4    # Havana keeps DST: CDT, UTC-4
+    assert cdmx[jul1_noon] == jul1_noon + 6      # Mexico: no DST since 2022
+    assert meteo.temperature_hourly[0] == 5.0    # domain centre: Cuba
+    assert meteo.node_hdd_hourly[0][0] == max(18.0 - 5.0, 0.0)

@@ -26,9 +26,13 @@ Each EV category can have its own `max_adoption`, `growth_rate`, and `mid_point_
 **Example growth curve:**
 
 For `base_year=2025`, `target_year=2050`, `max_adoption=30`, `growth_rate=0.12`, `mid_point_fraction=0.5`:
-- 2025: growth_factor ~1.0 (initial fleet)
-- 2037: growth_factor ~15.0 (midpoint)
-- 2050: growth_factor ~29.5 (approaching maximum)
+- 2025: growth_factor ~5.5
+- 2037: growth_factor ~14.6 (midpoint is 2037.5)
+- 2050: growth_factor ~24.5
+
+The factor at `base_year` is not 1: the S-curve multiplies `ev_quantity` (the base-year fleet) from the first year on. Because the midpoint depends on `target_year`, the same fleet gives different factors for different horizons.
+
+The factor is computed by `fleet_growth_factor(category, year, base_year, target_year, max_adoption=30.0, growth_rate=0.12)`, which the profile generators and the dispatch fleet limits share.
 
 ---
 
@@ -47,6 +51,7 @@ def generate_ev_profiles(
     target_year: int = 2050,
     max_adoption: float = 30.0,
     growth_rate: float = 0.12,
+    seed: Optional[int] = 0,
 ) -> pd.DataFrame
 ```
 
@@ -62,16 +67,19 @@ Generate EV charging demand profiles with S-curve fleet growth.
 | `ev_quantity` | `dict` | required | Initial fleet count per category per node (base year). Keys are category names, values are lists of vehicle counts per node. |
 | `base_patterns` | `dict` | required | 24-hour charging availability templates per category. Keys are category names, values are lists of 24 floats in [0, 1] representing the fraction of fleet charging at each hour of day. |
 | `base_year` | `int` | `2025` | Fleet baseline year. |
-| `target_year` | `int` | `2050` | Current simulation year (used for S-curve calculation). |
+| `target_year` | `int` | `2050` | End of the adoption horizon. With `mid_point_fraction` it sets the S-curve midpoint. The year of each hour is `base_year + hour // 8760`. |
 | `max_adoption` | `float` | `30.0` | Default maximum fleet growth multiplier (can be overridden per category). |
 | `growth_rate` | `float` | `0.12` | Default logistic growth rate (can be overridden per category). |
+| `seed` | `int` or `None` | `0` | Seed of the hourly noise, so the same inputs give the same profiles. `None` draws fresh noise on every call. |
 
 **`ev_categories` dict fields:**
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `charging_power` | `float` | Charging power per vehicle in kW. |
-| `v2g_participation` | `float` | Fraction of fleet participating in V2G (0-1). |
+| `daily_energy_kwh` | `float` | Energy charged per vehicle per day in kWh (optional). |
+| `battery_capacity` | `float` | Battery capacity per vehicle in kWh. Required when `daily_energy_kwh` is absent; daily energy is then `0.12 * battery_capacity`. |
+| `charging_power` | `float` | Charging power per vehicle in kW. Not used by this function (it does not scale energy); the dispatch model uses it as a rate cap. |
+| `v2g_participation` | `float` | Fraction of fleet participating in V2G (0-1). Used by `generate_v2g_availability`. |
 | `v2g_power` | `float` | V2G discharge power per vehicle in kW. |
 | `max_adoption` | `float` | Category-specific max growth multiplier (optional, overrides default). |
 | `growth_rate` | `float` | Category-specific growth rate (optional, overrides default). |
@@ -85,12 +93,10 @@ Generate EV charging demand profiles with S-curve fleet growth.
 **Charging demand calculation:**
 
 ```
-demand_MW = pattern[hour_of_day] * num_vehicles * charging_power_kW / 1000
+demand_MW = value[hour] / sum(pattern) * daily_energy_kWh / 1000 * num_vehicles
 ```
 
-Where `num_vehicles = initial_quantity * growth_factor(year)`.
-
-Small Gaussian noise (std=0.02) is added to the base pattern for realism.
+Where `value[hour]` is `pattern[hour_of_day]` plus Gaussian noise (std 0.02), clipped to [0, 1], and `num_vehicles = initial_quantity * growth_factor(year)`. The pattern sets when charging happens; its daily sum is normalised so that each vehicle charges about `daily_energy_kWh` per day.
 
 **Example:**
 
@@ -99,6 +105,7 @@ from esfex.models.ev import generate_ev_profiles
 
 ev_categories = {
     "private_car": {
+        "battery_capacity": 60.0,  # kWh -> 7.2 kWh/day
         "charging_power": 7.4,     # kW
         "v2g_participation": 0.3,
         "v2g_power": 5.0,         # kW
@@ -106,6 +113,7 @@ ev_categories = {
         "growth_rate": 0.12,
     },
     "bus": {
+        "daily_energy_kwh": 250.0,
         "charging_power": 150.0,
         "v2g_participation": 0.0,
         "v2g_power": 0.0,
@@ -154,6 +162,7 @@ def generate_v2g_availability(
     target_year: int = 2050,
     max_adoption: float = 30.0,
     growth_rate: float = 0.12,
+    seed: Optional[int] = 0,
 ) -> pd.DataFrame
 ```
 
@@ -164,8 +173,10 @@ Parameters are identical to `generate_ev_profiles`. V2G availability represents 
 **V2G availability calculation:**
 
 ```
-v2g_MW = pattern[hour_of_day] * v2g_participation * num_vehicles * v2g_power_kW / 1000
+v2g_MW = value[hour] * v2g_participation * num_vehicles * v2g_power_kW / 1000
 ```
+
+Here `value[hour]` is the pattern plus Gaussian noise (std 0.01), clipped to [0, 1]. `v2g_participation` and `v2g_power` are required for every category.
 
 **Returns:** `pd.DataFrame` with V2G availability in MW. Same column naming as `generate_ev_profiles`.
 
@@ -257,12 +268,12 @@ Save EV charging and V2G profiles to an HDF5 file for later reuse.
 ev_profiles_{uuid}.h5
     charging/
         data      [hours x categories*nodes]
-        index     [hours]
-        columns   [category names]
+        index     [hours]   hour labels stored as byte strings
+        columns   [categories*nodes]   "Node_{n}_{category}" names
     v2g/
         data      [hours x categories*nodes]
         index     [hours]
-        columns   [category names]
+        columns   [categories*nodes]
 ```
 
 ### load_ev_profiles_hdf5
@@ -273,7 +284,7 @@ def load_ev_profiles_hdf5(filepath: str) -> Tuple[pd.DataFrame, pd.DataFrame]
 
 Load EV profiles from a previously saved HDF5 file.
 
-**Returns:** Tuple of `(ev_charging, v2g_availability)` DataFrames.
+**Returns:** Tuple of `(ev_charging, v2g_availability)` DataFrames. The index is loaded back as strings (`"0"`, `"1"`, ...), not integers.
 
 ---
 

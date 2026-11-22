@@ -31,13 +31,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from windrex import (
-    CriterionConfig,
-    DEFAULT_LULC_SCORES,
-    MCDAConfig,
-    TurbineSpec,
-    load_turbine_database,
-)
+# From their modules: windrex 0.1.1 (PyPI) does not re-export them at the top.
+from windrex.config import TurbineSpec
+from windrex.data.turbine_db import load_turbine_database
 
 # esfex's own fat wind config (turbine as a key string, hub_height, installation,
 # effective_workers, …) — matches what esfex's analyzer/wizard read. windrex's
@@ -45,6 +41,15 @@ from windrex import (
 # windrex's own analyzer, which esfex does not use; importing it here passed
 # kwargs it no longer accepts and broke get_config().
 from esfex.visualization.workflows.wind_analysis import WindConfig
+# Same for the MCDA settings: esfex's analyzer reads a dict of criteria with a
+# ``direction`` and the LULC scores; windrex's MCDAConfig takes a list of
+# criteria with ``is_benefit`` and no LULC scores, so building it from the
+# criteria step raised a TypeError.
+from esfex.visualization.workflows.wind_analysis import (
+    DEFAULT_LULC_SCORES,
+    CriterionConfig,
+    MCDAConfig,
+)
 
 from esfex.visualization.i18n import tr
 
@@ -79,10 +84,7 @@ class WindDomainStep(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(
-            QLabel(
-                "Define the analysis domain by drawing a polygon on the map "
-                "or applying an imported GeoAsset."
-            )
+            QLabel(tr("wizard_wind.domain_instruction_polygon"))
         )
 
         # Standard two-column domain selector: draw a polygon OR apply a GeoAsset.
@@ -134,7 +136,7 @@ class WindConfigStep(QWidget):
 
         filter_row.addWidget(QLabel(tr("wizard_wind.manufacturer")))
         self._combo_manufacturer = QComboBox()
-        self._combo_manufacturer.addItem("All")
+        self._combo_manufacturer.addItem(tr("wizard_wind.all_manufacturers"), "")
         self._combo_manufacturer.currentIndexChanged.connect(self._apply_filter)
         filter_row.addWidget(self._combo_manufacturer)
 
@@ -157,10 +159,7 @@ class WindConfigStep(QWidget):
         filter_row.addWidget(self._spin_max_power)
 
         self._btn_load_oedb = QPushButton(tr("wizard_wind.load_oedb"))
-        self._btn_load_oedb.setToolTip(
-            "Download turbine data from the Open Energy Database\n"
-            "(100+ additional turbine models, requires internet)"
-        )
+        self._btn_load_oedb.setToolTip(tr("wizard_wind.load_oedb_tip"))
         self._btn_load_oedb.clicked.connect(self._load_oedb_database)
         filter_row.addWidget(self._btn_load_oedb)
 
@@ -169,8 +168,9 @@ class WindConfigStep(QWidget):
         # Turbine table
         self._turb_table = QTableWidget(0, 6)
         self._turb_table.setHorizontalHeaderLabels([
-            "Manufacturer", "Model", "Rated (MW)",
-            "Rotor (m)", "Hub (m)", "Source",
+            tr("wizard_wind.col_manufacturer"), tr("wizard_wind.col_model"),
+            tr("wizard_wind.col_rated"), tr("wizard_wind.col_rotor"),
+            tr("wizard_wind.col_hub"), tr("wizard_wind.col_source"),
         ])
         header = self._turb_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -192,9 +192,7 @@ class WindConfigStep(QWidget):
         turb_lay.addWidget(self._turb_table)
 
         # Turbine details panel
-        self._details_label = QLabel(
-            "<i>Select a turbine from the table above to see its details.</i>"
-        )
+        self._details_label = QLabel(tr("wizard_wind.select_turbine"))
         self._details_label.setWordWrap(True)
         self._details_label.setStyleSheet(
             "background-color: #2c2c2c; color: #e0e0e0; "
@@ -210,10 +208,7 @@ class WindConfigStep(QWidget):
         self._spin_hub_height.setRange(30, 300)
         self._spin_hub_height.setValue(80)
         self._spin_hub_height.setSuffix(" m")
-        self._spin_hub_height.setToolTip(
-            "Override the default hub height from the turbine database.\n"
-            "Leave at the turbine's default or adjust for your specific site."
-        )
+        self._spin_hub_height.setToolTip(tr("wizard_wind.hub_height_tip"))
         hub_row.addWidget(self._spin_hub_height)
         hub_row.addStretch()
         turb_lay.addLayout(hub_row)
@@ -234,11 +229,12 @@ class WindConfigStep(QWidget):
         self._spin_grid_res.setValue(0.25)
         self._spin_grid_res.setDecimals(2)
         self._spin_grid_res.setSuffix(" \u00b0")
-        self._spin_grid_res.setToolTip("Grid spacing in degrees")
+        self._spin_grid_res.setToolTip(tr("wizard_wind.grid_res_tip"))
         analysis_form.addRow(tr("wizard_wind.grid_res"), self._spin_grid_res)
 
         self._combo_install = QComboBox()
-        self._combo_install.addItems(["Onshore", "Offshore"])
+        self._combo_install.addItem(tr("wizard_wind.install_onshore"), "onshore")
+        self._combo_install.addItem(tr("wizard_wind.install_offshore"), "offshore")
         analysis_form.addRow(tr("wizard_wind.installation_type"), self._combo_install)
 
         self._combo_data_source = QComboBox()
@@ -247,17 +243,13 @@ class WindConfigStep(QWidget):
             tr("wizard_common.ds_nasa_power"),
             tr("wizard_common.ds_era5_atlite"),
         ])
-        self._combo_data_source.setToolTip(
-            "Open-Meteo: Fast download, same ERA5 data\n"
-            "NASA POWER: Fast download, MERRA-2 reanalysis\n"
-            "ERA5 via atlite: Slow (hours), requires CDS API key"
-        )
+        self._combo_data_source.setToolTip(tr("wizard_wind.data_source_tip"))
         analysis_form.addRow(tr("wizard_common.data_source"), self._combo_data_source)
 
         self._spin_workers = QSpinBox()
         self._spin_workers.setRange(0, 64)
         self._spin_workers.setValue(0)
-        self._spin_workers.setSpecialValueText("Auto")
+        self._spin_workers.setSpecialValueText(tr("wizard_wind.workers_auto"))
         self._spin_workers.setToolTip(
             tr("wizard_wind.workers_tip")
         )
@@ -274,9 +266,7 @@ class WindConfigStep(QWidget):
         self._spin_min_cf.setValue(0.25)
         self._spin_min_cf.setDecimals(2)
         self._spin_min_cf.setSingleStep(0.05)
-        self._spin_min_cf.setToolTip(
-            "Minimum capacity factor for a site to be considered feasible"
-        )
+        self._spin_min_cf.setToolTip(tr("wizard_wind.min_cf_tip"))
         zone_form.addRow(tr("wizard_wind.min_cf"), self._spin_min_cf)
 
         self._spin_buffer = QDoubleSpinBox()
@@ -316,8 +306,7 @@ class WindConfigStep(QWidget):
         QMessageBox.warning(
             self,
             tr("wizard_wind.turbine_db_title"),
-            f"Could not load turbine database:\n{msg}\n\n"
-            "Make sure atlite is installed: pip install atlite",
+            tr("wizard_wind.turbine_db_msg", e=msg),
         )
 
     def _load_oedb_database(self):
@@ -343,15 +332,14 @@ class WindConfigStep(QWidget):
             self._populate_manufacturers()
             self._apply_filter()
 
-            self._btn_load_oedb.setText(f"OEDB loaded (+{added})")
+            self._btn_load_oedb.setText(tr("wizard_wind.oedb_loaded", n=added))
         except Exception as exc:
             self._btn_load_oedb.setEnabled(True)
-            self._btn_load_oedb.setText("Load OEDB")
+            self._btn_load_oedb.setText(tr("wizard_wind.load_oedb"))
             QMessageBox.warning(
                 self,
-                "OEDB Download Failed",
-                f"Could not download OEDB database:\n{exc}\n\n"
-                "Check your internet connection.",
+                tr("wizard_wind.oedb_failed_title"),
+                tr("wizard_wind.oedb_failed_msg", e=exc),
             )
 
     def _populate_manufacturers(self):
@@ -359,14 +347,14 @@ class WindConfigStep(QWidget):
         manufacturers = sorted(
             {t.manufacturer for t in self._turbines if t.manufacturer},
         )
-        current = self._combo_manufacturer.currentText()
+        current = self._combo_manufacturer.currentData()
         self._combo_manufacturer.blockSignals(True)
         self._combo_manufacturer.clear()
-        self._combo_manufacturer.addItem("All")
+        self._combo_manufacturer.addItem(tr("wizard_wind.all_manufacturers"), "")
         for m in manufacturers:
-            self._combo_manufacturer.addItem(m)
+            self._combo_manufacturer.addItem(m, m)
         # Restore selection
-        idx = self._combo_manufacturer.findText(current)
+        idx = self._combo_manufacturer.findData(current)
         if idx >= 0:
             self._combo_manufacturer.setCurrentIndex(idx)
         self._combo_manufacturer.blockSignals(False)
@@ -377,13 +365,13 @@ class WindConfigStep(QWidget):
 
     def _apply_filter(self):
         """Filter turbine table based on manufacturer and power range."""
-        mfr = self._combo_manufacturer.currentText()
+        mfr = self._combo_manufacturer.currentData() or ""
         min_mw = self._spin_min_power.value()
         max_mw = self._spin_max_power.value()
 
         self._filtered_turbines = [
             t for t in self._turbines
-            if (mfr == "All" or t.manufacturer == mfr)
+            if (not mfr or t.manufacturer == mfr)
             and min_mw <= t.rated_power_mw <= max_mw
         ]
 
@@ -416,9 +404,7 @@ class WindConfigStep(QWidget):
     def _on_turbine_selected(self, row: int, _col: int, _prev_row: int, _prev_col: int):
         if row < 0 or row >= len(self._filtered_turbines):
             self._selected_turbine = None
-            self._details_label.setText(
-                "<i>Select a turbine from the table above.</i>"
-            )
+            self._details_label.setText(tr("wizard_wind.select_turbine_short"))
             return
 
         t = self._filtered_turbines[row]
@@ -432,16 +418,16 @@ class WindConfigStep(QWidget):
         _area = math.pi * (t.rotor_diameter_m / 2) ** 2
         sp = (t.rated_power_mw * 1e6) / _area if _area > 0 else 0.0
         lines = [
-            f"<b>{t.manufacturer} {t.name}</b>",
-            f"Rated power: <b>{t.rated_power_mw:.2f} MW</b>",
+            tr("wizard_wind.turbine_details", manufacturer=t.manufacturer, name=t.name),
+            tr("wizard_wind.detail_rated_power", mw=f"{t.rated_power_mw:.2f}"),
         ]
         if t.rotor_diameter_m > 0:
-            lines.append(
-                f"Rotor diameter: <b>{t.rotor_diameter_m:.0f} m</b> "
-                f"(specific power: {sp:.0f} W/m\u00b2)"
-            )
-        lines.append(f"Default hub height: <b>{t.hub_height_m:.0f} m</b>")
-        lines.append(f"Source: {t.source}")
+            lines.append(tr(
+                "wizard_wind.detail_rotor",
+                d=f"{t.rotor_diameter_m:.0f}", sp=f"{sp:.0f}",
+            ))
+        lines.append(tr("wizard_wind.detail_hub", h=f"{t.hub_height_m:.0f}"))
+        lines.append(tr("wizard_wind.detail_source", source=t.source))
 
         # Power curve summary
         if t.power_curve and t.wind_speeds:
@@ -458,13 +444,14 @@ class WindConfigStep(QWidget):
             )
             curve_info = []
             if cut_in is not None:
-                curve_info.append(f"Cut-in: {cut_in:.0f} m/s")
+                curve_info.append(tr("wizard_wind.detail_cut_in", ws=f"{cut_in:.0f}"))
             if rated_ws is not None:
-                curve_info.append(f"Rated: {rated_ws:.0f} m/s")
+                curve_info.append(tr("wizard_wind.detail_rated_ws", ws=f"{rated_ws:.0f}"))
             if cut_out is not None:
-                curve_info.append(f"Cut-out: {cut_out:.0f} m/s")
+                curve_info.append(tr("wizard_wind.detail_cut_out", ws=f"{cut_out:.0f}"))
             if curve_info:
-                lines.append("Power curve: " + " | ".join(curve_info))
+                lines.append(tr("wizard_wind.detail_power_curve",
+                                info=" | ".join(curve_info)))
 
             # ASCII mini power curve (compact)
             lines.append(self._mini_power_curve(t))
@@ -496,7 +483,7 @@ class WindConfigStep(QWidget):
             bar = "\u2588" * bar_len
             parts.append(f"{ws:>2d} m/s: {bar} {pw:.2f} MW")
 
-        return "<br>".join(["<b>Power curve:</b>"] + parts)
+        return "<br>".join([tr("wizard_wind.power_curve_heading")] + parts)
 
     # ------------------------------------------------------------------
     # Public API
@@ -545,25 +532,27 @@ class WindConfigStep(QWidget):
 # Step 3: MCDA Criteria Configuration
 # =====================================================================
 
+# (criterion, translation key of its label, direction, default weight)
 _CRITERIA_DEFS = [
-    ("capacity_factor", "Wind Capacity Factor", "maximize", 0.40),
-    ("slope", "Terrain Slope", "minimize", 0.15),
-    ("elevation", "Elevation", "minimize", 0.10),
-    ("lulc_score", "LULC Suitability", "maximize", 0.20),
-    ("dist_grid_km", "Distance to Grid", "minimize", 0.15),
+    ("capacity_factor", "wizard_wind.crit_capacity_factor", "maximize", 0.40),
+    ("slope", "wizard_wind.crit_slope", "minimize", 0.15),
+    ("elevation", "wizard_wind.crit_elevation", "minimize", 0.10),
+    ("lulc_score", "wizard_wind.crit_lulc", "maximize", 0.20),
+    ("dist_grid_km", "wizard_wind.crit_dist_grid", "minimize", 0.15),
 ]
 
+# ESA WorldCover class code -> translation key of its name
 _LULC_CLASS_NAMES = {
-    10: "Tree cover",
-    20: "Shrubland",
-    30: "Grassland",
-    40: "Cropland",
-    50: "Built-up",
-    60: "Bare / sparse veg.",
-    70: "Snow and ice",
-    80: "Water bodies",
-    90: "Herbaceous wetland",
-    95: "Mangroves",
+    10: "wizard_wind.lulc_tree_cover",
+    20: "wizard_wind.lulc_shrubland",
+    30: "wizard_wind.lulc_grassland",
+    40: "wizard_wind.lulc_cropland",
+    50: "wizard_wind.lulc_built_up",
+    60: "wizard_wind.lulc_bare",
+    70: "wizard_wind.lulc_snow_ice",
+    80: "wizard_wind.lulc_water",
+    90: "wizard_wind.lulc_wetland",
+    95: "wizard_wind.lulc_mangroves",
 }
 
 
@@ -575,10 +564,7 @@ class CriteriaConfigStep(QWidget):
         layout = QVBoxLayout(self)
 
         layout.addWidget(
-            QLabel(
-                "Configure the multi-criteria decision analysis (MCDA) for "
-                "evaluating wind development zones."
-            )
+            QLabel(tr("wizard_wind.criteria_desc"))
         )
 
         # Weighting method
@@ -594,10 +580,7 @@ class CriteriaConfigStep(QWidget):
         self._combo_method.currentIndexChanged.connect(self._on_method_changed)
         method_form.addRow(tr("wizard_wind.weighting_method"), self._combo_method)
 
-        self._method_info = QLabel(
-            "Manually assign weights to each criterion. "
-            "Weights will be normalized to sum to 1."
-        )
+        self._method_info = QLabel(tr("wizard_wind.method_manual_desc"))
         self._method_info.setWordWrap(True)
         self._method_info.setStyleSheet("color: #888; font-style: italic;")
         method_form.addRow(self._method_info)
@@ -610,7 +593,8 @@ class CriteriaConfigStep(QWidget):
 
         self._criteria_table = QTableWidget(len(_CRITERIA_DEFS), 4)
         self._criteria_table.setHorizontalHeaderLabels([
-            "Enabled", "Criterion", "Direction", "Weight",
+            tr("wizard_wind.col_enabled"), tr("wizard_wind.col_criterion"),
+            tr("wizard_wind.col_direction"), tr("wizard_wind.col_weight"),
         ])
         header = self._criteria_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -625,12 +609,12 @@ class CriteriaConfigStep(QWidget):
             self._criteria_table.setCellWidget(row, 0, chk)
 
             # Name
-            item = QTableWidgetItem(label)
+            item = QTableWidgetItem(tr(label))
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._criteria_table.setItem(row, 1, item)
 
             # Direction
-            item_dir = QTableWidgetItem(direction.capitalize())
+            item_dir = QTableWidgetItem(tr(f"wizard_wind.dir_{direction}"))
             item_dir.setFlags(item_dir.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._criteria_table.setItem(row, 2, item_dir)
 
@@ -655,7 +639,8 @@ class CriteriaConfigStep(QWidget):
 
         self._lulc_table = QTableWidget(len(_LULC_CLASS_NAMES), 3)
         self._lulc_table.setHorizontalHeaderLabels([
-            "Code", "Land Cover Class", "Suitability (0-1)",
+            tr("wizard_wind.col_code"), tr("wizard_wind.col_land_cover"),
+            tr("wizard_wind.col_suitability"),
         ])
         lulc_header = self._lulc_table.horizontalHeader()
         lulc_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -669,7 +654,7 @@ class CriteriaConfigStep(QWidget):
             self._lulc_table.setItem(row, 0, code_item)
 
             # Name
-            name_item = QTableWidgetItem(name)
+            name_item = QTableWidgetItem(tr(name))
             name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._lulc_table.setItem(row, 1, name_item)
 
@@ -689,12 +674,9 @@ class CriteriaConfigStep(QWidget):
 
     def _on_method_changed(self, index: int):
         method_descriptions = [
-            "Manually assign weights to each criterion. "
-            "Weights will be normalized to sum to 1.",
-            "Weights computed automatically from data using Shannon entropy. "
-            "Criteria with more variation get higher weights.",
-            "Weights derived from first principal component loadings. "
-            "Criteria that explain most variance get higher weights.",
+            tr("wizard_wind.method_manual_desc"),
+            tr("wizard_wind.method_entropy_desc"),
+            tr("wizard_wind.method_pca_desc"),
         ]
         self._method_info.setText(method_descriptions[index])
 
@@ -825,19 +807,27 @@ class WindAnalysisStep(QWidget):
         ds_labels = {
             "open_meteo": "Open-Meteo (ERA5)",
             "nasa_power": "NASA POWER (MERRA-2)",
-            "era5_atlite": "ERA5 via atlite",
+            "era5_atlite": tr("wizard_wind.ds_era5_atlite_short"),
         }
-        self._summary_label.setText(
-            f"<b>Domain:</b> ({s:.4f}, {w:.4f}) to ({n:.4f}, {e:.4f})<br>"
-            f"<b>Turbine:</b> {wind_config.turbine} | "
-            f"<b>Hub Height:</b> {wind_config.hub_height} m<br>"
-            f"<b>Year:</b> {wind_config.year} | "
-            f"<b>Grid:</b> {wind_config.grid_resolution}\u00b0 | "
-            f"<b>Type:</b> {wind_config.installation}<br>"
-            f"<b>Data Source:</b> {ds_labels.get(wind_config.data_source, wind_config.data_source)}<br>"
-            f"<b>MCDA Method:</b> {mcda_config.method} | "
-            f"<b>Criteria:</b> {', '.join(enabled_criteria)}"
-        )
+        install_key = f"wizard_wind.install_{wind_config.installation}"
+        install_label = tr(install_key)
+        if install_label == install_key:
+            install_label = wind_config.installation
+        method_labels = {
+            "manual": tr("wizard_wind.method_manual"),
+            "entropy": tr("wizard_wind.method_entropy"),
+            "pca": tr("wizard_wind.method_pca"),
+        }
+        self._summary_label.setText(tr(
+            "wizard_wind.run_summary",
+            south=f"{s:.4f}", west=f"{w:.4f}", north=f"{n:.4f}", east=f"{e:.4f}",
+            turbine=wind_config.turbine, hub=wind_config.hub_height,
+            year=wind_config.year, grid=wind_config.grid_resolution,
+            type=install_label,
+            source=ds_labels.get(wind_config.data_source, wind_config.data_source),
+            method=method_labels.get(mcda_config.method, mcda_config.method),
+            criteria=", ".join(enabled_criteria),
+        ))
         self._btn_run.setEnabled(True)
         self._summary = None
 
@@ -869,14 +859,7 @@ class WindAnalysisStep(QWidget):
                 QMessageBox.critical(
                     self,
                     tr("wizard_wind.cds_api_title"),
-                    "ERA5 wind data download requires a Copernicus Climate Data Store "
-                    "account.\n\n"
-                    "1. Register at: https://cds.climate.copernicus.eu/\n"
-                    "2. Go to your profile page and copy your API key\n"
-                    "3. Create the file ~/.cdsapirc with:\n\n"
-                    "   url: https://cds.climate.copernicus.eu/api\n"
-                    "   key: YOUR_UID:YOUR_API_KEY\n\n"
-                    "Then retry the analysis.",
+                    tr("wizard_wind.cds_api_msg"),
                 )
                 return
 
@@ -914,25 +897,23 @@ class WindAnalysisStep(QWidget):
         self._summary = summary
         self._progress.setValue(100)
         self._btn_cancel.setEnabled(False)
-        self._log.append(
-            f"\nAnalysis complete!\n"
-            f"Total grid cells: {summary.total_cells}\n"
-            f"Feasible cells: {summary.feasible_cells}\n"
-            f"CF range: {summary.cf_min:.3f} \u2013 {summary.cf_max:.3f}\n"
-            f"MCDA score range: {summary.mcda_score_min:.3f} \u2013 "
-            f"{summary.mcda_score_max:.3f}"
-        )
+        self._log.append(tr(
+            "wizard_wind.analysis_complete",
+            total=summary.total_cells, feasible=summary.feasible_cells,
+            cf_min=summary.cf_min, cf_max=summary.cf_max,
+            mcda_min=summary.mcda_score_min, mcda_max=summary.mcda_score_max,
+        ))
         if summary.computed_weights:
-            self._log.append("\nComputed weights:")
+            self._log.append(tr("wizard_wind.computed_weights"))
             for name, w in summary.computed_weights.items():
-                self._log.append(f"  {name}: {w:.3f}")
+                self._log.append(tr("wizard_wind.weight_line", name=name, w=w))
         self.analysisFinished.emit()
 
     def _on_error(self, msg: str):
         self._progress.setValue(0)
         self._btn_run.setEnabled(True)
         self._btn_cancel.setEnabled(False)
-        self._log.append(f"ERROR: {msg}")
+        self._log.append(tr("wizard_wind.analysis_error", msg=msg))
         QMessageBox.critical(self, tr("wizard_wind.analysis_error_title"), msg)
 
     def get_summary(self):
@@ -1061,7 +1042,7 @@ class WindResultsStep(QWidget):
                 self._lbl_cf_min, self._lbl_cf_avg, self._lbl_cf_max,
                 self._lbl_mcda_range, self._lbl_capacity,
             ):
-                lbl.setText("N/A")
+                lbl.setText(tr("wizard_wind.not_available"))
 
         # Show computed weights
         if summary.computed_weights:
@@ -1075,7 +1056,7 @@ class WindResultsStep(QWidget):
         self._btn_show_results.setEnabled(summary.results_gdf is not None)
         self._btn_clear_results.setEnabled(True)
         self._btn_gen_zones.setEnabled(summary.feasible_cells > 0)
-        self._btn_gen_zones.setText("Generate Development Zones")
+        self._btn_gen_zones.setText(tr("wizard_wind.gen_zones"))
         self._btn_export_csv.setEnabled(summary.results_gdf is not None)
 
     def _show_results_on_map(self):
@@ -1104,7 +1085,7 @@ class WindResultsStep(QWidget):
         gdf = self._summary.results_gdf
         feasible = gdf[gdf["capacity_factor"] >= self._wind_config.min_capacity_factor]
         if feasible.empty:
-            self._zones_info.setText("No feasible sites for zone generation.")
+            self._zones_info.setText(tr("wizard_wind.no_feasible_msg"))
             return
 
         min_mcda = float(feasible["mcda_score"].quantile(0.5))
@@ -1119,24 +1100,19 @@ class WindResultsStep(QWidget):
         )
 
         if self._zones_gdf.empty:
-            self._zones_info.setText(
-                "No development zones generated.\n"
-                "Try lowering the capacity factor threshold."
-            )
+            self._zones_info.setText(tr("wizard_wind.no_zones_msg"))
             self._btn_export_zones.setEnabled(False)
             return
 
         # Display zone info
-        lines = [f"Generated {len(self._zones_gdf)} development zone(s):\n"]
+        lines = [tr("wizard_wind.zones_generated", n=len(self._zones_gdf))]
         for _, zone in self._zones_gdf.iterrows():
-            lines.append(
-                f"  {zone['zone_id']}: "
-                f"{zone['area_km2']:.1f} km\u00b2, "
-                f"{zone['num_sites']} sites, "
-                f"avg CF {zone['avg_cf']:.3f}, "
-                f"avg MCDA {zone['avg_mcda']:.3f}, "
-                f"{zone['total_capacity_mw']:.1f} MW"
-            )
+            lines.append(tr(
+                "wizard_wind.zone_detail",
+                id=zone["zone_id"], area=zone["area_km2"], sites=zone["num_sites"],
+                cf=zone["avg_cf"], mcda=zone["avg_mcda"],
+                capacity=zone["total_capacity_mw"],
+            ))
         self._zones_info.setText("\n".join(lines))
 
         self._btn_export_zones.setEnabled(True)
@@ -1190,17 +1166,16 @@ class WindResultsStep(QWidget):
                 )
                 added += 1
             except Exception as exc:
-                self._zones_info.append(f"Error adding {zone_id}: {exc}")
+                self._zones_info.append(
+                    tr("wizard_wind.zone_add_error", zone=zone_id, e=exc))
 
         # Clear temporary overlay since real zones are now in the model
         self._map_widget.clear_wind_dev_zones()
 
         if added > 0:
-            self._zones_info.append(
-                f"\n{added} wind development zone(s) added to the system."
-            )
+            self._zones_info.append(tr("wizard_wind.zones_added", n=added))
             self._btn_gen_zones.setEnabled(False)
-            self._btn_gen_zones.setText(f"{added} zone(s) added")
+            self._btn_gen_zones.setText(tr("wizard_wind.zones_added_short", n=added))
 
     def _export_csv(self):
         if self._summary is None or self._summary.results_gdf is None:
@@ -1209,13 +1184,14 @@ class WindResultsStep(QWidget):
             self,
             tr("wizard_wind.export_wind_title"),
             "wind_results.csv",
-            "CSV Files (*.csv)",
+            tr("wizard_wind.csv_files_filter"),
         )
         if path:
             df = self._summary.results_gdf.drop(columns=["geometry"]).copy()
             df.to_csv(path, index=False)
             QMessageBox.information(
-                self, "Exported", f"Results exported to:\n{path}"
+                self, tr("wizard_wind.export_title"),
+                tr("wizard_wind.export_msg", path=path),
             )
 
     def _export_zones_geojson(self):
@@ -1225,12 +1201,13 @@ class WindResultsStep(QWidget):
             self,
             tr("wizard_wind.export_dev_zones_title"),
             "wind_dev_zones.geojson",
-            "GeoJSON Files (*.geojson)",
+            tr("wizard_wind.geojson_files_filter"),
         )
         if path:
             self._zones_gdf.to_file(path, driver="GeoJSON")
             QMessageBox.information(
-                self, "Exported", f"Development zones exported to:\n{path}"
+                self, tr("wizard_wind.export_title"),
+                tr("wizard_wind.export_zones_msg", path=path),
             )
 
     def is_valid(self) -> bool:

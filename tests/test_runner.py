@@ -56,7 +56,6 @@ def _make_generator(name, gen_type, fuel, rated_power, **overrides):
         fixed_cost=[5.0] * n,
         maintenance_cost=[10.0] * n,
         invest_cost=[1e6] * n,
-        invest_max_power=[200.0] * n,
     )
     defaults.update(overrides)
     return GeneratorConfig(**defaults)
@@ -273,6 +272,14 @@ class TestOrchestratorInit:
         orch = Orchestrator(cfg, output_dir=tmp_path, config_path=cp)
         assert orch.config_path == cp
 
+    def test_config_path_as_str(self, tmp_path):
+        """A str config_path works like a Path (it used to raise
+        AttributeError on ``config_path.parent``)."""
+        cfg = _make_esfex_config()
+        cp = tmp_path / "my_config.yaml"
+        orch = Orchestrator(cfg, output_dir=str(tmp_path), config_path=str(cp))
+        assert orch.config_path == cp
+
     def test_simulation_mode_logged(self, tmp_path, caplog):
         cfg = _make_esfex_config()
         with caplog.at_level(logging.DEBUG, logger="esfex.runner"):
@@ -304,6 +311,7 @@ class TestOrchestratorInit:
         cfg = _make_esfex_config()
         with patch("esfex.plugins.get_plugin_manager") as mock_get_pm:
             mock_pm = MagicMock()
+            mock_pm.apply_config.return_value = []  # no invalid plugin sections
             mock_get_pm.return_value = mock_pm
             _ = Orchestrator(cfg, output_dir=tmp_path)
             mock_pm.load_all.assert_called_once()
@@ -315,6 +323,7 @@ class TestOrchestratorInit:
         cfg = _make_esfex_config()
         with patch("esfex.plugins.get_plugin_manager") as mock_get_pm:
             mock_pm = MagicMock()
+            mock_pm.apply_config.return_value = []  # no invalid plugin sections
             mock_get_pm.return_value = mock_pm
             _ = Orchestrator(cfg, output_dir=tmp_path)
             mock_pm.register_julia_modules.assert_called_once()
@@ -460,100 +469,14 @@ class TestCalculateInitialREPenetration:
         expected = 438000 / 1752000
         assert abs(result - expected) < 0.01
 
-    def test_no_availability_cache_skips(self, tmp_path):
-        """When no availability file in cache, renewable is skipped."""
+    def test_no_availability_profile_counts_full_capacity(self, tmp_path):
+        """A renewable without a profile runs at capacity factor 1.0 in the
+        dispatch, so it counts at full capacity here too (it used to count 0)."""
         gens = {"solar": _make_generator("Solar", "Renewable", "Sun", [50.0, 80.0])}
         orch = self._make_orch_with_cache(tmp_path, gens, {})
         demand = np.full((100, 2), 100.0)
         result = orch._calculate_initial_re_penetration(demand)
-        assert result == 0.0
-
-
-# ---------------------------------------------------------------------------
-# Tests: _apply_retirements_to_config
-# ---------------------------------------------------------------------------
-
-class TestApplyRetirementsToConfig:
-    def _make_units_config(self):
-        return {
-            "gas": {
-                "_type": "generator",
-                "name": "Gas",
-                "type": "Non-renewable",
-                "rated_power": [100.0, 50.0],
-            },
-            "solar": {
-                "_type": "generator",
-                "name": "Solar",
-                "type": "Renewable",
-                "rated_power": [50.0, 80.0],
-            },
-            "li_ion": {
-                "_type": "battery",
-                "type": "Storage",
-                "name": "Li-ion",
-                "MaxChargePower": [25.0, 40.0],
-            },
-        }
-
-    def test_empty_retirements_returns_same(self, tmp_path):
-        orch = _create_orchestrator(tmp_path=tmp_path)
-        units = self._make_units_config()
-        result = orch._apply_retirements_to_config(units, {})
-        assert result is units
-
-    def test_full_retirement(self, tmp_path):
-        """Retiring 100% of a generator sets rated_power to 0."""
-        orch = _create_orchestrator(tmp_path=tmp_path)
-        units = self._make_units_config()
-        retirements = {"gen_0": 1.0}
-        result = orch._apply_retirements_to_config(units, retirements)
-        assert result["gas"]["rated_power"][0] == 0.0
-        assert result["gas"]["rated_power"][1] == 0.0
-
-    def test_partial_retirement(self, tmp_path):
-        orch = _create_orchestrator(tmp_path=tmp_path)
-        units = self._make_units_config()
-        retirements = {"gen_0": 0.5}
-        result = orch._apply_retirements_to_config(units, retirements)
-        assert abs(result["gas"]["rated_power"][0] - 50.0) < 0.01
-        assert abs(result["gas"]["rated_power"][1] - 25.0) < 0.01
-
-    def test_zero_retirement_ignored(self, tmp_path):
-        orch = _create_orchestrator(tmp_path=tmp_path)
-        units = self._make_units_config()
-        retirements = {"gen_0": 0.0}
-        result = orch._apply_retirements_to_config(units, retirements)
-        assert result["gas"]["rated_power"][0] == 100.0
-
-    def test_does_not_mutate_original(self, tmp_path):
-        orch = _create_orchestrator(tmp_path=tmp_path)
-        units = self._make_units_config()
-        _ = orch._apply_retirements_to_config(units, {"gen_0": 1.0})
-        assert units["gas"]["rated_power"][0] == 100.0
-
-    def test_retirement_second_generator(self, tmp_path):
-        orch = _create_orchestrator(tmp_path=tmp_path)
-        units = self._make_units_config()
-        retirements = {"gen_1": 0.3}
-        result = orch._apply_retirements_to_config(units, retirements)
-        assert abs(result["solar"]["rated_power"][0] - 50.0 * 0.7) < 0.01
-        assert abs(result["solar"]["rated_power"][1] - 80.0 * 0.7) < 0.01
-
-    def test_capacity_never_negative(self, tmp_path):
-        orch = _create_orchestrator(tmp_path=tmp_path)
-        units = self._make_units_config()
-        retirements = {"gen_0": 2.0}  # > 100%
-        result = orch._apply_retirements_to_config(units, retirements)
-        assert result["gas"]["rated_power"][0] >= 0.0
-        assert result["gas"]["rated_power"][1] >= 0.0
-
-    def test_batteries_not_affected_by_gen_retirement(self, tmp_path):
-        orch = _create_orchestrator(tmp_path=tmp_path)
-        units = self._make_units_config()
-        retirements = {"gen_0": 1.0}
-        result = orch._apply_retirements_to_config(units, retirements)
-        assert result["li_ion"]["MaxChargePower"] == [25.0, 40.0]
+        assert result == pytest.approx((50.0 + 80.0) / 200.0)
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +505,150 @@ class TestBuildEvConfig:
         orch._ev_charging_profiles = None
         result = orch._build_ev_config(year_idx=0, window_start_hour=0, window_hours=24)
         assert result is None
+
+    def test_driving_consumption_keeps_profile_units(self, tmp_path):
+        """generate_ev_profiles returns MW; the driving consumption handed to
+        Julia (MWh per hour) must be that same number, not 1/1000 of it."""
+        import pandas as pd
+
+        from esfex.config.schema import EVCategoryConfig
+        orch = self._make_orch_with_ev(tmp_path)
+        orch.primary_system.ev_categories = {"car": EVCategoryConfig(
+            battery_capacity=60.0, charging_power=7.0, v2g_power=7.0,
+            v2g_participation=0.2, efficiency_charge=0.9,
+            efficiency_discharge=0.9, min_soc=0.2)}
+        orch.primary_system.ev_quantity = {"car": [1000, 0]}
+        mw = [2.5] * 24
+        orch._ev_charging_profiles = pd.DataFrame(
+            {"Node_1_car": mw, "Node_2_car": [0.0] * 24})
+        orch._v2g_availability_profiles = None
+        result = orch._build_ev_config(year_idx=0, window_start_hour=0, window_hours=24)
+        assert result["driving_consumption_profile"][:, 0].tolist() == mw
+
+    def test_profiles_are_averaged_to_the_time_step(self, tmp_path):
+        """Julia reads the EV profiles by time step; at 6 h steps a 24 h
+        window has 4 rows (the mean of each 6 h), not the first 4 hours."""
+        import pandas as pd
+
+        from esfex.config.schema import EVCategoryConfig
+        orch = self._make_orch_with_ev(tmp_path)
+        orch.primary_system.ev_categories = {"car": EVCategoryConfig(
+            battery_capacity=60.0, charging_power=7.0, v2g_power=7.0,
+            v2g_participation=0.2, efficiency_charge=0.9,
+            efficiency_discharge=0.9, min_soc=0.2)}
+        orch.primary_system.ev_quantity = {"car": [1000, 0]}
+        mw = [float(h) for h in range(24)]
+        orch._ev_charging_profiles = pd.DataFrame(
+            {"Node_1_car": mw, "Node_2_car": [0.0] * 24})
+        orch._v2g_availability_profiles = None
+        result = orch._build_ev_config(year_idx=0, window_start_hour=0, window_hours=24,
+                                       resolution_hours=6)
+        assert result["driving_consumption_profile"][:, 0].tolist() == [2.5, 8.5, 14.5, 20.5]
+        assert result["availability_profile"].shape == (4, 2)
+
+    def test_initial_soc_comes_from_ev_initial_soc(self, tmp_path):
+        """EV_initial_soc (fraction per node) was ignored: every window started
+        at 80 %. Nodes without a value keep 80 %."""
+        import pandas as pd
+
+        from esfex.config.schema import EVCategoryConfig
+        orch = self._make_orch_with_ev(tmp_path)
+        orch.primary_system.ev_categories = {"car": EVCategoryConfig(
+            battery_capacity=60.0, charging_power=7.0, v2g_power=7.0,
+            v2g_participation=0.2, efficiency_charge=0.9,
+            efficiency_discharge=0.9, min_soc=0.2)}
+        orch.primary_system.ev_quantity = {"car": [1000, 0]}
+        orch.primary_system.ev_initial_soc = [0.5]
+        orch._ev_charging_profiles = pd.DataFrame({"Node_1_car": [1.0] * 24, "Node_2_car": [0.0] * 24})
+        orch._v2g_availability_profiles = None
+        result = orch._build_ev_config(year_idx=0, window_start_hour=0, window_hours=24)
+        assert result["initial_soc_fraction"] == [0.5, 0.8]
+
+    def test_warns_once_when_ev_loss_below_loss_of_load(self, tmp_path, caplog):
+        import pandas as pd
+
+        from esfex.config.schema import EVCategoryConfig
+        orch = self._make_orch_with_ev(tmp_path)
+        orch.primary_system.ev_categories = {"car": EVCategoryConfig(
+            battery_capacity=60.0, charging_power=7.0, v2g_power=7.0,
+            v2g_participation=0.2, efficiency_charge=0.9,
+            efficiency_discharge=0.9, min_soc=0.2)}
+        orch.primary_system.ev_quantity = {"car": [1000, 0]}
+        orch._ev_charging_profiles = pd.DataFrame(
+            {"Node_1_car": [1.0] * 24, "Node_2_car": [0.0] * 24})
+        orch._v2g_availability_profiles = None
+
+        with caplog.at_level(logging.WARNING, logger="esfex.runner"):
+            result = orch._build_ev_config(0, 0, 24)
+        assert result["loss_penalty"] == orch.primary_system.penalties.loss_of_load
+        assert "below loss_of_load" not in caplog.text
+
+        orch.primary_system.penalties.ev_loss = 10.0
+        with caplog.at_level(logging.WARNING, logger="esfex.runner"):
+            orch._build_ev_config(0, 0, 24)
+            orch._build_ev_config(0, 24, 24)
+        assert caplog.text.count("below loss_of_load") == 1
+
+    def _two_category_orch(self, tmp_path):
+        import pandas as pd
+
+        from esfex.config.schema import EVCategoryConfig
+        orch = self._make_orch_with_ev(tmp_path)
+        cat = dict(v2g_participation=0.2, efficiency_charge=0.9,
+                   efficiency_discharge=0.9, min_soc=0.2)
+        orch.primary_system.ev_categories = {
+            "car": EVCategoryConfig(battery_capacity=60.0, charging_power=7.0,
+                                    v2g_power=7.0, **cat),
+            "bus": EVCategoryConfig(battery_capacity=300.0, charging_power=150.0,
+                                    v2g_power=100.0, **cat),
+        }
+        orch.primary_system.ev_quantity = {"car": [1000, 0], "bus": [10, 0]}
+        orch._ev_years = (2025, 2050)
+        hours = 2 * HOURS_STD_YEAR
+        orch._ev_charging_profiles = pd.DataFrame(
+            {c: np.full(hours, 1.0) for c in
+             ("Node_1_car", "Node_2_car", "Node_1_bus", "Node_2_bus")})
+        orch._v2g_availability_profiles = pd.DataFrame(
+            {"Node_1_car": np.full(hours, 3.0), "Node_2_car": np.zeros(hours),
+             "Node_1_bus": np.full(hours, 0.5), "Node_2_bus": np.zeros(hours)})
+        return orch
+
+    def test_fleet_follows_s_curve(self, tmp_path):
+        """Fleet limits must grow with the same S-curve as the consumption
+        profiles, not stay at the base-year quantities."""
+        from esfex.models.ev import fleet_growth_factor
+        orch = self._two_category_orch(tmp_path)
+        cats = orch.primary_system.ev_categories
+        r1 = orch._build_ev_config(year_idx=1, window_start_hour=0, window_hours=24)
+        expected = (1000 * fleet_growth_factor(cats["car"].model_dump(), 2026, 2025, 2050)
+                    + 10 * fleet_growth_factor(cats["bus"].model_dump(), 2026, 2025, 2050))
+        assert r1["num_vehicles"][0] == pytest.approx(expected)
+        assert r1["num_vehicles"][1] == 0.0
+
+    def test_v2g_availability_reproduces_profile_mw(self, tmp_path):
+        """Julia caps V2G at P_kW·N/1000·availability; that product must equal
+        the available V2G power of the profiles (MW), with availability <= 1
+        when the fleet is not fully offered."""
+        orch = self._two_category_orch(tmp_path)
+        r = orch._build_ev_config(year_idx=0, window_start_hour=0, window_hours=24)
+        cap = (r["max_discharge_power_kw"] * r["num_vehicles"][0] / 1000.0
+               * r["availability_profile"][:, 0])
+        assert cap == pytest.approx(np.full(24, 3.5))
+        assert np.all(r["availability_profile"][:, 0] <= 1.0)
+        assert np.all(r["availability_profile"][:, 1] == 0.0)
+
+    def test_fleet_parameters_are_weighted(self, tmp_path):
+        """Total battery energy and charge power of the mixed fleet are kept
+        (previously the first category's parameters stood in for all)."""
+        orch = self._two_category_orch(tmp_path)
+        r = orch._build_ev_config(year_idx=0, window_start_hour=0, window_hours=24)
+        cats = orch.primary_system.ev_categories
+        from esfex.models.ev import fleet_growth_factor
+        n_car = 1000 * fleet_growth_factor(cats["car"].model_dump(), 2025, 2025, 2050)
+        n_bus = 10 * fleet_growth_factor(cats["bus"].model_dump(), 2025, 2025, 2050)
+        n = r["num_vehicles"][0]
+        assert r["battery_capacity_kwh"] * n == pytest.approx(60 * n_car + 300 * n_bus)
+        assert r["max_charge_power_kw"] * n == pytest.approx(7 * n_car + 150 * n_bus)
 
 
 # ---------------------------------------------------------------------------
@@ -685,9 +752,240 @@ class TestOperationalDispatchAllWindowsFail:
                 )
 
 
+class TestWindowBoundaryState:
+    """The next rolling-horizon window starts after the committed steps, so
+    the state it inherits must be taken there, not at the end of the
+    look-ahead (overlap) tail."""
+
+    def test_state_taken_at_end_of_committed_steps(self, tmp_path):
+        orch = _create_orchestrator(tmp_path=tmp_path)
+        orch._availability_cache = {}
+        orch.state = SimulationState(year=2025, base_year=2025, units_config={})
+        orch._inflow_cache = {}
+        orch._gen_names, orch._bat_names = [], []
+        hours, keep = 6, 4
+        soc = np.arange(hours + 1, dtype=float).reshape(1, 1, -1)   # level at step starts
+        gen = np.arange(hours, dtype=float).reshape(1, 1, -1) * 10.0
+        ps = MagicMock()
+        ps.solve.return_value = 1
+        ps.get_solution_values.return_value = {
+            "bat_soc": soc, "gen_output": gen, "gen_status": np.ones((1, 1, hours)),
+            "reservoir_level": soc * 2.0, "objective": 0.0, "status": "OPTIMAL",
+        }
+        with patch("esfex.runner.PowerSystemAdapter", return_value=ps):
+            res = orch._solve_window(
+                year=2025, window=0, demand=np.ones((hours, 2)), hours=hours,
+                num_nodes=2, boundary_conditions={}, keep_hours=keep,
+            )
+        bc = res["boundary_conditions"]
+        assert bc["battery_soc"].tolist() == [[4.0]]       # start of step 5 = end of step 4
+        assert bc["reservoir_level"].tolist() == [[8.0]]
+        assert bc["gen_output_prev"].tolist() == [[30.0]]  # output of step 4
+        # Without keep_hours (single / last window) the end of the window is used.
+        with patch("esfex.runner.PowerSystemAdapter", return_value=ps):
+            res = orch._solve_window(
+                year=2025, window=0, demand=np.ones((hours, 2)), hours=hours,
+                num_nodes=2, boundary_conditions={},
+            )
+        assert res["boundary_conditions"]["battery_soc"].tolist() == [[6.0]]
+
+
+class TestYearEndSocFloor:
+    """The year's last window gets a floor at the year-start battery SOC, so
+    the battery cannot end the year emptier than it started (the next year
+    restarts from soc_initial)."""
+
+    def _run(self, tmp_path, use_rolling):
+        orch = _create_orchestrator(tmp_path=tmp_path)
+        orch.config.temporal.use_rolling_horizon = use_rolling
+        orch.state = SimulationState(year=2025, base_year=2025, units_config={})
+        orch._sectoral_demand = {}
+        orch._total_hours = 96
+        orch._rooftop_generation = None
+        orch._ev_charging_profiles = None
+        orch._progress = None
+        orch._bus_to_node = None
+        calls = []
+
+        def fake_solve(**kw):
+            calls.append(kw["boundary_conditions"])
+            soc = np.full((1, 1, kw["hours"] + 1), 7.0 + len(calls))
+            return {"bat_soc": soc, "boundary_conditions": {"battery_soc": soc[..., -1]},
+                    "objective": 0.0}
+
+        with patch.object(orch, "_solve_window", side_effect=fake_solve), \
+                patch.object(orch, "_compute_derived_metrics"):
+            orch._run_operational_dispatch(
+                year=2025, year_idx=0, num_years=1,
+                demand=np.ones((2, 96)), hours=96, num_nodes=2,
+            )
+        return calls
+
+    def test_only_last_window_gets_year_start_floor(self, tmp_path):
+        calls = self._run(tmp_path, use_rolling=True)
+        assert len(calls) == 3
+        assert all("battery_soc_end_min" not in c for c in calls[:-1])
+        assert calls[-1]["battery_soc_end_min"].tolist() == [[8.0]]  # window 1's start SOC
+        assert not any(c.get("battery_soc_end_cyclic") for c in calls)
+
+    def test_single_window_year_is_cyclic(self, tmp_path):
+        calls = self._run(tmp_path, use_rolling=False)
+        assert len(calls) == 1
+        assert calls[0]["battery_soc_end_cyclic"] is True
+        assert "battery_soc_end_min" not in calls[0]
+
+
+class TestShortOverlapWarning:
+    """Storage dispatch is myopic when the look-ahead is shorter than a day."""
+
+    def _orch(self, tmp_path, batteries):
+        orch = _create_orchestrator(tmp_path=tmp_path)
+        orch.primary_system = MagicMock(
+            batteries=batteries, battery_technologies={}, generators={})
+        return orch
+
+    def test_warns_once_with_storage(self, tmp_path, caplog):
+        orch = self._orch(tmp_path, {"bess": MagicMock()})
+        with caplog.at_level(logging.WARNING, logger="esfex.runner"):
+            orch._warn_short_overlap(6)
+            orch._warn_short_overlap(6)
+        msgs = [r.message for r in caplog.records if "overlap is 6 h" in r.message]
+        assert len(msgs) == 1
+
+    def test_silent_without_storage(self, tmp_path, caplog):
+        orch = self._orch(tmp_path, {})
+        with caplog.at_level(logging.WARNING, logger="esfex.runner"):
+            orch._warn_short_overlap(6)
+        assert not any("overlap" in r.message for r in caplog.records)
+
+
+class TestPerfectForesightMasterDemand:
+    """The perfect-foresight master receives every year's demand already
+    (multi-year file or tiled first year, plus the EV S-curve). It must not
+    grow it again: the dispatch serves the file values unchanged."""
+
+    def test_master_gets_no_extra_growth(self, tmp_path):
+        orch = _create_orchestrator(tmp_path=tmp_path)
+        orch._availability_cache = {}
+        captured = {}
+
+        def fake_adapter(**kwargs):
+            captured.update(kwargs)
+            raise RuntimeError("stop after construction")
+
+        demand = np.ones((2 * HOURS_STD_YEAR, 2)) * 10.0
+        with patch("esfex.runner.MasterProblemAdapter", side_effect=fake_adapter):
+            orch._solve_master_problem(
+                years_range=[2025, 2026], demand=demand[:HOURS_STD_YEAR],
+                hours=HOURS_STD_YEAR, num_nodes=2, total_demand=demand,
+            )
+        assert captured["demand_growth"] == 0.0
+        assert captured["demand"].shape[0] == 2 * HOURS_STD_YEAR
+
+
 # ---------------------------------------------------------------------------
 # Multi-system merge: bus_id namespacing (Grid Builder subsystems collide)
 # ---------------------------------------------------------------------------
+
+class TestMergeCarriesSystemSettings:
+    """Any config with more than one node goes through _merge_systems. Fields
+    it did not copy fell back to schema defaults, so converters, electrolyzers,
+    fuel sources, custom constraints, interruptions and the frequency/reserve
+    scalars silently vanished from every multi-node run."""
+
+    def _system(self, name):
+        from esfex.config.schema import (
+            ACDCConverterConfig,
+            BusConfig,
+            ConstraintTerm,
+            CustomConstraintConfig,
+            ElectrolyzerConfig,
+            OutageWindow,
+            PrimaryEnergySourceConfig,
+        )
+        sys = _make_system_config(num_nodes=2, name=name)
+        two = lambda v: [v, v]  # noqa: E731
+        return sys.model_copy(update={
+            "frequency_nominal": 60.0,
+            "reserve_margin": 1.3,
+            "buses": [BusConfig(bus_id="b0", parent_node=0),
+                      BusConfig(bus_id="b1", parent_node=1)],
+            "acdc_converters": [ACDCConverterConfig(
+                name="hvdc", from_node=0, to_node=1, from_bus=0, to_bus=1)],
+            "electrolyzers": {"pem": ElectrolyzerConfig(
+                name="PEM", life_time=two(20), rated_power=[5.0, 0.0],
+                ramp_up=two(1.0), ramp_down=two(1.0),
+                eff_at_rated=two(0.7), eff_at_min=two(0.6), fixed_cost=two(0.0),
+                variable_cost=two(0.0), invest_cost=two(0.0),
+                invest_max_power=two(0.0))},
+            "primary_energy_sources": {"Gas": PrimaryEnergySourceConfig(
+                name="Gas", unit="MWh", max_availability=[100.0, 200.0],
+                import_cost=two(30.0), storage_capacity=two(0.0),
+                initial_storage_level=two(0.5),
+                transport_cost=0.0, transport_losses=0.0)},
+            "fuel_transport_distances": [[0.0, 40.0], [40.0, 0.0]],
+            "custom_constraints": [CustomConstraintConfig(
+                name="cap", sense="<=", rhs=10.0, terms=[
+                    ConstraintTerm(variable="gen_output", index=["gas", "all"]),
+                    ConstraintTerm(variable="load_shed", index=[2, "all"]),
+                ])],
+            "outage_schedule": [
+                OutageWindow(element_type="generator", element_id="gas",
+                             start_hour=0, end_hour=24),
+                OutageWindow(element_type="line", element_id="l0",
+                             start_hour=0, end_hour=24),
+            ],
+        })
+
+    def test_single_multi_node_system_keeps_settings(self):
+        cfg = _make_esfex_config(self._system("Solo"))
+        master, op, _ = Orchestrator._merge_systems(cfg)
+        for merged in (master, op):
+            assert merged.frequency_nominal == 60.0
+            assert merged.reserve_margin == 1.3
+            assert [c.name for c in merged.acdc_converters] == ["hvdc"]
+            assert list(merged.electrolyzers) == ["Solo__pem"]
+            assert merged.primary_energy_sources["Gas"].max_availability == [100.0, 200.0]
+            assert merged.fuel_transport_distances == [[0.0, 40.0], [40.0, 0.0]]
+        # Names follow the merged generator keys so the resolver finds them.
+        terms = op.custom_constraints[0].terms
+        assert terms[0].index == ["Solo__gas", "all"]
+        assert "Solo__gas" in op.generators
+        assert terms[1].index == [2, "all"]
+        outages = {o.element_type: o.element_id for o in op.outage_schedule}
+        assert outages == {"generator": "Solo__gas", "line": "l0"}
+
+    def test_two_systems_shift_indices(self):
+        cfg = ESFEXConfig(
+            meta_network=MetaNetworkConfig(systems=["A", "B"]),
+            systems={"A": self._system("A"), "B": self._system("B")},
+        )
+        _, op, offsets = Orchestrator._merge_systems(cfg)
+        assert offsets == {"A": 0, "B": 2}
+        b_conv = op.acdc_converters[1]
+        assert (b_conv.from_node, b_conv.to_node) == (2, 3)
+        assert (b_conv.from_bus, b_conv.to_bus) == (2, 3)
+        assert op.electrolyzers["B__pem"].rated_power == [0.0, 0.0, 5.0, 0.0]
+        assert op.primary_energy_sources["Gas"].max_availability == [100.0, 200.0, 100.0, 200.0]
+        assert op.fuel_transport_distances[2][3] == 40.0
+        assert op.fuel_transport_distances[0][2] == 0.0
+        b_cc = op.custom_constraints[1]
+        assert b_cc.name == "B__cap"
+        assert b_cc.terms[0].index == ["B__gas", "all"]
+        assert b_cc.terms[1].index == [4, "all"]  # bus 2 of B → global bus 4
+
+    def test_zones_on_multi_node_are_kept(self):
+        from esfex.config.schema import DevelopmentZoneConfig, GeoCoordinate
+        zone = DevelopmentZoneConfig(name="z", technology="Solar", polygon=[
+            GeoCoordinate(latitude=0.0, longitude=0.0),
+            GeoCoordinate(latitude=0.0, longitude=1.0),
+            GeoCoordinate(latitude=1.0, longitude=0.0)])
+        sys = _make_system_config(num_nodes=2, name="Z").model_copy(
+            update={"development_zones": [zone]})
+        master, operational, _ = Orchestrator._merge_systems(_make_esfex_config(sys))
+        assert [z.name for z in master.development_zones] == ["z"]
+        assert [z.name for z in operational.development_zones] == ["z"]
+
 
 class TestMergeBusIdNamespacing:
     """Subsystems built independently by the Grid Builder share a bus_id
@@ -740,3 +1038,81 @@ class TestMergeBusIdNamespacing:
         _, operational, _ = Orchestrator._merge_systems(cfg)
         ids = [b.bus_id for b in operational.buses]
         assert "bus_5" in ids and "Solo__bus_5" not in ids
+
+
+# Fuel infrastructure is built by the master and handed to each year's
+# dispatch: tests/test_master_fuel.py (#89).
+
+
+# ---------------------------------------------------------------------------
+# Tests: the master plans with the EV charging demand
+# ---------------------------------------------------------------------------
+
+def test_master_demand_includes_ev_charging(tmp_path, monkeypatch):
+    """With EV optimization the dispatch serves EV charging itself, so the
+    demand array leaves it out; the master, which has no EV model, planned
+    without it."""
+    import pandas as pd
+
+    from esfex.config.schema import EVCategoryConfig, TemporalConfig
+    from esfex.runner import Orchestrator
+
+    demand = tmp_path / "demand.csv"
+    np.savetxt(demand, np.full(8760, 50.0))
+    sysc = _make_system_config(num_nodes=1).model_copy(update={
+        "demand_path": str(demand),
+        "ev_categories": {"car": EVCategoryConfig(
+            battery_capacity=60.0, charging_power=7.0, v2g_power=7.0,
+            v2g_participation=0.2, efficiency_charge=0.9,
+            efficiency_discharge=0.9, min_soc=0.2)},
+        "ev_quantity": {"car": [1000]}})
+    cfg = _make_esfex_config(sysc, simulation_mode="development",
+                             temporal=TemporalConfig(resolution_hours=1))
+    orch = Orchestrator(cfg, output_dir=tmp_path / "out")
+
+    def fake_ev(self, num_nodes, total_hours, **kw):
+        return (np.full((total_hours, num_nodes), 10.0),
+                pd.DataFrame({"Node_1_car": np.full(total_hours, 10.0)}), pd.DataFrame())
+
+    class Captured(Exception):
+        pass
+
+    seen = {}
+
+    def fake_master(self, years_range, demand, hours, num_nodes, ev_demand=None, total_demand=None):
+        seen["demand"] = demand
+        seen["total"] = total_demand
+        raise Captured
+
+    monkeypatch.setattr(Orchestrator, "_generate_ev_demand", fake_ev)
+    monkeypatch.setattr(Orchestrator, "_solve_master_problem", fake_master)
+    with pytest.raises(Captured):
+        orch.run(years=1)
+    assert float(np.mean(seen["demand"])) == pytest.approx(60.0)
+    assert float(np.mean(seen["total"])) == pytest.approx(60.0)
+
+
+# ---------------------------------------------------------------------------
+# Tests: a failed master stops the run with an error (round 36)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("failed", [None, (None, None, None, None)])
+def test_master_failure_raises_run_aborted(tmp_path, monkeypatch, failed):
+    """The run used to return ``[]`` when the master found no plan, so
+    ``esfex run`` printed "Optimization completed successfully!" and exited 0."""
+    from esfex.config.schema import TemporalConfig
+    from esfex.runner import RunAbortedError
+
+    demand = tmp_path / "demand.csv"
+    np.savetxt(demand, np.full(8760, 50.0))
+    sysc = _make_system_config(num_nodes=1).model_copy(
+        update={"demand_path": str(demand)})
+    cfg = _make_esfex_config(sysc, simulation_mode="development",
+                             temporal=TemporalConfig(resolution_hours=1))
+    orch = Orchestrator(cfg, output_dir=tmp_path / "out")
+    monkeypatch.setattr(Orchestrator, "_solve_master_problem",
+                        lambda self, *a, **kw: failed)
+    with pytest.raises(RunAbortedError, match="master problem"):
+        orch.run(years=1)
+    with pytest.raises(RunAbortedError):
+        orch.run(years=1, master_only=True)

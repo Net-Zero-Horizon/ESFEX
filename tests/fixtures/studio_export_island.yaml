@@ -1,0 +1,557 @@
+simulation_mode: development
+unit_commitment_hours: 24
+date_start: 01/01/2025 00:00
+temporal:
+  resolution_hours: 1
+  rolling_horizon_hours: 48
+  overlap_hours: 6
+  investment_resolution: 8760
+  primary_energy_resolution: 24
+  use_rolling_horizon: true
+solver:
+  name: highs
+  threads: 4
+  time_limit: 10800
+  gap: 0.01
+  verbose: false
+  options: {}
+network_reduction:
+  enabled: false
+  kron_deg3: false
+n1_security:
+  enabled: false
+  apply_to_modes:
+  - development
+  - unit_commitment
+  transmission_enabled: true
+  transmission_reserve_factor: 0.7
+  critical_line_threshold: 0.0
+  generation_enabled: true
+  generation_reserve_type: largest_unit
+  generation_reserve_percentage: 0.15
+  scopf_enabled: false
+  corrective_enabled: false
+  contingency_depth: n1
+  redistribution_mode: pro_rata
+  pi_screening_threshold: 0.0
+  transformer_contingencies: false
+  battery_contingencies: false
+master_problem:
+  stochastic: false
+  representative_days: 5
+  min_day_separation: 5
+  solver_method: monolithic
+  benders_max_iterations: 50
+  benders_tolerance: 0.0001
+  use_tsam: false
+  tsam_num_periods: 10
+  tsam_method: kmedoids
+  tsam_inter_period_linking: true
+  use_uc_in_dispatch: false
+  planning_mode: perfect_foresight
+  mga:
+    enabled: false
+    method: mga
+    objectives: []
+    num_alternatives: 10
+    slack_fraction: 0.05
+    investment_threshold: 0.1
+enable_primary_energy: true
+meta_network:
+  systems:
+  - island
+  systems_links: []
+systems:
+  island:
+    name: island
+    demand_scale: 1.0
+    life_extension_cost_factor: 0.2
+    SIM_ROOFTOP: false
+    TARGET_RE_PENETRATION: 1.0
+    MIN_ANNUAL_INCREMENT: 0.01
+    MAX_ANNUAL_INCREMENT: 0.1
+    MAX_ANNUAL_SYSTEM_COST: 20000000000.0
+    discount_rate: 0.05
+    base_lcoe: 93.0
+    INERTIA_LIMIT_THRESHOLD: 0.1
+    load_damping: 0.01
+    frequency_nominal: 50.0
+    rocof_limit: 2.0
+    frequency_nadir_limit: 49.0
+    soc_end_tolerance: 0.05
+    min_cycling_ratio: 0.8
+    min_cycling_period_days: 7.0
+    reserve_static_default_ratio: 0.15
+    demand_shift_cost_rate: 0.1
+    dynamic_reserve_contribution: 0.5
+    reserve_margin: 1.15
+    npv_annual_return_rate: 0.15
+    power_flow_mode: dcopf
+    dc_power_flow:
+      max_angle_diff_deg: 30.0
+      slack_bus: 0
+    ac_power_flow:
+      base_mva: 100.0
+      voltage_min_pu: 0.9
+      voltage_max_pu: 1.1
+      default_power_factor: 0.85
+      load_power_factor: 0.9
+      q_slack_penalty: 100.0
+      min_reactance_pu: 0.01
+      tap_ratio_min: 0.5
+      tap_ratio_max: 2.0
+      q_min_ratio: 0.5
+    nodes:
+      num_nodes: 2
+      nodes_connections:
+      - 0.0
+      - 80.0
+      - 80.0
+      - 0.0
+      reserve_static:
+      - 0.0
+      - 0.0
+      reserve_dynamic:
+      - 0.0
+      - 0.0
+      reserve_duration:
+      - 1
+      - 1
+      losses:
+      - 0.0
+      - 0.0
+      transference_invest_cost:
+      - 0.0
+      - 0.0
+      transference_invest_max:
+      - 0.0
+      - 0.0
+      node_coordinates:
+      - latitude: 21.5
+        longitude: -80.0
+        label: North
+      - latitude: 21.0
+        longitude: -80.0
+        label: South
+      node_names:
+      - North
+      - South
+    fuel_transport_distances:
+    - - 0.0
+      - 55.597463322279445
+    - - 55.597463322279445
+      - 0.0
+    fuel_transport_routes:
+    - route_id: auto_0_1
+      from_node: 0
+      to_node: 1
+      distance_km: 55.597463322279445
+      fuel_params: {}
+    - route_id: auto_1_0
+      from_node: 1
+      to_node: 0
+      distance_km: 55.597463322279445
+      fuel_params: {}
+    penalties:
+      LOSS_OF_LOAD: 50000.0
+      LOSS_OF_RESERVE_STATIC: 100.0
+      LOSS_OF_RESERVE_DYNAMIC: 100.0
+      LOSS_OF_INERTIA: 200.0
+      TransferMargin: 100.0
+      max_curtailment_ratio: 0.05
+      rooftop_curtailment: 5.0
+      CO2_cost: 10.0
+      CO2_budget_violation: 500.0
+      FRE_penetration_loss: 100.0
+      EV_loss: 10.0
+      loss_of_fuel_supply: 100.0
+      non_electric_demand_loss: 100.0
+      curtailment_cost: 20.0
+    co2_budget:
+      enabled: true
+      annual_budget: 1000000.0
+    criticality_penalties:
+      critical: 3.0
+      high: 2.0
+      medium: 1.0
+      low: 0.5
+    conversion_technologies: {}
+    non_electric_demand_growth: {}
+    seasonal_factors: {}
+    technologies: {}
+    custom_constraints: []
+    battery_technologies: {}
+    EV_initial_soc: []
+    rooftop_max_potential: []
+    rooftop_solar_emission_reduction: 0.7
+    stochastic_scenarios: []
+    map_center: null
+    map_zoom: 2
+    outage_schedule: []
+    _gui_layout:
+      generators:
+        solar_n0:
+        - 21.5
+        - -80.01
+        diesel_n1:
+        - 21.0
+        - -80.01
+      buses:
+        bus_0:
+        - 21.5
+        - -80.0
+        bus_1:
+        - 21.0
+        - -80.0
+    _technologies: null
+    _equipment_buses:
+      generators:
+        solar_n0: bus_0
+        diesel_n1: bus_1
+      batteries:
+        bess_n0: bus_0
+    generators:
+      solar:
+        name: Solar PV
+        type: Renewable
+        fuel: Sun
+        reservable: true
+        bus_id_per_node:
+          0: bus_0
+        frequency_hz: 50.0
+        current_type: AC
+        reservoir_spillage_allowed: true
+        life_time:
+        - 25
+        - 0
+        initial_age:
+        - 0
+        - 0
+        degradation_rate:
+        - 0.0
+        - 0.0
+        decommissioning_cost:
+        - 0.0
+        - 0.0
+        rated_power:
+        - 20.0
+        - 0.0
+        min_power:
+        - 0.0
+        - 0.0
+        min_up:
+        - 0
+        - 0
+        min_down:
+        - 0
+        - 0
+        ramp_up:
+        - 0.0
+        - 0.0
+        ramp_down:
+        - 0.0
+        - 0.0
+        eff_at_rated:
+        - 0.35
+        - 0.0
+        eff_at_min:
+        - 0.25
+        - 0.0
+        inertia:
+        - 0.0
+        - 0.0
+        risk_coefficient:
+        - 1.0
+        - 0.0
+        start_up_cost:
+        - 0.0
+        - 0.0
+        fuel_cost:
+        - 0.0
+        - 0.0
+        fixed_cost:
+        - 0.0
+        - 0.0
+        maintenance_cost:
+        - 0.0
+        - 0.0
+        droop:
+        - 0.05
+        - 0.0
+        governor_time_const:
+        - 5.0
+        - 0.0
+        reservoir_capacity:
+        - 0.0
+        - 0.0
+        reservoir_initial_level:
+        - 0.5
+        - 0.0
+        reservoir_min_level:
+        - 0.1
+        - 0.0
+        reservoir_max_level:
+        - 1.0
+        - 0.0
+        reservoir_turbine_efficiency:
+        - 0.9
+        - 0.0
+        reservoir_evaporation_rate:
+        - 0.0
+        - 0.0
+        reservoir_pump_capacity:
+        - 0.0
+        - 0.0
+        reservoir_pump_efficiency:
+        - 0.85
+        - 0.0
+        reservoir_invest_cost:
+        - 0.0
+        - 0.0
+        reservoir_invest_max:
+        - 0.0
+        - 0.0
+        reservoir_min_release:
+        - 0.0
+        - 0.0
+        reservoir_head_min_factor:
+        - 1.0
+        - 0.0
+        invest_cost:
+        - 0.0
+        - 0.0
+      diesel:
+        name: Diesel
+        type: Non-renewable
+        fuel: Diesel
+        reservable: true
+        bus_id_per_node:
+          1: bus_1
+        frequency_hz: 50.0
+        current_type: AC
+        reservoir_spillage_allowed: true
+        life_time:
+        - 0
+        - 25
+        initial_age:
+        - 0
+        - 0
+        degradation_rate:
+        - 0.0
+        - 0.0
+        decommissioning_cost:
+        - 0.0
+        - 0.0
+        rated_power:
+        - 0.0
+        - 60.0
+        min_power:
+        - 0.0
+        - 0.0
+        min_up:
+        - 0
+        - 0
+        min_down:
+        - 0
+        - 0
+        ramp_up:
+        - 0.0
+        - 0.0
+        ramp_down:
+        - 0.0
+        - 0.0
+        eff_at_rated:
+        - 0.0
+        - 0.35
+        eff_at_min:
+        - 0.0
+        - 0.25
+        inertia:
+        - 0.0
+        - 0.0
+        risk_coefficient:
+        - 0.0
+        - 1.0
+        start_up_cost:
+        - 0.0
+        - 0.0
+        fuel_cost:
+        - 0.0
+        - 0.0
+        fixed_cost:
+        - 0.0
+        - 0.0
+        maintenance_cost:
+        - 0.0
+        - 0.0
+        droop:
+        - 0.0
+        - 0.05
+        governor_time_const:
+        - 0.0
+        - 5.0
+        reservoir_capacity:
+        - 0.0
+        - 0.0
+        reservoir_initial_level:
+        - 0.0
+        - 0.5
+        reservoir_min_level:
+        - 0.0
+        - 0.1
+        reservoir_max_level:
+        - 0.0
+        - 1.0
+        reservoir_turbine_efficiency:
+        - 0.0
+        - 0.9
+        reservoir_evaporation_rate:
+        - 0.0
+        - 0.0
+        reservoir_pump_capacity:
+        - 0.0
+        - 0.0
+        reservoir_pump_efficiency:
+        - 0.0
+        - 0.85
+        reservoir_invest_cost:
+        - 0.0
+        - 0.0
+        reservoir_invest_max:
+        - 0.0
+        - 0.0
+        reservoir_min_release:
+        - 0.0
+        - 0.0
+        reservoir_head_min_factor:
+        - 0.0
+        - 1.0
+        invest_cost:
+        - 0.0
+        - 0.0
+    batteries:
+      bess:
+        name: BESS
+        type: Storage
+        fuel: None
+        reservable: true
+        spillage: true
+        bus_id_per_node:
+          0: bus_0
+        current_type: DC
+        life_time:
+        - 20
+        - 0
+        initial_age:
+        - 0
+        - 0
+        degradation_rate:
+        - 0.0
+        - 0.0
+        decommissioning_cost:
+        - 0.0
+        - 0.0
+        rated_power:
+        - 10.0
+        - 0.0
+        ramp_up:
+        - 1.0
+        - 0.0
+        ramp_down:
+        - 1.0
+        - 0.0
+        inertia:
+        - 0.0
+        - 0.0
+        risk_coefficient:
+        - 1.0
+        - 0.0
+        fixed_cost:
+        - 0.0
+        - 0.0
+        maintenance_cost:
+        - 0.0
+        - 0.0
+        efficiency_charge:
+        - 0.9
+        - 0.0
+        efficiency_discharge:
+        - 0.9
+        - 0.0
+        soc_initial:
+        - 0.5
+        - 0.0
+        max_DoD:
+        - 1.0
+        - 0.0
+        capacity:
+        - 40.0
+        - 0.0
+        MaxChargePower:
+        - 10.0
+        - 0.0
+        MaxDischargePower:
+        - 10.0
+        - 0.0
+        throughput_degradation_cost:
+        - 0.0
+        - 0.0
+        invest_cost:
+        - 0.0
+        - 0.0
+        invest_max_power:
+        - 0.0
+        - 0.0
+    transmission_lines_geo:
+    - line_id: l0
+      from_node: 0
+      to_node: 1
+      from_bus: 0
+      to_bus: 1
+      capacity_mw: 80.0
+      waypoints: []
+      from_endpoint_type: bus
+      from_endpoint_id: bus_0
+      to_endpoint_type: bus
+      to_endpoint_id: bus_1
+    buses:
+    - bus_id: bus_0
+      name: North 110
+      parent_node: 0
+      voltage_kv: 110.0
+      role: mixed
+      demand_fraction: 1.0
+    - bus_id: bus_1
+      name: South 110
+      parent_node: 1
+      voltage_kv: 110.0
+      role: mixed
+      demand_fraction: 1.0
+    target_re_penetration: 1.0
+    min_annual_increment: 0.01
+    max_annual_increment: 0.1
+    max_annual_system_cost: 20000000000.0
+    inertia_limit_threshold: 0.1
+    sim_rooftop: false
+plugins: {}
+risk:
+  enabled: false
+  risk_measure: expected
+  cvar_alpha: 0.95
+  cvar_lambda: 0.5
+  climate_scenarios: []
+  hazard_scenarios: []
+  combination_method: independent
+  voll:
+    residential: 5000.0
+    commercial: 25000.0
+    industrial: 15000.0
+    critical: 100000.0
+  demand_base_temperature: 24.0
+  demand_heating_coefficient: 0.5
+  demand_cooling_coefficient: 2.5
+  insurance_premium_rate: 0.0
+  monte_carlo_samples: 1000
+  monte_carlo_seed: 42
+logging:
+  console_level: basic

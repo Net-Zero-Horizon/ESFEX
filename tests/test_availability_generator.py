@@ -1,6 +1,6 @@
 """Tests for the availability_generator plugin.
 
-Covers solar CF, wind CF, generator orchestration, CLI, plugin structure,
+Covers generator orchestration, CLI, plugin structure,
 and translation keys.
 """
 
@@ -37,169 +37,6 @@ _TRANSLATIONS_DIR = (
 
 
 # ===================================================================
-# TestSolarCF
-# ===================================================================
-
-
-class TestSolarCF:
-    """Unit tests for solar_cf.compute_solar_hourly_cf helper functions."""
-
-    def test_constant_irradiance_cf(self):
-        """At STC (1000 W/m2, 25C), CF should equal ~1.0."""
-        from esfex.plugins.availability_generator.solar_cf import (
-            _irradiance_to_hourly_cf,
-        )
-
-        ghi = np.full(8760, 1000.0)
-        temp = np.full(8760, 25.0)
-        cf = _irradiance_to_hourly_cf(ghi, temp, 0.20, -0.40, 45.0)
-        # At STC: t_cell = 25 + (45-20)/800*1000 = 56.25
-        # temp_factor = 1 + (-0.40/100)*(56.25-25) = 1 - 0.125 = 0.875
-        # cf = 1.0 * 0.875 = 0.875
-        np.testing.assert_allclose(cf, 0.875, atol=0.01)
-
-    def test_temperature_derating(self):
-        """Higher temp should reduce CF via gamma_pmax."""
-        from esfex.plugins.availability_generator.solar_cf import (
-            _irradiance_to_hourly_cf,
-        )
-
-        ghi = np.full(100, 800.0)
-        temp_25 = np.full(100, 25.0)
-        temp_45 = np.full(100, 45.0)
-
-        cf_25 = _irradiance_to_hourly_cf(ghi, temp_25, 0.20, -0.40, 45.0)
-        cf_45 = _irradiance_to_hourly_cf(ghi, temp_45, 0.20, -0.40, 45.0)
-
-        assert cf_45.mean() < cf_25.mean()
-
-    def test_zero_irradiance_gives_zero(self):
-        """Night hours (GHI=0) must give CF=0."""
-        from esfex.plugins.availability_generator.solar_cf import (
-            _irradiance_to_hourly_cf,
-        )
-
-        ghi = np.zeros(24)
-        temp = np.full(24, 20.0)
-        cf = _irradiance_to_hourly_cf(ghi, temp, 0.20, -0.40, 45.0)
-        np.testing.assert_array_equal(cf, 0.0)
-
-    def test_output_shape_8760(self):
-        """normalize_to_8760 must always return exactly 8760 elements."""
-        from esfex.plugins.availability_generator.solar_cf import (
-            _normalize_to_8760,
-        )
-
-        assert len(_normalize_to_8760(np.zeros(8760))) == 8760
-        assert len(_normalize_to_8760(np.zeros(8784))) == 8760
-        assert len(_normalize_to_8760(np.zeros(9000))) == 8760
-        assert len(_normalize_to_8760(np.zeros(100))) == 8760
-
-    def test_leap_year_truncation(self):
-        """Leap year 8784 hours should drop Feb 29 (hours 1416-1439)."""
-        from esfex.plugins.availability_generator.solar_cf import (
-            _normalize_to_8760,
-        )
-
-        data = np.arange(8784, dtype=float)
-        result = _normalize_to_8760(data)
-        assert len(result) == 8760
-        # Hour 1416 (start of Feb 29) should be removed
-        assert result[1416] == 1440.0  # First hour of Mar 1
-
-    def test_values_clipped_0_1(self):
-        """All CF values must be in [0, 1]."""
-        from esfex.plugins.availability_generator.solar_cf import (
-            _irradiance_to_hourly_cf,
-        )
-
-        ghi = np.full(100, 1500.0)  # Very high
-        temp = np.full(100, 10.0)
-        cf = _irradiance_to_hourly_cf(ghi, temp, 0.20, -0.40, 45.0)
-        assert cf.min() >= 0.0
-        assert cf.max() <= 1.0
-
-
-# ===================================================================
-# TestWindCF
-# ===================================================================
-
-
-class TestWindCF:
-    """Unit tests for wind_cf capacity factor computation."""
-
-    def test_below_cutin_cf_zero(self):
-        """Wind speed below cut-in should give CF=0."""
-        from esfex.plugins.availability_generator.wind_cf import (
-            _wind_speed_to_hourly_cf,
-            _DEFAULT_WIND_SPEEDS,
-            _DEFAULT_POWER_CURVE_MW,
-            _DEFAULT_RATED_MW,
-        )
-
-        ws = np.full(100, 2.0)  # Below cut-in (~3 m/s)
-        cf = _wind_speed_to_hourly_cf(
-            ws, _DEFAULT_WIND_SPEEDS, _DEFAULT_POWER_CURVE_MW, _DEFAULT_RATED_MW,
-        )
-        np.testing.assert_allclose(cf, 0.0, atol=0.01)
-
-    def test_at_rated_speed_cf_one(self):
-        """At rated wind speed CF should be ~1.0."""
-        from esfex.plugins.availability_generator.wind_cf import (
-            _wind_speed_to_hourly_cf,
-            _DEFAULT_WIND_SPEEDS,
-            _DEFAULT_POWER_CURVE_MW,
-            _DEFAULT_RATED_MW,
-        )
-
-        ws = np.full(100, 13.0)  # At rated (3.0 MW)
-        cf = _wind_speed_to_hourly_cf(
-            ws, _DEFAULT_WIND_SPEEDS, _DEFAULT_POWER_CURVE_MW, _DEFAULT_RATED_MW,
-        )
-        np.testing.assert_allclose(cf, 1.0, atol=0.01)
-
-    def test_above_cutout_cf_zero(self):
-        """Wind speed above cut-out (25 m/s) should give CF=0."""
-        from esfex.plugins.availability_generator.wind_cf import (
-            _wind_speed_to_hourly_cf,
-            _DEFAULT_WIND_SPEEDS,
-            _DEFAULT_POWER_CURVE_MW,
-            _DEFAULT_RATED_MW,
-        )
-
-        ws = np.full(100, 30.0)
-        cf = _wind_speed_to_hourly_cf(
-            ws, _DEFAULT_WIND_SPEEDS, _DEFAULT_POWER_CURVE_MW, _DEFAULT_RATED_MW,
-        )
-        np.testing.assert_allclose(cf, 0.0, atol=0.01)
-
-    def test_power_curve_interpolation(self):
-        """Intermediate wind speeds should interpolate correctly."""
-        from esfex.plugins.availability_generator.wind_cf import (
-            _wind_speed_to_hourly_cf,
-            _DEFAULT_WIND_SPEEDS,
-            _DEFAULT_POWER_CURVE_MW,
-            _DEFAULT_RATED_MW,
-        )
-
-        ws = np.array([7.0])  # ~1.08 MW in default curve
-        cf = _wind_speed_to_hourly_cf(
-            ws, _DEFAULT_WIND_SPEEDS, _DEFAULT_POWER_CURVE_MW, _DEFAULT_RATED_MW,
-        )
-        expected_cf = 1.08 / 3.0
-        np.testing.assert_allclose(cf[0], expected_cf, atol=0.01)
-
-    def test_output_shape_8760(self):
-        """normalize_to_8760 for wind must also produce 8760 elements."""
-        from esfex.plugins.availability_generator.wind_cf import (
-            _normalize_to_8760,
-        )
-
-        assert len(_normalize_to_8760(np.zeros(8760))) == 8760
-        assert len(_normalize_to_8760(np.zeros(8784))) == 8760
-
-
-# ===================================================================
 # TestGenerator
 # ===================================================================
 
@@ -217,7 +54,6 @@ class TestGenerator:
             fuel=fuel,
             type=gen_type,
             rated_power=[100.0] * num_nodes,
-            invest_max_power=[0.0] * num_nodes,
         )
         nodes = SimpleNamespace(node_coordinates=coords)
         system = SimpleNamespace(
@@ -378,18 +214,31 @@ class TestCLI:
         assert "generate" in command_names
 
     def test_default_years_from_config(self):
-        """_default_years should extract year from temporal config."""
+        """_default_years takes the year of the top-level date_start."""
         from esfex.plugins.availability_generator.cli_commands import (
             _default_years,
         )
 
-        import datetime
+        cfg = SimpleNamespace(date_start="01/01/2021 00:00")
+        assert _default_years(cfg) == [2021]
 
-        cfg = SimpleNamespace(
-            temporal=SimpleNamespace(date_start=datetime.date(2021, 1, 1))
+    def test_default_years_from_real_config(self):
+        """A real ESFEXConfig has date_start at the top level (not under
+        temporal): its year is used, not the 2020 fallback."""
+        from esfex.config.schema import ESFEXConfig
+        from esfex.plugins.availability_generator.cli_commands import (
+            _default_years,
         )
-        years = _default_years(cfg)
-        assert years == [2021]
+
+        cfg = ESFEXConfig.model_construct(date_start="01/07/2031 00:00")
+        assert _default_years(cfg) == [2031]
+
+    def test_default_years_unreadable_date(self):
+        from esfex.plugins.availability_generator.cli_commands import (
+            _default_years,
+        )
+
+        assert _default_years(SimpleNamespace(date_start="2021")) == [2020]
 
     def test_default_years_fallback(self):
         """_default_years should return [2020] on missing temporal."""
@@ -500,7 +349,28 @@ class TestTranslations:
 
 class TestGridBuilderHookDedup:
     """The Grid Builder availability hook must query the weather backend once
-    per distinct location, not once per generator (the Japan-scale bottleneck)."""
+    per distinct location, not once per generator (the Japan-scale bottleneck).
+
+    With the default ``open_meteo`` source the per-cell download goes through
+    :mod:`open_meteo_weather` (quota-paced, disk-cached), so these tests stub
+    ``fetch_cell_weather`` / ``requests.get`` there and point the cache at a
+    temporary directory — they must never reach the network."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_weather_cache(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ESFEX_WEATHER_CACHE", str(tmp_path / "weather"))
+
+    @staticmethod
+    def _weather(wind_100m=9.0):
+        n = 8760
+        hours = np.arange(n)
+        ghi = np.clip(900 * np.sin(np.pi * ((hours % 24) - 6) / 12), 0, None)
+        return {
+            "shortwave_radiation": ghi.astype(np.float32),
+            "temperature_2m": np.full(n, 25.0, dtype=np.float32),
+            "wind_speed_10m": np.full(n, 6.0, dtype=np.float32),
+            "wind_speed_100m": np.full(n, wind_100m, dtype=np.float32),
+        }
 
     @staticmethod
     def _gen(lat, lng, fuel="Wind", rated=10.0):
@@ -523,14 +393,16 @@ class TestGridBuilderHookDedup:
         }
         state = SimpleNamespace(generators=gens)
 
+        from esfex.plugins.availability_generator import open_meteo_weather as om
+        pytest.importorskip("windrex")
         calls = {"n": 0}
 
-        def fake_wind(lat, lng, year, source, rated_power_mw=1.0):
+        def fake_fetch(lat, lng, year, limiter, cache_dir, stop):
             calls["n"] += 1
-            return np.full(8760, 0.4)
+            return self._weather()
 
         with tempfile.TemporaryDirectory() as tmp, \
-                patch("windrex.compute_wind_hourly_cf", fake_wind, create=True):
+                patch.object(om, "fetch_cell_weather", fake_fetch):
             written = gbh.generate_for_grid_build(
                 state, Path(tmp), use_weather_data=True)
 
@@ -548,11 +420,14 @@ class TestGridBuilderHookDedup:
         gens = {"w0": self._gen(35.0, 139.0)}
         state = SimpleNamespace(generators=gens)
 
+        from esfex.plugins.availability_generator import open_meteo_weather as om
+        pytest.importorskip("windrex")
+
         def boom(*a, **k):
             raise RuntimeError("network down")
 
         with tempfile.TemporaryDirectory() as tmp, \
-                patch("windrex.compute_wind_hourly_cf", boom, create=True):
+                patch.object(om, "fetch_cell_weather", boom):
             written = gbh.generate_for_grid_build(
                 state, Path(tmp), use_weather_data=True)
 
@@ -568,17 +443,29 @@ class TestGridBuilderHookDedup:
         gens = {"w0": self._gen(35.0, 139.0)}
         state = SimpleNamespace(generators=gens)
 
+        import requests
+        from esfex.plugins.availability_generator import open_meteo_weather as om
+        pytest.importorskip("windrex")
+        weather = self._weather(wind_100m=9.0)
         calls = {"n": 0}
 
-        def flaky(lat, lng, year, source, rated_power_mw=1.0):
+        class _Resp:
+            def __init__(self, status):
+                self.status_code = status
+                self.headers = {}
+
+            def json(self):
+                if self.status_code != 200:
+                    return {"error": True, "reason": "Internal error"}
+                return {"hourly": {k: v.tolist() for k, v in weather.items()}}
+
+        def flaky(*a, **k):
             calls["n"] += 1
-            if calls["n"] < 3:          # fail the first two attempts
-                raise RuntimeError("HTTP 429 Too Many Requests")
-            return np.full(8760, 0.45)
+            return _Resp(503 if calls["n"] < 3 else 200)  # two transient 5xx
 
         with tempfile.TemporaryDirectory() as tmp, \
-                patch("windrex.compute_wind_hourly_cf", flaky, create=True), \
-                patch.object(gbh.time, "sleep", lambda *_: None):  # no real wait
+                patch.object(requests, "get", flaky), \
+                patch.object(om.time, "sleep", lambda *_: None):  # no real wait
             written = gbh.generate_for_grid_build(
                 state, Path(tmp), use_weather_data=True)
 
@@ -586,7 +473,7 @@ class TestGridBuilderHookDedup:
             assert calls["n"] == 3
             assert "w0" in written
             data = np.loadtxt(written["w0"], delimiter=",")
-            assert np.allclose(data, 0.45)
+            assert np.allclose(data, om.wind_cf(weather), atol=1e-6)
 
     def test_env_override_caps_workers(self, monkeypatch):
         from esfex.plugins.availability_generator import grid_builder_hook as gbh

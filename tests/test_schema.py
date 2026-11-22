@@ -36,6 +36,7 @@ from esfex.config.schema import (
     StochasticScenarioConfig,
     SystemConfig,
     TemporalConfig,
+    canonical_unit_type,
     normalize_cost_curve,
 )
 
@@ -78,7 +79,6 @@ def _gen_1(name: str = "Solar", fuel: str = "Solar") -> dict:
         "fixed_cost": [5.0],
         "maintenance_cost": [2.0],
         "invest_cost": [800000],
-        "invest_max_power": [500.0],
     }
 
 
@@ -104,9 +104,7 @@ def _bat_1(name: str = "LiIon") -> dict:
         "fixed_cost": [3.0],
         "maintenance_cost": [1.0],
         "invest_cost": [300000],
-        "invest_cost_energy": [150000],
         "invest_max_power": [200.0],
-        "invest_max_capacity": [800.0],
         "efficiency_charge": [0.95],
         "efficiency_discharge": [0.95],
         "soc_initial": [0.5],
@@ -220,6 +218,10 @@ class TestPenaltiesConfig:
         assert p.loss_of_load == 5e6
         assert p.co2_cost == 50
         assert p.ev_loss == 20
+
+    def test_ev_loss_defaults_to_loss_of_load(self):
+        assert PenaltiesConfig().ev_loss == PenaltiesConfig().loss_of_load
+        assert PenaltiesConfig(loss_of_load=5e4).ev_loss == 5e4
 
 
 # ========================================================================
@@ -447,7 +449,7 @@ class TestGeneratorConfig:
             "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
             "rated_power", "min_power", "min_up", "min_down", "ramp_up", "ramp_down",
             "eff_at_rated", "eff_at_min", "inertia", "start_up_cost", "fuel_cost",
-            "fixed_cost", "maintenance_cost", "invest_cost", "invest_max_power",
+            "fixed_cost", "maintenance_cost", "invest_cost",
         ]:
             val = data[key][0]
             data[key] = [val, val]
@@ -484,10 +486,6 @@ class TestBatteryConfig:
         b = BatteryConfig(**_bat_1())
         assert b.soc_initial == [0.5]
 
-    def test_invest_cost_energy(self):
-        b = BatteryConfig(**_bat_1())
-        assert b.invest_cost_energy == [150000]
-
     def test_throughput_degradation_cost_default_none(self):
         b = BatteryConfig(**_bat_1())
         assert b.throughput_degradation_cost is None
@@ -504,6 +502,12 @@ class TestBatteryConfig:
         b = BatteryConfig(**data)
         assert b.availability_file == "bat_avail.csv"
 
+    def test_availability_field_name(self):
+        data = _bat_1()
+        data["availability_file"] = "bat_avail.csv"
+        b = BatteryConfig(**data)
+        assert b.availability_file == "bat_avail.csv"
+
 
 # ========================================================================
 # ElectrolyzerConfig
@@ -515,10 +519,7 @@ class TestElectrolyzerConfig:
         return {
             "name": "PEM_1",
             "life_time": [20],
-            "initial_age": [0],
-            "degradation_rate": [0.01],
             "rated_power": [10.0],
-            "min_power": [0.1],
             "ramp_up": [0.5],
             "ramp_down": [0.5],
             "eff_at_rated": [0.65],
@@ -534,29 +535,12 @@ class TestElectrolyzerConfig:
         assert e.name == "PEM_1"
         assert e.type == "Electrolyzer"
         assert e.fuel == "Hydrogen"
-        assert e.technology == "PEM"
 
-    def test_technology_pem(self):
-        e = ElectrolyzerConfig(**self._elec_1())
-        assert e.technology == "PEM"
-
-    def test_technology_alkaline(self):
-        data = self._elec_1()
-        data["technology"] = "Alkaline"
-        e = ElectrolyzerConfig(**data)
-        assert e.technology == "Alkaline"
-
-    def test_technology_soe(self):
-        data = self._elec_1()
-        data["technology"] = "SOE"
-        e = ElectrolyzerConfig(**data)
-        assert e.technology == "SOE"
-
-    def test_invalid_technology_raises(self):
-        data = self._elec_1()
-        data["technology"] = "HTSE"
-        with pytest.raises(ValidationError):
-            ElectrolyzerConfig(**data)
+    def test_removed_fields_are_not_fields(self):
+        # technology, min_power, initial_age and degradation_rate had no
+        # effect and were removed; an old file gets the unknown-key warning.
+        for f in ("technology", "min_power", "initial_age", "degradation_rate"):
+            assert f not in ElectrolyzerConfig.model_fields
 
     def test_defaults(self):
         e = ElectrolyzerConfig(**self._elec_1())
@@ -577,7 +561,6 @@ class TestSolverConfig:
         assert s.time_limit == 10800
         assert s.gap == 0.01
         assert s.verbose is False
-        assert s.scale_constraints is True
         assert s.options == {}
 
     @pytest.mark.parametrize("solver_name", [
@@ -638,7 +621,7 @@ class TestTemporalConfig:
         t = TemporalConfig()
         assert t.resolution_hours == 1
         assert t.rolling_horizon_hours == 48
-        assert t.overlap_hours == 6
+        assert t.overlap_hours == 24
         assert t.investment_resolution == 8760
         assert t.primary_energy_resolution == 24
         assert t.use_rolling_horizon is True
@@ -662,6 +645,18 @@ class TestTemporalConfig:
     def test_overlap_hours_negative_raises(self):
         with pytest.raises(ValidationError):
             TemporalConfig(overlap_hours=-1)
+
+    def test_explicit_overlap_not_below_window_raises(self):
+        with pytest.raises(ValidationError, match="overlap_hours"):
+            TemporalConfig(rolling_horizon_hours=24, overlap_hours=24)
+
+    def test_default_overlap_shrinks_for_short_window(self):
+        t = TemporalConfig(rolling_horizon_hours=24)
+        assert t.overlap_hours == 12
+
+    def test_overlap_not_checked_without_rolling_horizon(self):
+        t = TemporalConfig(rolling_horizon_hours=24, overlap_hours=24, use_rolling_horizon=False)
+        assert t.overlap_hours == 24
 
 
 # ========================================================================
@@ -973,6 +968,35 @@ class TestSystemConfig:
         assert sc.sim_rooftop is False
         assert sc.penalties.loss_of_load == 10e6
 
+    def test_demand_fractions_rescaled_per_node(self, caplog):
+        # Two load buses left at the default 1.0 would serve node 0 twice.
+        data = {
+            "name": "TwoNode", "nodes": _node_2(), "generators": {"gen_0": _gen_1()},
+            "buses": [
+                {"bus_id": "a", "parent_node": 0},
+                {"bus_id": "b", "parent_node": 0},
+                {"bus_id": "c", "parent_node": 1, "demand_fraction": 0.3},
+                {"bus_id": "d", "parent_node": 1, "demand_fraction": 0.7},
+                {"bus_id": "e", "parent_node": 1, "role": "connection", "demand_fraction": 0.0},
+            ],
+        }
+        with caplog.at_level("WARNING", logger="esfex.config.schema"):
+            sc = SystemConfig(**data)
+        assert [b.demand_fraction for b in sc.buses] == pytest.approx([0.5, 0.5, 0.3, 0.7, 0.0])
+        assert "node(s) [0] summed to 2" in caplog.text
+
+    def test_normalized_demand_fractions_untouched(self, caplog):
+        data = {
+            "name": "TwoNode", "nodes": _node_2(), "generators": {"gen_0": _gen_1()},
+            "buses": [{"bus_id": "a", "parent_node": 0, "demand_fraction": 0.25},
+                      {"bus_id": "b", "parent_node": 0, "demand_fraction": 0.75},
+                      {"bus_id": "c", "parent_node": 1}],
+        }
+        with caplog.at_level("WARNING", logger="esfex.config.schema"):
+            sc = SystemConfig(**data)
+        assert [b.demand_fraction for b in sc.buses] == [0.25, 0.75, 1.0]
+        assert "demand_fraction" not in caplog.text
+
     def test_two_nodes_two_generators(self):
         data = {
             "name": "TwoNode",
@@ -1076,13 +1100,11 @@ class TestSystemConfig:
         assert sc.num_buses == 1
 
     def test_alias_fields(self):
-        """SystemConfig aliases (e.g., LOSS_DEMAND_TRHESHOLD) should work."""
+        """SystemConfig aliases (e.g., SIM_ROOFTOP) should work."""
         data = _system_minimal()
-        data["LOSS_DEMAND_TRHESHOLD"] = 0.1
         data["SIM_ROOFTOP"] = True
         data["TARGET_RE_PENETRATION"] = 0.8
         sc = SystemConfig(**data)
-        assert sc.loss_demand_threshold == 0.1
         assert sc.sim_rooftop is True
         assert sc.target_re_penetration == 0.8
 
@@ -1396,7 +1418,7 @@ class TestGeneratorConfigReservoir:
             "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
             "rated_power", "min_power", "min_up", "min_down", "ramp_up", "ramp_down",
             "eff_at_rated", "eff_at_min", "inertia", "start_up_cost", "fuel_cost",
-            "fixed_cost", "maintenance_cost", "invest_cost", "invest_max_power",
+            "fixed_cost", "maintenance_cost", "invest_cost",
         ]:
             val = data[key][0]
             data[key] = [val, val]
@@ -1740,7 +1762,7 @@ class TestGeneratorConfigCostCurve:
             "min_up", "min_down", "ramp_up", "ramp_down",
             "eff_at_rated", "eff_at_min", "inertia", "start_up_cost",
             "fuel_cost", "fixed_cost", "maintenance_cost",
-            "invest_cost", "invest_max_power",
+            "invest_cost",
         ]:
             val = data[key][0]
             data[key] = [val, val]
@@ -1789,3 +1811,47 @@ class TestBatteryConfigCostCurve:
         assert b.discharge_cost_curve[0].curve_type == "stepwise"
         assert len(b.discharge_cost_curve[0].blocks) == 2
         assert b.discharge_cost_curve[0].blocks[0].price == 5.0
+
+
+class TestUnitTypeSpelling:
+    @pytest.mark.parametrize("label, expected", [
+        ("renewable", "Renewable"), (" Non-Renewable ", "Non-renewable"),
+        ("Renouvelable", "Renewable"), ("não renovável", "Non-renewable"),
+        ("storage", "Storage"), ("Thermal", "Thermal"),
+    ])
+    def test_canonical_unit_type(self, label, expected):
+        assert canonical_unit_type(label) == expected
+
+    def test_candidate_technology_accepts_lower_case_type(self):
+        import sys
+        sys.path.insert(0, "tests")
+        from test_zones import _make_technology
+
+        assert _make_technology("PV", "Solar", 1, tech_type="renewable").type == "Renewable"
+        assert _make_technology("CCGT", "Gas", 1, tech_type="Non renewable").type == "Non-renewable"
+
+
+class TestRooftopSolarConfigOptional:
+    def test_unused_fields_are_optional(self):
+        # systems_per_node, avg_system_size, initial_adoption, max_adoption
+        # and adoption_rates are not used by the runner; they used to be
+        # required, so a config with only the used fields was rejected.
+        from esfex.config.schema import RooftopSolarConfig
+
+        cfg = RooftopSolarConfig(adoption_scenario="high", simulation_seed=1)
+        assert cfg.systems_per_node is None and cfg.max_adoption is None
+
+
+class TestMaxAnnualSystemCostDescription:
+    def test_description_says_it_is_the_investment_budget(self):
+        # The investment budget (formerly max_annual_system_cost, whose name
+        # read as a cap on the total annual system cost) caps each build
+        # year's overnight investment (add_budget_constraints!); the
+        # dispatch's operating budget is a key of its own.
+        from esfex.config.schema import SystemConfig
+
+        desc = SystemConfig.model_fields["max_annual_investment"].description
+        assert desc and "overnight" in desc and "investment period" in desc
+        assert "max_annual_system_cost" in desc
+        desc = SystemConfig.model_fields["max_annual_operating_cost"].description
+        assert desc and "fuel" in desc and "Off" in desc

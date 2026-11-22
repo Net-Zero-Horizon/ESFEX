@@ -21,9 +21,14 @@ import math
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QThread, Signal
+
+from esfex.visualization.i18n import tr
+
+if TYPE_CHECKING:
+    import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -400,7 +405,7 @@ class WindAnalyzer(QThread):
         mcda = self.mcda_config
 
         # ── Phase 1: ERA5 wind capacity factors via atlite ──
-        self.progress.emit(2, "Creating atlite cutout for ERA5 data...")
+        self.progress.emit(2, tr("wizard_wind.analysis_cutout"))
 
         mean_cf, cf_lats, cf_lons = self._compute_capacity_factors()
         if self._cancelled:
@@ -426,17 +431,17 @@ class WindAnalyzer(QThread):
                     })
 
         if not grid_points:
-            self.progress.emit(100, "No valid grid points in domain")
+            self.progress.emit(100, tr("wizard_wind.analysis_no_points"))
             return self._empty_summary()
 
         self.progress.emit(
-            30, f"Computed CF for {len(grid_points)} grid points"
+            30, tr("wizard_wind.analysis_cf_done", n=len(grid_points))
         )
         if self._cancelled:
             return self._empty_summary()
 
         # ── Phase 2: Terrain (elevation + slope) ──
-        self.progress.emit(32, "Fetching terrain data (elevation + slope)...")
+        self.progress.emit(32, tr("wizard_wind.analysis_terrain"))
         try:
             elevations, slopes = self._fetch_terrain(grid_points)
         except Exception as exc:
@@ -450,10 +455,10 @@ class WindAnalyzer(QThread):
 
         if self._cancelled:
             return self._empty_summary()
-        self.progress.emit(50, "Terrain data processed")
+        self.progress.emit(50, tr("wizard_wind.analysis_terrain_done"))
 
         # ── Phase 3: LULC suitability ──
-        self.progress.emit(52, "Fetching LULC data...")
+        self.progress.emit(52, tr("wizard_wind.analysis_lulc"))
         try:
             lulc_scores = self._fetch_lulc(grid_points)
         except Exception as exc:
@@ -465,20 +470,23 @@ class WindAnalyzer(QThread):
 
         if self._cancelled:
             return self._empty_summary()
-        self.progress.emit(65, "LULC data processed")
+        self.progress.emit(65, tr("wizard_wind.analysis_lulc_done"))
 
         # ── Phase 4: Distance to grid ──
-        self.progress.emit(67, "Computing distance to transmission grid...")
+        self.progress.emit(67, tr("wizard_wind.analysis_grid_distance"))
         grid_distances = self._compute_dist_to_grid_vectorized(grid_points)
         for i, pt in enumerate(grid_points):
             pt["dist_grid_km"] = grid_distances[i]
 
         if self._cancelled:
             return self._empty_summary()
-        self.progress.emit(70, "Grid distance computed")
+        self.progress.emit(70, tr("wizard_wind.analysis_grid_distance_done"))
 
         # ── Phase 5: MCDA scoring ──
-        self.progress.emit(72, f"Running MCDA ({mcda.method} weighting)...")
+        self.progress.emit(72, tr(
+            "wizard_wind.analysis_mcda_" + mcda.method
+            if mcda.method in ("manual", "entropy", "pca")
+            else "wizard_wind.analysis_mcda_manual"))
 
         enabled_criteria = {
             name: c for name, c in mcda.criteria.items() if c.enabled
@@ -530,7 +538,7 @@ class WindAnalyzer(QThread):
         for i, pt in enumerate(grid_points):
             pt["mcda_score"] = float(scores[i])
 
-        self.progress.emit(90, "MCDA scoring complete")
+        self.progress.emit(90, tr("wizard_wind.analysis_mcda_done"))
 
         # ── Build GeoDataFrame ──
         for pt in grid_points:
@@ -552,8 +560,8 @@ class WindAnalyzer(QThread):
 
         self.progress.emit(
             100,
-            f"Analysis complete: {len(feasible)} feasible cells "
-            f"(CF >= {cfg.min_capacity_factor:.0%})",
+            tr("wizard_wind.analysis_feasible", n=len(feasible),
+               cf=f"{cfg.min_capacity_factor:.0%}"),
         )
 
         # Collect hourly data if available (from Open-Meteo or NASA POWER)
@@ -597,7 +605,7 @@ class WindAnalyzer(QThread):
         tmpdir = Path(tempfile.mkdtemp(prefix="wind_era5_"))
         cutout_path = tmpdir / "wind_cutout.nc"
 
-        self.progress.emit(5, "Downloading ERA5 wind data via CDS (this may take hours)...")
+        self.progress.emit(5, tr("wizard_wind.analysis_era5_download"))
 
         cutout = atlite.Cutout(
             path=cutout_path,
@@ -611,7 +619,7 @@ class WindAnalyzer(QThread):
         if self._cancelled:
             return np.array([]), np.array([]), np.array([])
 
-        self.progress.emit(20, "Computing wind capacity factors...")
+        self.progress.emit(20, tr("wizard_wind.analysis_cf"))
 
         turbine_key = self.wind_config.turbine
         turbine_config = atlite.resource.get_windturbineconfig(turbine_key)
@@ -642,7 +650,7 @@ class WindAnalyzer(QThread):
         import numpy as np
 
         cfg = self.wind_config
-        self.progress.emit(5, "Fetching wind data from Open-Meteo (ERA5)...")
+        self.progress.emit(5, tr("wizard_wind.analysis_openmeteo"))
 
         lats, lons = self._build_grid()
         n_lat, n_lon = len(lats), len(lons)
@@ -701,10 +709,10 @@ class WindAnalyzer(QThread):
                 if done % max(1, total_pts // 20) == 0:
                     pct = 5 + int(25 * done / total_pts)
                     self.progress.emit(
-                        pct, f"Open-Meteo: {done}/{total_pts} points...",
+                        pct, tr("wizard_wind.analysis_openmeteo_progress", done=done, total=total_pts),
                     )
 
-        self.progress.emit(30, f"Open-Meteo: fetched {total_pts} grid points")
+        self.progress.emit(30, tr("wizard_wind.analysis_openmeteo_done", total=total_pts))
         return mean_cf, lats, lons
 
     # -- NASA POWER API (fast, MERRA-2 reanalysis) --
@@ -720,7 +728,7 @@ class WindAnalyzer(QThread):
         import numpy as np
 
         cfg = self.wind_config
-        self.progress.emit(5, "Fetching wind data from NASA POWER (MERRA-2)...")
+        self.progress.emit(5, tr("wizard_wind.analysis_nasa"))
 
         lats, lons = self._build_grid()
         n_lat, n_lon = len(lats), len(lons)
@@ -779,10 +787,10 @@ class WindAnalyzer(QThread):
                 if done % max(1, total_pts // 20) == 0:
                     pct = 5 + int(25 * done / total_pts)
                     self.progress.emit(
-                        pct, f"NASA POWER: {done}/{total_pts} points...",
+                        pct, tr("wizard_wind.analysis_nasa_progress", done=done, total=total_pts),
                     )
 
-        self.progress.emit(30, f"NASA POWER: fetched {total_pts} grid points")
+        self.progress.emit(30, tr("wizard_wind.analysis_nasa_done", total=total_pts))
         return mean_cf, lats, lons
 
     # -- Grid builder --

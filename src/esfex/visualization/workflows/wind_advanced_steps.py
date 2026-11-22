@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from esfex.utils.temporal import year_series_8760
 from esfex.visualization.i18n import tr
 from esfex.visualization.ui_scale import scale_qss_fonts
 
@@ -223,7 +224,7 @@ class WindCharacterizationStep(QWidget):
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
             from matplotlib.figure import Figure
         except ImportError:
-            self._chart_layout.addWidget(QLabel("matplotlib not available"))
+            self._chart_layout.addWidget(QLabel(tr("wizard_wind.no_matplotlib")))
             return
 
         fig = Figure(figsize=(10, 7))
@@ -238,8 +239,8 @@ class WindCharacterizationStep(QWidget):
         x_pdf = np.linspace(0, bins[-1], 200)
         ax1.plot(x_pdf, weibull_pdf(x_pdf, k, A), "r-", linewidth=2,
                  label=f"Weibull (k={k:.2f}, A={A:.2f})")
-        ax1.set_xlabel("Wind Speed (m/s)", color="black")
-        ax1.set_ylabel("Probability Density", color="black")
+        ax1.set_xlabel(tr("wizard_wind.axis_wind_speed"), color="black")
+        ax1.set_ylabel(tr("wizard_wind.axis_prob_density"), color="black")
         ax1.set_title(tr("wizard_wind.weibull_params"), color="black", fontsize=10)
         ax1.legend(fontsize=8, facecolor="white", edgecolor="#ccc", labelcolor="black")
 
@@ -285,8 +286,8 @@ class WindCharacterizationStep(QWidget):
                 )
                 ax3.plot(hours, hourly_means, "o-", color="#e67e22",
                          markersize=4, linewidth=1.5)
-                ax3.set_xlabel("Hour of Day", color="black")
-                ax3.set_ylabel("Mean Wind Speed (m/s)", color="black")
+                ax3.set_xlabel(tr("wizard_wind.axis_hour_of_day"), color="black")
+                ax3.set_ylabel(tr("wizard_wind.axis_mean_wind_speed"), color="black")
                 ax3.set_xlim(-0.5, 23.5)
                 ax3.set_xticks(range(0, 24, 3))
         ax3.set_title(tr("wizard_wind.diurnal"), color="black", fontsize=10)
@@ -301,16 +302,13 @@ class WindCharacterizationStep(QWidget):
                 months, monthly_means = compute_seasonal_pattern(
                     np.asarray(hd.wind_speed), hd.timestamps,
                 )
-                month_labels = [
-                    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-                ]
+                month_labels = tr("wizard_wind.month_abbr").split(",")
                 ax4.bar(months, monthly_means, color="#2ecc71", edgecolor="white",
                         alpha=0.85)
                 ax4.set_xticks(months)
                 ax4.set_xticklabels(month_labels, fontsize=7)
-                ax4.set_xlabel("Month", color="black")
-                ax4.set_ylabel("Mean Wind Speed (m/s)", color="black")
+                ax4.set_xlabel(tr("wizard_wind.axis_month"), color="black")
+                ax4.set_ylabel(tr("wizard_wind.axis_mean_wind_speed"), color="black")
         ax4.set_title(tr("wizard_wind.seasonal"), color="black", fontsize=10)
 
         fig.tight_layout()
@@ -361,7 +359,7 @@ class _SensitivityWorker(QThread):
         self._max_workers = max_workers
 
     def run(self):
-        from windrex import compute_lcoe_sensitivity
+        from windrex.economics.sensitivity import compute_lcoe_sensitivity
         lcoes = compute_lcoe_sensitivity(
             self._inputs, self._param_name, self._sweep.tolist(),
             max_workers=self._max_workers,
@@ -510,7 +508,7 @@ class WindFinancialStep(QWidget):
         self._sens_param.addItem(tr("wizard_wind.capex"), "capex_per_kw")
         self._sens_param.addItem(tr("wizard_wind.discount_rate"), "discount_rate")
         self._sens_param.addItem(tr("wizard_wind.elec_price"), "electricity_price")
-        self._sens_param.addItem("CF", "capacity_factor")
+        self._sens_param.addItem(tr("wizard_wind.sens_cf"), "capacity_factor")
         self._sens_param.currentIndexChanged.connect(self._update_sensitivity)
         sens_row.addWidget(self._sens_param, 1)
         layout.addLayout(sens_row)
@@ -537,7 +535,7 @@ class WindFinancialStep(QWidget):
             self._spin_lifetime.setValue(preset["lifetime"])
 
     def _get_inputs(self):
-        from windrex import WindFinancialInputs
+        from windrex.economics.financial import WindFinancialInputs
         return WindFinancialInputs(
             capacity_mw=self._capacity_mw,
             capacity_factor=self._capacity_factor,
@@ -556,16 +554,15 @@ class WindFinancialStep(QWidget):
         results = compute_wind_financials(inputs)
         self._financial_results = results
 
-        lines = [
-            f"<b>{tr('wizard_wind.lcoe')}:</b> {results.lcoe:.2f} $/MWh",
-            f"<b>{tr('wizard_wind.npv')}:</b> ${results.npv:,.0f}",
-            f"<b>{tr('wizard_wind.irr')}:</b> {results.irr * 100:.1f}%",
-            f"<b>{tr('wizard_wind.payback')}:</b> {results.payback_years:.1f} yr",
-            f"<b>{tr('wizard_wind.annual_gen')}:</b> "
-            f"{results.annual_revenue / inputs.electricity_price:,.0f} MWh/yr",
-            f"<b>CAPEX:</b> ${results.capex_total:,.0f}",
-        ]
-        self._results_label.setText("<br>".join(lines))
+        self._results_label.setText(tr(
+            "wizard_wind.fin_results_html",
+            lcoe=f"{results.lcoe:.2f}",
+            npv=f"{results.npv:,.0f}",
+            irr=f"{results.irr * 100:.1f}",
+            payback=f"{results.payback_years:.1f}",
+            gen=f"{results.annual_revenue / inputs.electricity_price:,.0f}",
+            capex=f"{results.capex_total:,.0f}",
+        ))
         self._btn_export.setEnabled(True)
         self._update_sensitivity()
 
@@ -617,11 +614,11 @@ class WindFinancialStep(QWidget):
 
         ax.plot(sweep, lcoes, "-", color="#e74c3c", linewidth=2)
         ax.axvline(current_val, color="#2980b9", linestyle="--", linewidth=1,
-                   label=f"Current: {current_val:.3g}")
+                   label=tr("wizard_wind.sens_current", v=f"{current_val:.3g}"))
         ax.axhline(self._financial_results.lcoe, color="#888", linestyle=":",
                    linewidth=1)
         ax.set_xlabel(self._sens_param.currentText(), color="black")
-        ax.set_ylabel("LCOE ($/MWh)", color="black")
+        ax.set_ylabel(tr("wizard_wind.axis_lcoe"), color="black")
         ax.set_title(tr("wizard_wind.sensitivity"), color="black", fontsize=10)
         ax.legend(fontsize=8, facecolor="white", edgecolor="#ccc", labelcolor="black")
 
@@ -822,20 +819,16 @@ class WindWakeLayoutStep(QWidget):
         wake_loss = (1.0 - self._array_efficiency) * 100.0
         annual_gen = self._capacity_mw * n_turb * net_cf * 8760.0
 
-        lines = [
-            f"<b>{tr('wizard_wind.gross_cf')}:</b> {gross_cf:.3f} "
-            f"({gross_cf * 100:.1f}%)",
-            f"<b>{tr('wizard_wind.array_efficiency')}:</b> "
-            f"{self._array_efficiency * 100:.1f}%",
-            f"<b>{tr('wizard_wind.wake_loss')}:</b> {wake_loss:.1f}%",
-            f"<b>{tr('wizard_wind.net_cf')}:</b> {net_cf:.3f} "
-            f"({net_cf * 100:.1f}%)",
-            f"<b>{tr('wizard_wind.annual_gen')}:</b> {annual_gen:,.0f} MWh/yr",
-            f"<b>{tr('wizard_wind.n_turbines')}:</b> {n_turb} "
-            f"\u00d7 {self._capacity_mw:.1f} MW = "
-            f"{n_turb * self._capacity_mw:.1f} MW",
-        ]
-        self._results_label.setText("<br>".join(lines))
+        self._results_label.setText(tr(
+            "wizard_wind.wake_results_html",
+            gross=f"{gross_cf:.3f}", gross_pct=f"{gross_cf * 100:.1f}",
+            eff=f"{self._array_efficiency * 100:.1f}",
+            loss=f"{wake_loss:.1f}",
+            net=f"{net_cf:.3f}", net_pct=f"{net_cf * 100:.1f}",
+            gen=f"{annual_gen:,.0f}",
+            n=n_turb, unit_mw=f"{self._capacity_mw:.1f}",
+            total_mw=f"{n_turb * self._capacity_mw:.1f}",
+        ))
         self._btn_export.setEnabled(True)
 
         self._draw_spacing_curve(spacings, efficiencies, spacing)
@@ -863,7 +856,8 @@ class WindWakeLayoutStep(QWidget):
         ax.plot(spacings, [e * 100 for e in efficiencies], "o-",
                 color="#2980b9", linewidth=2, markersize=5)
         ax.axvline(current_spacing, color="#e74c3c", linestyle="--",
-                   linewidth=1.5, label=f"Selected: {current_spacing:.1f}D")
+                   linewidth=1.5,
+                   label=tr("wizard_wind.spacing_selected", d=f"{current_spacing:.1f}"))
 
         # Mark current point
         import numpy as np
@@ -871,8 +865,8 @@ class WindWakeLayoutStep(QWidget):
         ax.plot(spacings[idx], efficiencies[idx] * 100, "s",
                 color="#e74c3c", markersize=10, zorder=5)
 
-        ax.set_xlabel(tr("wizard_wind.spacing") + " (D)", color="black")
-        ax.set_ylabel(tr("wizard_wind.array_efficiency") + " (%)", color="black")
+        ax.set_xlabel(tr("wizard_wind.axis_spacing"), color="black")
+        ax.set_ylabel(tr("wizard_wind.axis_array_efficiency"), color="black")
         ax.set_title(tr("wizard_wind.spacing_curve"), color="black", fontsize=10)
         ax.legend(fontsize=8, facecolor="white", edgecolor="#ccc", labelcolor="black")
         ax.set_ylim(50, 105)
@@ -957,8 +951,12 @@ class _WindProfileWorker(QThread):
         output_dir,
         year,
         parent=None,
+        model_clock=None,
     ):
         super().__init__(parent)
+        # Weather comes in UTC (NASA POWER: local solar time): the profiles
+        # are saved on this clock (None: as they come).
+        self._clock = model_clock
         self._gen_groups = gen_groups
         self._hourly_data = hourly_data
         self._wind_config = wind_config
@@ -973,9 +971,7 @@ class _WindProfileWorker(QThread):
             from windrex import compute_wind_hourly_cf
             from windrex.core.capacity_factor import _wind_speed_to_hourly_cf
         except ImportError:
-            self.error.emit(
-                "Could not import wind CF functions from windrex"
-            )
+            self.error.emit(tr("wizard_wind.avail_import_error"))
             return
 
         try:
@@ -1007,11 +1003,13 @@ class _WindProfileWorker(QThread):
                     pct = int(100 * done / total)
 
                     if abs(lat) < 0.01 and abs(lon) < 0.01:
-                        self.progress.emit(pct, f"Skipping {iid} (no position)")
+                        self.progress.emit(
+                            pct, tr("wizard_wind.avail_progress_skip", id=iid))
                         results[iid] = {"status": "skipped", "mean_cf": 0.0}
                         continue
 
-                    self.progress.emit(pct, f"Computing CF for {iid}...")
+                    self.progress.emit(
+                        pct, tr("wizard_wind.avail_progress_compute", id=iid))
 
                     cf = None
 
@@ -1046,13 +1044,11 @@ class _WindProfileWorker(QThread):
                             turbine_key=turbine_key,
                         )
 
-                    cf = np.asarray(cf, dtype=float)
-                    if len(cf) > 8760:
-                        cf = cf[:8760]
-                    elif len(cf) < 8760:
-                        padded = np.zeros(8760)
-                        padded[: len(cf)] = cf
-                        cf = padded
+                    cf = year_series_8760(cf, self._year)
+                    if self._clock is not None:
+                        from esfex.utils.model_clock import weather_to_model_clock
+                        cf = weather_to_model_clock(
+                            cf, data_source, lon, self._clock, self._year)
 
                     profile_array[:, node] = cf
                     mean_cf = float(np.mean(cf))
@@ -1161,7 +1157,7 @@ class WindAvailabilityStep(QWidget):
             layout.addWidget(self._canvas, 1)
         except ImportError:
             self._canvas = None
-            layout.addWidget(QLabel("(matplotlib not available)"))
+            layout.addWidget(QLabel(tr("wizard_wind.no_matplotlib_paren")))
 
         # Generate button + progress
         gen_row = QHBoxLayout()
@@ -1331,6 +1327,20 @@ class WindAvailabilityStep(QWidget):
         self._progress.setVisible(True)
         self._progress.setValue(0)
 
+        # Save the profiles on the model clock and record it.
+        clock = None
+        g = getattr(self._model, "global_settings", None)
+        if g is not None:
+            from esfex.utils.model_clock import (
+                resolve_for_nodes,
+                resolve_model_clock,
+            )
+            nodes = list(self._model.state.nodes)
+            clock = (resolve_for_nodes(g.model_clock, nodes) if nodes else
+                     resolve_model_clock(g.model_clock,
+                                         [(i["lat"], i["lon"]) for i in selected]))
+            g.model_clock = clock.zone
+
         self._worker = _WindProfileWorker(
             dict(groups),
             self._hourly_data,
@@ -1338,6 +1348,7 @@ class WindAvailabilityStep(QWidget):
             output_dir,
             year,
             parent=self,
+            model_clock=clock,
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
@@ -1429,8 +1440,8 @@ class WindAvailabilityStep(QWidget):
                 continue
             break  # only preview first
 
-        self._ax.set_xlabel("Hour of year", fontsize=9, color="black")
-        self._ax.set_ylabel("Capacity Factor", fontsize=9, color="black")
+        self._ax.set_xlabel(tr("wizard_wind.axis_hour_of_year"), fontsize=9, color="black")
+        self._ax.set_ylabel(tr("wizard_wind.axis_capacity_factor"), fontsize=9, color="black")
         self._ax.set_title(
             tr("wizard_wind.avail_preview"), fontsize=10, color="black",
         )

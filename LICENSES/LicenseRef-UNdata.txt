@@ -1,0 +1,18 @@
+UNdata — Terms of Use
+
+Source: https://data.un.org/Host.aspx?Content=UNdataUse
+
+Summary of the terms (United Nations Statistics Division, UNdata):
+
+- "All data and metadata provided on UNdata's website are available free of
+  charge and may be copied freely, duplicated and further distributed provided
+  that UNdata is cited as the reference."
+- The data are supplied as contained in the source database, without any
+  addition, subtraction, amendment or modification; the United Nations gives no
+  warranty as to their accuracy or completeness.
+
+Reference used by ESFEX: United Nations Statistics Division, Energy Balances
+(SDMX dataflow DF_UNData_EnergyBalance, version 1.0), UNdata, https://data.un.org,
+accessed 13 November 2026 (see DATA_SOURCES.md).
+
+This file is a summary for REUSE purposes; the terms on the page above prevail.

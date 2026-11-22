@@ -41,17 +41,17 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { _ucClearPlot(); showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { _ucClearPlot(); showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            _ucClearPlot(); showStatus(data && data.error ? data.error : "No data", false);
+            _ucClearPlot(); showStatus(data && data.error ? data.error : _t("web.common.no_data"), false);
             return;
         }
         if (!data.hours || data.hours.length === 0) {
-            _ucClearPlot(); showStatus("No timeline data", false);
+            _ucClearPlot(); showStatus(_t("web.charts.uc_loadshed_curtailment.no_data"), false);
             return;
         }
         try { renderTimeline(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 
@@ -79,57 +79,55 @@ function renderTimeline(data) {
     // Load shedding hourly (top subplot, primary axis = MW)
     traces.push({
         x: x, y: data.load_shed_mw,
-        type: "bar", name: "Load shed (MW)",
+        type: "bar", name: _t("web.charts.uc_loadshed_curtailment.trace_load_shed"),
         marker: { color: "#E74C3C", opacity: 0.85 },
         xaxis: "x", yaxis: "y",
-        hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>Load shed</extra>",
+        hovertemplate: _t("web.charts.uc_loadshed_curtailment.hover_load_shed"),
     });
     // Load shedding cumulative (top subplot, secondary axis = MWh)
     traces.push({
         x: x, y: data.load_shed_cum_mwh,
         type: "scatter", mode: "lines",
-        name: "Cum. load shed (MWh)",
+        name: _t("web.charts.uc_loadshed_curtailment.trace_cum_load_shed"),
         line: { color: "#922B21", width: 2, dash: "dot" },
         xaxis: "x", yaxis: "y2",
-        hovertemplate: "Hour %{x}: %{y:,.0f} MWh<extra>Cumulative</extra>",
+        hovertemplate: _t("web.charts.uc_loadshed_curtailment.hover_cumulative"),
     });
 
     // Curtailment hourly (bottom subplot)
     traces.push({
         x: x, y: data.curtailment_mw,
-        type: "bar", name: "Curtailment (MW)",
+        type: "bar", name: _t("web.charts.uc_loadshed_curtailment.trace_curtailment"),
         marker: { color: "#F39C12", opacity: 0.85 },
         xaxis: "x2", yaxis: "y3",
-        hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>Curtailment</extra>",
+        hovertemplate: _t("web.charts.uc_loadshed_curtailment.hover_curtailment"),
     });
     traces.push({
         x: x, y: data.curtailment_cum_mwh,
         type: "scatter", mode: "lines",
-        name: "Cum. curtailment (MWh)",
+        name: _t("web.charts.uc_loadshed_curtailment.trace_cum_curtailment"),
         line: { color: "#9A6700", width: 2, dash: "dot" },
         xaxis: "x2", yaxis: "y4",
-        hovertemplate: "Hour %{x}: %{y:,.0f} MWh<extra>Cumulative</extra>",
+        hovertemplate: _t("web.charts.uc_loadshed_curtailment.hover_cumulative"),
     });
 
-    const title = `Load Shedding &amp; Curtailment — Year ${data.year}`;
     const sharePct = (data.demand_total_mwh > 0)
         ? (100 * data.load_shed_total_mwh / data.demand_total_mwh).toFixed(1)
         : "0";
     const subTitle =
-        `Load shed: total ${_fmtMWh(data.load_shed_total_mwh)} ` +
-        `(${sharePct}% of demand) — peak ${data.load_shed_max_mw.toFixed(1)} MW &nbsp;|&nbsp; ` +
-        `Curtailment: total ${_fmtMWh(data.curtailment_total_mwh)} — ` +
-        `peak ${data.curtailment_max_mw.toFixed(1)} MW`;
+        _t("web.charts.uc_loadshed_curtailment.summary_load_shed", {
+            total: _fmtMWh(data.load_shed_total_mwh), share: sharePct,
+            peak: data.load_shed_max_mw.toFixed(1) }) +
+        " &nbsp;|&nbsp; " +
+        _t("web.charts.uc_loadshed_curtailment.summary_curtailment", {
+            total: _fmtMWh(data.curtailment_total_mwh),
+            peak: data.curtailment_max_mw.toFixed(1) });
 
     const layout = {
-        margin: { t: 110, r: 70, b: 60, l: 70 },
+        margin: { t: 80, r: 70, b: 60, l: 70 },
         grid: { rows: 2, columns: 1, pattern: "independent", roworder: "top to bottom" },
         showlegend: true,
         annotations: [
-            { text: "<b>" + title + "</b>",
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.16, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: subTitle,
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.08, yref: "paper", yanchor: "bottom",
@@ -145,15 +143,15 @@ function renderTimeline(data) {
             borderwidth: 1,
         },
         xaxis:  { domain: [0, 1], anchor: "y", showticklabels: false },
-        yaxis:  { domain: [0.55, 1.0], title: "<b>Load shed (MW)</b>",
+        yaxis:  { domain: [0.55, 1.0], title: "<b>" + _t("web.charts.uc_loadshed_curtailment.axis_load_shed") + "</b>",
                   rangemode: "tozero" },
         yaxis2: { domain: [0.55, 1.0], overlaying: "y", side: "right",
-                  title: "<b>Cum. (MWh)</b>", rangemode: "tozero", showgrid: false },
-        xaxis2: { domain: [0, 1], anchor: "y3", title: "<b>Hour</b>" },
-        yaxis3: { domain: [0.0, 0.45], title: "<b>Curtailment (MW)</b>",
+                  title: "<b>" + _t("web.charts.uc_loadshed_curtailment.axis_cumulative") + "</b>", rangemode: "tozero", showgrid: false },
+        xaxis2: { domain: [0, 1], anchor: "y3", title: "<b>" + _t("web.charts.uc_loadshed_curtailment.axis_hour") + "</b>" },
+        yaxis3: { domain: [0.0, 0.45], title: "<b>" + _t("web.charts.uc_loadshed_curtailment.axis_curtailment") + "</b>",
                   rangemode: "tozero" },
         yaxis4: { domain: [0.0, 0.45], overlaying: "y3", side: "right",
-                  title: "<b>Cum. (MWh)</b>", rangemode: "tozero", showgrid: false },
+                  title: "<b>" + _t("web.charts.uc_loadshed_curtailment.axis_cumulative") + "</b>", rangemode: "tozero", showgrid: false },
     };
     Plotly.purge("plot");
     Plotly.newPlot("plot", traces, layout, {

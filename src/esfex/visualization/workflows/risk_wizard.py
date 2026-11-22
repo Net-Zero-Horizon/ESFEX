@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QVBoxLayout,
 )
+from esfex.visualization.i18n import tr
 from esfex.visualization.ui_scale import scale_qss_fonts
 
 if TYPE_CHECKING:
@@ -118,10 +119,11 @@ _FUEL_TO_COMPONENT: dict[str, str] = {
 }
 
 
+# Translation keys of the step names
 _WIZARD_STEPS = [
-    "Risk Analysis",
-    "Scenarios",
-    "Results & Export",
+    "risk_wizard.step_risk_analysis",
+    "risk_wizard.step_scenarios",
+    "risk_wizard.step_results_export",
 ]
 
 # ──────────────────────────────────────────────────────────────────
@@ -144,7 +146,7 @@ class RiskWorkbench(QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Risk & Resilience Analysis")
+        self.setWindowTitle(tr("risk_wizard.title"))
         self.setMinimumSize(1000, 700)
         self.resize(1250, 900)
         self.setModal(False)
@@ -162,8 +164,25 @@ class RiskWorkbench(QDialog):
         # Shared state
         self._state = RiskWorkbenchState(self)
         self._extract_system_info()
+        self._load_saved_settings()
 
         self._build_ui()
+
+    def _load_saved_settings(self):
+        """Start from the project's saved ``risk.*`` settings (what Apply
+        wrote), so reopening the workbench neither shows the defaults nor
+        overwrites the saved values on the next Apply."""
+        gs = getattr(self._model, "global_settings", None)
+        if gs is None:
+            return
+        import copy
+        s = self._state
+        s.risk_measure = gs.risk_measure
+        s.cvar_alpha = gs.risk_cvar_alpha
+        s.cvar_lambda = gs.risk_cvar_lambda
+        s.combination_method = gs.risk_combination_method
+        s.climate_scenarios = copy.deepcopy(list(gs.risk_climate_scenarios or []))
+        s.hazard_scenarios = copy.deepcopy(list(gs.risk_hazard_scenarios or []))
 
     # ------------------------------------------------------------------
     # System info extraction from all_states
@@ -338,7 +357,8 @@ class RiskWorkbench(QDialog):
             n_el = sum(1 for sn in coord_to_sys_node.values() if sn == gi)
             c = sys_node_centroids.get(gi)
             loc = f"({c[0]:.2f}, {c[1]:.2f})" if c else ""
-            self._state.node_names[gi] = f"{name} {loc} [{n_el} el.]"
+            self._state.node_names[gi] = tr(
+                "risk_wizard.node_entry", name=name, loc=loc, count=n_el)
 
         logger.info(
             "Risk workbench: %d system nodes, %d element locations, "
@@ -365,9 +385,9 @@ class RiskWorkbench(QDialog):
         )
         top_bar.addWidget(self._lbl_step)
         top_bar.addStretch()
-        self._lbl_nodes = QLabel(
-            f"{len(self._state.node_coordinates)} nodes detected"
-        )
+        self._lbl_nodes = QLabel(tr(
+            "risk_wizard.nodes_detected", count=len(self._state.node_coordinates)
+        ))
         self._lbl_nodes.setStyleSheet(
             f"font-style: italic; color: {c.text_secondary};"
         )
@@ -380,7 +400,7 @@ class RiskWorkbench(QDialog):
         self._tabs.currentChanged.connect(self._on_tab_changed)
         self._panels = self._create_panels()
 
-        self._step_names = _WIZARD_STEPS
+        self._step_names = [tr(k) for k in _WIZARD_STEPS]
         for name, panel in zip(self._step_names, self._panels):
             self._tabs.addTab(panel, name)
 
@@ -389,7 +409,7 @@ class RiskWorkbench(QDialog):
         # Bottom navigation bar
         bottom = QHBoxLayout()
 
-        btn_close = QPushButton("Close")
+        btn_close = QPushButton(tr("common.close"))
         btn_close.clicked.connect(self.close)
         bottom.addWidget(btn_close)
 
@@ -400,11 +420,11 @@ class RiskWorkbench(QDialog):
 
         bottom.addStretch()
 
-        self._btn_back = QPushButton("\u25c0 Back")
+        self._btn_back = QPushButton("\u25c0 " + tr("wizard_common.back"))
         self._btn_back.clicked.connect(self._go_back)
         bottom.addWidget(self._btn_back)
 
-        self._btn_next = QPushButton("Next \u25b6")
+        self._btn_next = QPushButton(tr("wizard_common.next") + " \u25b6")
         self._btn_next.setStyleSheet(
             f"background-color: {c.accent_primary}; color: white; "
             f"font-weight: bold; padding: 6px 16px; border-radius: 3px;"
@@ -412,7 +432,7 @@ class RiskWorkbench(QDialog):
         self._btn_next.clicked.connect(self._go_next)
         bottom.addWidget(self._btn_next)
 
-        self._btn_apply = QPushButton("Apply")
+        self._btn_apply = QPushButton(tr("common.apply"))
         self._btn_apply.setStyleSheet(
             f"background-color: {c.accent_secondary}; color: white; "
             f"font-weight: bold; padding: 6px 16px; border-radius: 3px;"
@@ -473,9 +493,10 @@ class RiskWorkbench(QDialog):
 
         # Step indicator: "Step 3 of 7 — Fragility Library"
         if 0 <= idx < len(self._step_names):
-            self._lbl_step.setText(
-                f"Step {idx + 1} of {total} \u2014 {self._step_names[idx]}"
-            )
+            self._lbl_step.setText(tr(
+                "risk_wizard.step_of", n=idx + 1, total=total,
+                name=self._step_names[idx],
+            ))
 
     def _go_back(self):
         idx = self._tabs.currentIndex()
@@ -499,15 +520,14 @@ class RiskWorkbench(QDialog):
         # Validate pipeline completeness
         missing = []
         if not self._state.risk_profiles:
-            missing.append("Risk assessment (Step 1 — click 'Assess Risk')")
+            missing.append(tr("risk_wizard.missing_assessment"))
 
         if missing:
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.warning(
-                self, "Incomplete Analysis",
-                "The following steps must be completed before applying:\n\n"
-                + "\n".join(f"  \u2022 {m}" for m in missing)
-                + "\n\nPlease go back and complete these steps.",
+                self, tr("risk_wizard.incomplete_title"),
+                tr("risk_wizard.incomplete_msg",
+                   items="\n".join(f"  \u2022 {m}" for m in missing)),
             )
             return
 

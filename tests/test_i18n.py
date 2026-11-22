@@ -30,13 +30,16 @@ def _restore_language_notifier():
         changed = Signal()
 
     n = _Notifier()
-    saved = _i18n_mod.language_changed
+    # Keep the original notifier alive too: dropping the module's only
+    # reference deleted it, and with it the source of the signal restored
+    # below (later tests then failed on "Signal source has been deleted").
+    saved = _i18n_mod._notifier, _i18n_mod.language_changed
     _i18n_mod._notifier = n
     _i18n_mod.language_changed = n.changed
     try:
         yield
     finally:
-        _i18n_mod.language_changed = saved
+        _i18n_mod._notifier, _i18n_mod.language_changed = saved
 
 # Path to real translation files shipped with the package.
 _TRANSLATIONS_DIR = (
@@ -357,3 +360,16 @@ class TestLanguageParity:
                 a = len(self._MNEMONIC.findall(v))
                 b = len(self._MNEMONIC.findall(other[k]))
                 assert a == b, f"{code}.json mnemonic mismatch at {k!r}: {a} vs {b}"
+
+
+class TestEnglishBeforeInit:
+    """Studio modules used without the Studio (scripts, tests) read English,
+    not raw keys, before any init_i18n."""
+
+    def test_tr_loads_english_when_never_initialised(self, monkeypatch):
+        import esfex.visualization.i18n as i18n_mod
+        monkeypatch.setattr(i18n_mod, "_strings", {})
+        monkeypatch.setattr(i18n_mod, "_initialized", False)
+        monkeypatch.setattr(i18n_mod, "_current_lang", "en")
+        assert i18n_mod.tr("common.cancel") == "Cancel"
+        assert i18n_mod.tr("no.such.key") == "no.such.key"

@@ -24,6 +24,7 @@ from esfex.config.schema import (
     GeneratorConfig,
     SystemConfig,
     TechnologyConfig,
+    TransmissionLineGeo,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,16 +34,14 @@ _GEN_PER_NODE_FIELDS = [
     "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
     "rated_power", "min_power", "min_up", "min_down", "ramp_up", "ramp_down",
     "eff_at_rated", "eff_at_min", "inertia", "start_up_cost", "fuel_cost",
-    "fixed_cost", "maintenance_cost", "invest_cost", "invest_max_power",
+    "fixed_cost", "maintenance_cost", "invest_cost",
 ]
 
 # Per-node array field names for batteries
 _BAT_PER_NODE_FIELDS = [
     "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
-    "rated_power", "min_power", "min_up", "min_down", "ramp_up", "ramp_down",
-    "eff_at_rated", "eff_at_min", "inertia", "start_up_cost", "fuel_cost",
-    "fixed_cost", "maintenance_cost", "invest_cost", "invest_cost_energy",
-    "invest_max_power", "invest_max_capacity",
+    "rated_power", "ramp_up", "ramp_down", "inertia",
+    "fixed_cost", "maintenance_cost", "invest_cost", "invest_max_power",
     "efficiency_charge", "efficiency_discharge", "soc_initial", "max_DoD",
     "capacity", "MaxChargePower", "MaxDischargePower",
 ]
@@ -198,6 +197,21 @@ def _match_battery_technologies(
         return [k for k in zone.allowed_technologies if k in battery_technologies]
 
     return list(battery_technologies.keys())
+
+
+def _pad_per_node_lists(model, num_nodes_orig: int, mappings, zero) -> None:
+    """Append one entry per zone to each numeric list field of *model* that
+    is still sized to the original nodes. ``zero(field)`` selects fields that
+    get 0; the others copy the zone's reference node."""
+    for name in type(model).model_fields:
+        arr = getattr(model, name)
+        if not (isinstance(arr, list) and arr and len(arr) == num_nodes_orig):
+            continue
+        if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in arr):
+            continue
+        for m in mappings:
+            ref = m.nearest_bus_parent_node
+            arr.append(type(arr[0])(0) if zero(name) else arr[ref])
 
 
 def expand_config_with_zones(
@@ -370,6 +384,18 @@ def expand_config_with_zones(
 
     cfg.nodes.num_nodes = new_num_nodes
 
+    # A zone node belongs to the system of the bus it connects to, so its
+    # emissions count against that system's CO2 budget.
+    if cfg.co2_budget_by_system:
+        budgets = []
+        for b in cfg.co2_budget_by_system:
+            extra = list(b.extra_nodes) + [
+                m.virtual_node_idx for m in mappings
+                if b.first_node <= m.nearest_bus_parent_node < b.first_node + b.num_nodes
+            ]
+            budgets.append(b.model_copy(update={"extra_nodes": extra}))
+        cfg.co2_budget_by_system = budgets
+
     # ── Phase 3: Expand generator per-node arrays ─────────────────────
     for gen_key, gen in cfg.generators.items():
         for m in mappings:
@@ -380,10 +406,7 @@ def expand_config_with_zones(
                 arr = getattr(gen, field_name)
                 ref_val = arr[ref] if ref < len(arr) else 0
 
-                if field_name == "invest_max_power":
-                    zone = zones[mappings.index(m)]
-                    val = (zone.max_capacity_mw or 0.0) if is_matched else 0.0
-                elif field_name == "rated_power":
+                if field_name == "rated_power":
                     val = 0.0  # nothing built yet
                 elif field_name == "invest_cost":
                     val = ref_val if is_matched else 0.0
@@ -415,10 +438,6 @@ def expand_config_with_zones(
                                      "MaxDischargePower", "capacity"):
                     val = 0.0
                 elif field_name == "invest_cost":
-                    val = ref_val if is_matched else 0.0
-                elif field_name == "invest_cost_energy":
-                    val = ref_val if is_matched else 0.0
-                elif field_name == "invest_max_capacity":
                     val = ref_val if is_matched else 0.0
                 elif is_matched:
                     val = ref_val
@@ -516,6 +535,28 @@ def expand_config_with_zones(
                 bat_tech.invest_max_power[orig_node] = 0.0
                 bat_tech.invest_max_capacity[orig_node] = 0.0
 
+    # ── Phase 5d: Remaining per-node lists ─────────────────────────
+    # Every other list still sized to the original nodes gets one entry per
+    # zone: the reference node's value, or 0 where it is installed capacity
+    # (nothing is built in a zone yet). Lists left short break the solver once
+    # a merged multi-node config sizes them to the node count.
+    installed = {"rated_power", "capacity", "MaxChargePower", "MaxDischargePower"}
+    for units in (cfg.generators, cfg.batteries):
+        for unit in units.values():
+            _pad_per_node_lists(unit, num_nodes_orig, mappings,
+                                zero=lambda f: f in installed or f.startswith("reservoir_"))
+    for techs in (cfg.technologies, cfg.battery_technologies):
+        for tech in techs.values():
+            _pad_per_node_lists(tech, num_nodes_orig, mappings, zero=lambda f: False)
+    for elz in (getattr(cfg, "electrolyzers", None) or {}).values():
+        _pad_per_node_lists(elz, num_nodes_orig, mappings,
+                            zero=lambda f: f in ("rated_power", "invest_max_power"))
+    for name, zero in (("ev_initial_soc", False), ("rooftop_max_potential", True)):
+        arr = getattr(cfg, name, None)
+        if isinstance(arr, list) and len(arr) == num_nodes_orig:
+            for m in mappings:
+                arr.append(0.0 if zero else arr[m.nearest_bus_parent_node])
+
     # ── Phase 6: Create virtual buses ──────────────────────────────
     if not hasattr(cfg, "buses") or cfg.buses is None:
         cfg.buses = existing_buses
@@ -528,5 +569,22 @@ def expand_config_with_zones(
                 demand_fraction=0.0,  # no demand at zone
             ),
         )
+
+    # ── Phase 7: Candidate interconnection line ────────────────────
+    # Power moves along bus-level lines, so the zone needs one to its
+    # nearest bus. It starts at 0 MW; the master expands it through the
+    # zone node's transference investment (cost and maximum set above).
+    lines = list(cfg.transmission_lines_geo or [])
+    for m in mappings:
+        lines.append(TransmissionLineGeo(
+            line_id=f"zone_link_{m.zone_name}",
+            from_node=m.virtual_node_idx,
+            to_node=m.nearest_bus_parent_node,
+            from_bus=m.virtual_bus_idx,
+            to_bus=m.nearest_bus_idx,
+            capacity_mw=0.0,
+            length_km=m.distance_km,
+        ))
+    cfg.transmission_lines_geo = lines
 
     return (cfg, mappings)

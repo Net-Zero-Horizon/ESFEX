@@ -2,6 +2,8 @@
 
 Module: `esfex.config.loader`
 
+Reads YAML configuration files and builds the [schema](config-schema.md) models. The CLI (`esfex run`, `esfex validate`) and runs started from the Studio all load configurations through `load_config()`.
+
 ## Functions
 
 ### load_config
@@ -10,7 +12,7 @@ Module: `esfex.config.loader`
 def load_config(path: Union[str, Path]) -> ESFEXConfig
 ```
 
-Load and validate a complete ESFEX configuration file. Primary entry point for loading configuration.
+Load and validate a complete ESFEX configuration file.
 
 **Parameters:**
 
@@ -18,41 +20,32 @@ Load and validate a complete ESFEX configuration file. Primary entry point for l
 |-----------|------|-------------|
 | `path` | `Union[str, Path]` | Path to the main YAML configuration file |
 
-**Returns:** Validated `ESFEXConfig` instance with all systems, generators, batteries, and other equipment fully parsed and validated.
+**Returns:** a validated `ESFEXConfig`. Keys the models do not define are dropped without an error.
 
-**Raises:** `ConfigLoadError` on validation failure, file not found, or YAML parsing errors.
+**Raises:** `ConfigLoadError` for a missing file, invalid YAML, a Pydantic validation error (`"Configuration validation failed at systems.Cuba.generators.gas_1:\n..."`) or any other conversion error, including a missing required unit key (`"Failed to load configuration: systems.Cuba.generators.gas_1.min_up: Required key 'min_up' is missing"`). Its `issues` give each problem's YAML key path.
 
-**Processing Steps:**
+**Processing steps:**
 
-1. Read YAML file via `load_yaml()`
-2. Check if systems are embedded dictionaries or file path references
-3. For file references, resolve paths relative to the config file location
-4. Convert each system dictionary via `_convert_system()`:
-   - Parse `unit_*` and `bat_*` keys (legacy format) or `generators`/`batteries` dicts
-   - Convert fuels, nodes, penalties, CO2 budget, demand sectors
-   - Convert EV categories, rooftop solar config, stochastic scenarios
-   - Convert technologies and battery technologies for investment
-   - Build DC power flow config from system-level parameters
-5. Convert temporal, solver, N-1 security, master problem, and meta-network configs
-6. Validate with Pydantic (`ESFEXConfig(**raw_config)`)
+1. Read the file with `load_yaml()`.
+2. For each entry under `systems`: if the value is a string, load that file (path relative to the main file); then convert the mapping with `_convert_system()`.
+3. Build `TemporalConfig`, `SolverConfig`, `N1SecurityConfig`, `MasterProblemConfig` and `MetaNetworkConfig` (with its `SystemLinkConfig` list) from their mappings.
+4. Validate everything as `ESFEXConfig(**raw_config)`; other top-level sections (`network_reduction`, `risk`, `logging`, `plugins`) are validated directly by the schema.
 
 **Example:**
 
 ```python
 from esfex.config.loader import load_config
 
-# Load from single file with embedded systems
 config = load_config("isla_juventud.yaml")
 print(config.simulation_mode)         # "development"
 print(config.systems.keys())          # dict_keys(['isla_juventud'])
-print(config.primary_system.name)     # "isla_juventud"
+print(config.primary_system.name)     # first system in meta_network.systems
 
-# Access system equipment
 sys = config.primary_system
 print(f"Generators: {len(sys.generators)}")
 print(f"Batteries: {len(sys.batteries)}")
 print(f"Technologies: {len(sys.technologies)}")
-print(f"Nodes: {sys.nodes.num_nodes}")
+print(f"Nodes: {sys.num_nodes}, buses: {sys.num_buses}")
 ```
 
 **Multi-file configuration:**
@@ -63,7 +56,7 @@ simulation_mode: development
 temporal:
   resolution_hours: 1
 systems:
-  cuba: "systems/cuba.yaml"      # File reference
+  cuba: "systems/cuba.yaml"      # file reference
   jamaica: "systems/jamaica.yaml"
 meta_network:
   systems: [cuba, jamaica]
@@ -82,26 +75,14 @@ jamaica = config.get_system("jamaica")
 def load_yaml(path: Union[str, Path]) -> dict[str, Any]
 ```
 
-Low-level YAML file loader. Returns raw dictionary without Pydantic validation.
+Low-level YAML reader (`yaml.safe_load`). Returns the raw dictionary without validation, or `{}` for an empty file.
 
-**Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `path` | `Union[str, Path]` | Path to YAML file |
-
-**Returns:** Raw dictionary with YAML contents. Returns empty dict `{}` for empty files.
-
-**Raises:** `ConfigLoadError` if file not found, unreadable, or contains invalid YAML.
-
-**Example:**
+**Raises:** `ConfigLoadError` if the file does not exist, cannot be read, or contains invalid YAML.
 
 ```python
 from esfex.config.loader import load_yaml
 
 raw = load_yaml("my_system.yaml")
-print(raw.keys())
-# Can inspect raw config before validation
 print(raw.get("simulation_mode"))
 ```
 
@@ -111,19 +92,9 @@ print(raw.get("simulation_mode"))
 def load_system_config(path: Union[str, Path]) -> SystemConfig
 ```
 
-Load a single system configuration file without the full `ESFEXConfig` wrapper.
+Load a single system file (the contents of one `systems` entry) through `_convert_system()`, without the `ESFEXConfig` wrapper.
 
-**Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `path` | `Union[str, Path]` | Path to system YAML file |
-
-**Returns:** Validated `SystemConfig` instance.
-
-**Raises:** `ConfigLoadError` on validation failure.
-
-**Example:**
+**Raises:** `ConfigLoadError` on a Pydantic validation error. Other conversion errors (for example a missing required generator key, which raises `KeyError`) propagate unchanged.
 
 ```python
 from esfex.config.loader import load_system_config
@@ -136,32 +107,72 @@ print(f"Target RE: {sys.target_re_penetration:.0%}")
 
 ---
 
-## Internal Conversion Functions
+## System Conversion
 
-Internal functions used by `load_config()` to convert raw YAML dictionaries into typed Pydantic models:
+`_convert_system(data)` converts one system mapping. Sections it does not handle explicitly (nodes are wrapped in `NodeConfig`, everything else such as `buses`, `transmission_lines_geo`, `development_zones`, `custom_constraints`, `outage_schedule`) go to `SystemConfig` unchanged.
 
 | Function | Description |
 |----------|-------------|
-| `_convert_system(data)` | Convert a full system dictionary to `SystemConfig` |
-| `_convert_generator(key, data)` | Convert generator dict to `GeneratorConfig` |
-| `_convert_battery(key, data)` | Convert battery/storage dict to `BatteryConfig` |
-| `_convert_fuels(data)` | Convert fuel definitions to `dict[str, FuelConfig]` |
-| `_convert_dc_power_flow(data)` | Extract DC power flow config from system data |
-| `_convert_primary_energy_source(name, data)` | Convert primary energy source definition |
+| `_convert_system(data)` | Convert a full system mapping to `SystemConfig` |
+| `_convert_generator(key, data)` | Build a `GeneratorConfig` from a fixed key list |
+| `_convert_battery(key, data)` | Build a `BatteryConfig` from a fixed key list |
+| `_convert_fuels(data)` | Build `dict[str, FuelConfig]` |
+| `_convert_dc_power_flow(data)` | Build `DCPowerFlowConfig` from `dc_power_flow` or legacy flat keys |
+| `_convert_primary_energy_source(name, data)` | Build a `PrimaryEnergySourceConfig` from a fixed key list |
 
-### YAML Key Conventions
+### Units: generators and batteries
 
-The loader supports both legacy and modern YAML key formats:
+Units are read from a `generators:` / `batteries:` mapping or from legacy system-level keys starting with `unit_` or `bat_`.
 
-| Legacy Format | Modern Format | Description |
-|--------------|---------------|-------------|
-| `unit_0`, `unit_1` | `generators: { unit_0: ... }` | Generator definitions |
-| `bat_0`, `bat_1` | `batteries: { bat_0: ... }` | Battery definitions |
-| `DC_BASE_IMPEDANCE` | `dc_power_flow.base_impedance` | DC power flow parameters |
-| `LOSS_DEMAND_TRHESHOLD` | `loss_demand_threshold` | System parameters |
-| `TARGET_RE_PENETRATION` | `target_re_penetration` | RE target |
+- A legacy `unit_*`/`bat_*` entry with `type: Storage` becomes a battery; `Renewable`, `Non-renewable` and `Electrolyzer` become generators. Any other type is logged (`Generator <key> has unknown type '<type>', treating as Non-renewable`) and replaced by `Non-renewable`.
+- In a `generators:` mapping, any type other than `Renewable`, `Non-renewable`, `Storage` or `Electrolyzer` is likewise replaced by `Non-renewable`. This happens before the schema's own type normalisation, so lowercase or translated labels (`renewable`, `Renovable`) end up as `Non-renewable`.
+- Every entry of a `batteries:` mapping is converted as a battery.
 
-The loader automatically handles case-insensitive penalty keys and sanitizes unknown generator types (e.g., `"Thermal"` becomes `"Non-renewable"`).
+### What the unit converters read
+
+`_convert_generator`, `_convert_battery` and `_convert_primary_energy_source` map the keys below explicitly (with the defaults shown), then copy every other key that is a field of the target model, by name or alias (`_pass_through`). Keys that are not schema fields are dropped.
+
+| | Generators | Batteries |
+|---|---|---|
+| **Required** (missing → `KeyError`, reported as `Failed to load configuration: '<key>'`) | `type`, `life_time`, `initial_age`, `degradation_rate`, `decommissioning_cost`, `rated_power`, `min_power`, `min_up`, `min_down`, `ramp_up`, `ramp_down`, `eff_at_rated`, `eff_at_min`, `inertia`, `start_up_cost`, `fuel_cost`, `fixed_cost`, `maintenance_cost`, `invest_cost` | `life_time`, `initial_age`, `degradation_rate`, `decommissioning_cost`, `rated_power`, `inertia`, `maintenance_cost`, `invest_cost`, `invest_max_power`, `efficiency_charge`, `efficiency_discharge`, `soc_initial`, `max_DoD`, `capacity`, `MaxChargePower`, `MaxDischargePower` |
+| **Optional** (default) | `name` (key), `fuel` (`"None"`), `technology`, `reservable` (true), `Availability`, `frequency_hz` (50), `current_type` (`AC`), `bus_id_per_node`, `bus_index`, `reservoir_capacity`, `reservoir_initial_level`, `reservoir_min_level`, `reservoir_max_level`, `reservoir_turbine_efficiency`, `reservoir_evaporation_rate`, `reservoir_pump_capacity`, `reservoir_pump_efficiency`, `reservoir_spillage_allowed`, `reservoir_invest_cost`, `reservoir_invest_max`, `reservoir_inflow_file` | `name` (key), `fuel` (`"None"`), `reservable` (true), `spillage` (true), `min_duration_hours`, `max_duration_hours`, `current_type` (`DC`), `bus_id_per_node`, `bus_index` |
+| **Copied when present** (any other schema field) | e.g. `fuel_cost_curve`, `droop`, `governor_time_const`, `q_max_mvar`, `q_min_mvar`, `power_factor`, `risk_coefficient`, `reservoir_min_release`, `cascade_downstream`, `cascade_delay_hours`, `reservoir_head_min_factor` | e.g. `technology`, `ramp_up`, `ramp_down`, `fixed_cost` (default 0), `throughput_degradation_cost`, `discharge_cost_curve`, `risk_coefficient` |
+
+`Availability` may also be written as `availability_file`.
+
+Generator `min_power` (a fraction of rated power) is clamped to 0–1 and a negative `ramp_up`/`ramp_down` (fractions of rated power per hour, 0 = no limit) to 0, with one warning per unit and field listing the nodes and values changed. The file still loads, so a project holding such values (Studio up to 0.3.0 summed `min_power` and ramps when merging units) opens in the Studio and can be corrected there.
+
+### Other sections
+
+- **Fuels:** `name`, `unit`, `emission_factor` (default 0), `energy_content`, `price_base` (default 0), `price_growth_rate`.
+- **Primary energy sources:** `name`, `unit`, `max_availability`, `import_cost`, `storage_capacity`, `initial_storage_level`, `min_storage_level` (0.1), plus any other schema field when present (`transport_transit_days_per_100km`, `disruption_start_hour`, `disruption_end_hour`, `disruption_availability`).
+- **Penalties:** keys are lower-cased before lookup, so `LOSS_OF_LOAD` and `loss_of_load` are the same. Every `PenaltiesConfig` field is read; absent ones take the schema default. Fields: `loss_of_load`, `loss_of_reserve_static`, `loss_of_reserve_dynamic`, `loss_of_inertia`, `transfer_margin` (also `TransferMargin`), `curtailment_cost`, `max_curtailment_ratio`, `rooftop_curtailment`, `co2_cost`, `co2_budget_violation`, `fre_penetration_loss`, `ev_loss`, `loss_of_fuel_supply`, `non_electric_demand_loss`, `soc_violation`. Any other key under `penalties` (for example `curtailment`, `coupling_slack_penalty` or `re_excess_penalty`, which older files may contain) is reported as an unknown key. `ev_loss` defaults to `loss_of_load` when absent.
+- **DC power flow:** fields are taken from the nested `dc_power_flow` mapping. `reactance_per_km`, `voltage_level_kv`, `max_angle_diff_deg` and `slack_bus` fall back to flat system keys `dc_<field>` in any case (`dc_slack_bus`, `DC_SLACK_BUS`, `DC_slack_bus`); every flat `dc_*` key is then removed.
+- **Electrolyzers:** a single `electrolyzer:` mapping becomes `electrolyzers["electrolyzer"]`; an `electrolyzers:` mapping is converted entry by entry.
+- **Buses:** a `current_type` other than `AC`/`DC` is replaced by `AC` with a warning.
+- **Technologies and battery technologies:** passed to `TechnologyConfig(**data)` / `BatteryTechnologyConfig(**data)` with `name` defaulting to the key, so every schema field (including `fuel_cost_curve` and `throughput_degradation_cost`) is read.
+- **Demand sectors, EV categories, rooftop solar, stochastic scenarios, CO₂ budget:** passed to their models unchanged.
+- **Name and alias both given:** when a system sets a field under its name and its alias (`target_re_penetration` and `TARGET_RE_PENETRATION`), the name is used and the alias dropped, with a warning when the values differ. Studio files up to 0.3.0 hold both: the alias with the value the file was opened with, the name with the edited value.
+
+### Fuel-cost linking and non-fuel O&M adder
+
+After the units are built, and only if the system has a non-empty `fuels` block, the loader adjusts each generator whose `fuel` is a key of `fuels`, of any type (a `Renewable` biomass unit with a priced fuel pays it; Sun, Wind and Water have no entry or a price of 0):
+
+1. **Fuel cost.** If `fuel_cost` is missing or its maximum is ≤ 0, and the fuel has `price_base > 0` and `energy_content > 0`, each node's fuel cost becomes `price_base / energy_content / eff`, where `eff` is the unit's `eff_at_rated` at that node, or the linked technology's first `eff_at_rated` when the unit's is 0. Nodes with no usable efficiency get 0.
+2. **Non-fuel adder.** A fixed non-fuel cost (described in the code as Lazard 2024 LCOE midpoints minus fuel) is added to `maintenance_cost`, by fuel family. The fuel's key and its `name` are compared ignoring case, spaces, `_` and `-`:
+
+    | Fuel names | Adder ($/MWh) |
+    |---|---|
+    | Gas: `Gas`, `Natural_gas`, `NG`, `LNG` | 60 |
+    | Diesel: `Diesel`, `Gasoil` | 60 |
+    | Fuel oil: `Fuel_oil`, `Oil`, `HFO`, `Heavy_fuel_oil`, `Crude`, `Crude_oil` | 55 |
+    | `Biomass` | 20 |
+
+    The adder is a variable (per-MWh) cost that stands in for O&M data the unit lacks. It is applied at every node whose fuel cost is positive, and skipped for the whole unit if the unit has its own fixed O&M (`fixed_cost` > 0, $/MW per year; the adder, which includes fixed O&M, would charge it twice) or its largest `maintenance_cost` is already at least half the adder. It applies whether the fuel cost was given or computed in step 1. Other fuel names (coal, for instance) get no adder.
+
+The loader logs (INFO) each unit that receives the adder, with the resulting `maintenance_cost`, and how many units were linked. Separately, it warns about non-renewable units whose fuel is `None`, empty or not in `fuels` and whose fuel cost is zero, because the model would dispatch them for free with zero emissions.
+
+**Candidate technologies.** Step 1 also applies to each entry of `technologies` whose `fuel` is a key of `fuels` and whose `fuel_cost` is missing or all zero: `price_base / energy_content / eff_at_rated` per node, a single `eff_at_rated` value counting for every node. The non-fuel adder (step 2) is not applied, since it includes capital cost, which a technology pays through `invest_cost`. The technologies linked are logged (INFO). A `Non-renewable` technology with no fuel cost left and no `fuel_cost_curve` is named in a warning with the reason (no fuel, fuel not in `fuels`, or no usable price, energy content or efficiency), even when the system has no `fuels` block.
 
 ---
 
@@ -171,17 +182,19 @@ The loader automatically handles case-insensitive penalty keys and sanitizes unk
 
 ```python
 class ConfigLoadError(Exception):
-    """Configuration loading or validation failed."""
+    issues: list[dict]   # one per problem: key, type, message, input
 ```
 
-Raised when:
+`issues` lists what is wrong, one dict per problem: `key`, the dotted path in the YAML (`systems.Cuba.generators.pv.rated_power`, `temporal.resolution_hours`; `""` when there is no single place), `type` (Pydantic's error type such as `list_type` or `less_than_equal`; `missing` for a required key; `file_not_found`, `yaml` or `load` otherwise), `message`, and `input` (the offending value when it is a scalar, else `None`). [`esfex validate --json`](../user-guide/scripts-and-agents.md#esfex-validate-json) reports them.
 
-- Configuration file not found at the specified path
-- YAML syntax error (malformed YAML)
-- Pydantic validation failure (type mismatch, missing required field, value out of range)
-- Referenced system files not found (for multi-file configurations)
+Raised by `load_config()` when:
 
-**Example:**
+- the configuration file, or a referenced system file, does not exist;
+- the YAML is malformed;
+- Pydantic validation fails (type mismatch, missing required field, value out of range, failed cross-field validator);
+- conversion fails for another reason, such as a required unit key missing.
+
+Unknown keys never raise. `load_config()` logs a warning for each key that nothing reads, with its dotted path (for example `systems.Cuba.generators.gas_1.dorop`), and returns them in `config.unknown_keys` (a list of str; empty for a clean file). `load_system_config()` logs them too. The check is `esfex.config.unknown_keys.find_unknown_keys(raw_dict)`; it uses the loader's own translation helpers (`esfex.config.legacy_keys`), so aliases, flat `dc_*` keys, case-insensitive penalty keys, `unit_*` / `bat_*` units and the Studio's metadata keys are not reported.
 
 ```python
 from esfex.config.loader import load_config, ConfigLoadError
@@ -189,20 +202,28 @@ from esfex.config.loader import load_config, ConfigLoadError
 try:
     config = load_config("nonexistent.yaml")
 except ConfigLoadError as e:
-    print(f"Failed to load config: {e}")
-    # "Configuration file not found: nonexistent.yaml"
+    print(e)   # Configuration file not found: nonexistent.yaml
 
 try:
     config = load_config("invalid.yaml")
 except ConfigLoadError as e:
-    # Pydantic validation errors are included in the message
-    print(f"Validation failed:\n{e}")
+    print(e)   # Configuration validation failed: ... / Failed to load configuration: ...
 ```
+
+### SavedConfigInvalidError
+
+```python
+class SavedConfigInvalidError(ConfigLoadError):
+    path: str          # the file the Studio saved
+    error: Exception   # the loader's exception
+```
+
+Raised by `esfex.visualization.launch_studio()` after the Studio window closes, when the user chose "Save anyway" on a configuration with errors: the file is written, but reloading it fails. `esfex studio` reports it and exits with code 1.
 
 ---
 
-## Environment and Path Resolution
+## Path Resolution
 
-- All file paths in the configuration (demand files, availability profiles) are resolved relative to the YAML file location when loaded via `load_config()`
-- The `config_path` parameter passed to `Orchestrator` is used for runtime path resolution
-- System file references in multi-file configurations are resolved relative to the main config file
+- `load_config()` resolves only system-file references, relative to the main configuration file.
+- Demand, availability and inflow paths are stored as written and resolved when the run starts, by the `Orchestrator`, against the folder of the main configuration file (`config_path`). Demand paths fall back to the path as given (working directory or absolute). See [Demand Data](../user-guide/demand-data.md) and [Availability Profiles](../user-guide/availability-profiles.md) for the exact rules.
+- File existence is therefore not checked by `load_config()` or `esfex validate`.

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.data.gui_model import GuiModel
 from esfex.visualization.i18n import tr
+from esfex.visualization.panels.multi_edit import add_choices, combo_value, select_value
 from esfex.visualization.panels.visual_style_widget import VisualStyleWidget
 
 # The model stores English literals ("Renewable" / "Non-renewable"); the combo
@@ -138,16 +139,16 @@ class GeneratorForm(QWidget):
         fl_cap.addRow(tr("generator_form.degradation"), self._degradation_rate)
         self._risk_coefficient = self._dbl_spin(0, 1, 4)
         self._risk_coefficient.setValue(1.0)
-        self._risk_coefficient.setToolTip(
-            "Geographic risk derating factor (0-1). Computed from hazard exposure "
-            "and component fragility via the Risk Workbench. 1.0 = no derating."
-        )
+        self._risk_coefficient.setToolTip(tr("generator_form.risk_coefficient_tooltip"))
         fl_cap.addRow(tr("generator_form.risk_coefficient"), self._risk_coefficient)
         layout.addWidget(grp_cap)
 
         # --- Operating Parameters ---
         grp_op = QGroupBox(tr("generator_form.group_operating"))
         fl_op = QFormLayout(grp_op)
+        self._num_units = self._int_spin(1, 10000)
+        self._num_units.setToolTip(tr("generator_form.num_units_tooltip"))
+        fl_op.addRow(tr("generator_form.num_units"), self._num_units)
         self._min_power = self._dbl_spin(0, 1, 3)
         fl_op.addRow(tr("generator_form.min_power"), self._min_power)
         self._min_up = self._int_spin(0, 168)
@@ -173,7 +174,12 @@ class GeneratorForm(QWidget):
         fl_cost.addRow(tr("generator_form.fuel_cost"), self._fuel_cost)
 
         self._fuel_curve_type = QComboBox()
-        self._fuel_curve_type.addItems(["flat", "linear", "stepwise", "exponential"])
+        add_choices(self._fuel_curve_type, [
+            ("flat", tr("generator_form.curve_flat")),
+            ("linear", tr("generator_form.curve_linear")),
+            ("stepwise", tr("generator_form.curve_stepwise")),
+            ("exponential", tr("generator_form.curve_exponential")),
+        ])
         self._fuel_curve_type.currentIndexChanged.connect(self._on_fuel_curve_type_changed)
         fl_cost.addRow(tr("generator_form.curve_type"), self._fuel_curve_type)
 
@@ -235,11 +241,13 @@ class GeneratorForm(QWidget):
         self._fuel_curve_stack.setVisible(False)  # Hidden for "flat"
         fl_cost.addRow(self._fuel_curve_stack)
 
-        self._fixed_cost = self._dbl_spin(0, 1e6, 2)
+        self._fixed_cost = self._dbl_spin(0, 1e7, 2)
+        self._fixed_cost.setToolTip(tr("generator_form.fixed_cost_tooltip"))
         fl_cost.addRow(tr("generator_form.fixed_cost"), self._fixed_cost)
         self._maintenance_cost = self._dbl_spin(0, 1e6, 2)
         fl_cost.addRow(tr("generator_form.maintenance_cost"), self._maintenance_cost)
         self._start_up_cost = self._dbl_spin(0, 1e9, 0)
+        self._start_up_cost.setToolTip(tr("generator_form.startup_cost_tooltip"))
         fl_cost.addRow(tr("generator_form.startup_cost"), self._start_up_cost)
         self._decommissioning_cost = self._dbl_spin(0, 1e9, 0)
         fl_cost.addRow(tr("generator_form.decommissioning_cost"), self._decommissioning_cost)
@@ -251,7 +259,9 @@ class GeneratorForm(QWidget):
         self._frequency_hz = self._dbl_spin(0.1, 400, 1)
         fl_elec.addRow(tr("generator_form.frequency"), self._frequency_hz)
         self._current_type = QComboBox()
-        self._current_type.addItems(["AC", "DC", "AC_DC"])
+        add_choices(self._current_type, [
+            ("AC", "AC"), ("DC", "DC"), ("AC_DC", tr("generator_form.current_ac_dc")),
+        ])
         self._current_type.currentIndexChanged.connect(self._on_changed)
         fl_elec.addRow(tr("generator_form.current_type"), self._current_type)
         self._inertia = self._dbl_spin(0, 100, 2)
@@ -337,9 +347,10 @@ class GeneratorForm(QWidget):
         self._reservoir_group.setVisible(False)
         layout.addWidget(self._reservoir_group)
 
-        # Connect reservoir_capacity to show/hide the group
-        # (disconnect first since _dbl_spin already connected _on_changed)
-        self._reservoir_capacity.valueChanged.connect(self._on_reservoir_toggled)
+        # The section shows for hydro (fuel "Water") or when a reservoir is
+        # set, so a new hydro unit (capacity 0) can get one.
+        self._reservoir_capacity.valueChanged.connect(self._update_reservoir_visibility)
+        self._fuel.currentIndexChanged.connect(self._update_reservoir_visibility)
 
         # --- Appearance ---
         self._style_widget = VisualStyleWidget(
@@ -414,6 +425,7 @@ class GeneratorForm(QWidget):
         self._degradation_rate.setValue(inst.degradation_rate)
         self._risk_coefficient.setValue(getattr(inst, "risk_coefficient", 1.0))
 
+        self._num_units.setValue(getattr(inst, "num_units", 1))
         self._min_power.setValue(inst.min_power)
         self._min_up.setValue(inst.min_up)
         self._min_down.setValue(inst.min_down)
@@ -426,9 +438,7 @@ class GeneratorForm(QWidget):
 
         # Load fuel cost curve
         ct = inst.fuel_cost_curve_type or "flat"
-        ct_idx = self._fuel_curve_type.findText(ct)
-        if ct_idx >= 0:
-            self._fuel_curve_type.setCurrentIndex(ct_idx)
+        select_value(self._fuel_curve_type, ct)
         self._load_fuel_curve_data(inst.fuel_cost_curve_data or {}, ct)
 
         self._fixed_cost.setValue(inst.fixed_cost)
@@ -437,9 +447,7 @@ class GeneratorForm(QWidget):
         self._decommissioning_cost.setValue(inst.decommissioning_cost)
 
         self._frequency_hz.setValue(inst.frequency_hz)
-        ct_idx = self._current_type.findText(inst.current_type)
-        if ct_idx >= 0:
-            self._current_type.setCurrentIndex(ct_idx)
+        select_value(self._current_type, inst.current_type)
         self._inertia.setValue(inst.inertia)
         self._droop.setValue(inst.droop)
         self._governor_time_const.setValue(inst.governor_time_const)
@@ -475,7 +483,7 @@ class GeneratorForm(QWidget):
         self._cascade_downstream.blockSignals(False)
         self._cascade_delay_hours.setValue(
             int(getattr(inst, "cascade_delay_hours", 0) or 0))
-        self._reservoir_group.setVisible(inst.reservoir_capacity > 0)
+        self._update_reservoir_visibility()
 
         # Set default color based on generator type before loading style
         from esfex.visualization.data.default_colors import get_generator_color
@@ -531,6 +539,7 @@ class GeneratorForm(QWidget):
             ("initial_age", self._initial_age),
             ("degradation_rate", self._degradation_rate),
             ("risk_coefficient", self._risk_coefficient),
+            ("num_units", self._num_units),
             ("min_power", self._min_power),
             ("min_up", self._min_up),
             ("min_down", self._min_down),
@@ -589,7 +598,7 @@ class GeneratorForm(QWidget):
                 if attr in ("availability_file", "reservoir_inflow_file"):
                     val = val or None
             elif isinstance(w, QComboBox):
-                val = w.currentText()
+                val = combo_value(w)
             else:
                 val = w.value()
             for inst in instances:
@@ -618,7 +627,7 @@ class GeneratorForm(QWidget):
                 inst.reservoir_spillage_allowed = val
 
         # Sync cost curve type and data
-        ct = self._fuel_curve_type.currentText()
+        ct = combo_value(self._fuel_curve_type)
         curve_data = self._collect_fuel_curve_data(ct)
         for inst in instances:
             inst.fuel_cost_curve_type = ct
@@ -641,14 +650,16 @@ class GeneratorForm(QWidget):
         self._fuel_curve_stack.setVisible(idx > 0)
         self._on_changed()
 
-    def _on_reservoir_toggled(self, val):
-        """Show/hide reservoir fields based on capacity."""
-        self._reservoir_group.setVisible(val > 0)
+    def _update_reservoir_visibility(self, *_args):
+        """Show the reservoir fields for hydro units or units with a reservoir."""
+        self._reservoir_group.setVisible(
+            self._fuel.currentText() == "Water"
+            or self._reservoir_capacity.value() > 0)
 
     def _browse_inflow_file(self):
         from PySide6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
-            self, tr("generator_form.select_inflow_file"), "", "CSV (*.csv);;All (*)"
+            self, tr("generator_form.select_inflow_file"), "", tr("generator_form.csv_filter")
         )
         if path:
             self._reservoir_inflow_file.setText(path)
@@ -699,7 +710,7 @@ class GeneratorForm(QWidget):
                 start_dir = str(p.parent)
         path, _ = QFileDialog.getOpenFileName(
             self, tr("generator_form.select_availability_file"),
-            start_dir, "CSV (*.csv);;All (*)",
+            start_dir, tr("generator_form.csv_filter"),
         )
         if path:
             self._availability.setText(path)

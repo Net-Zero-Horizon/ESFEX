@@ -1,7 +1,7 @@
 """
     solve_dcopf(; num_buses, demand, gen_bus, gen_cost, gen_max,
                   line_from, line_to, line_x, line_cap,
-                  slack_bus, base_impedance,
+                  slack_bus, s_base,
                   gen_min, line_tap, line_shift)
 
 Lightweight DC Optimal Power Flow solver for benchmarking.
@@ -12,7 +12,7 @@ line power flows.  Uses HiGHS as LP solver.
 
 Supports transformer tap ratios and phase shifters following the
 MATPOWER ``makeBdc`` convention:
-  b_line = base_impedance / (x * tap)
+  b_line = s_base / (x * tap)
   flow  = b_line * (θ_from - θ_to - shift_rad)
 
 All bus indices are **1-based** (Julia convention).
@@ -40,7 +40,7 @@ function solve_dcopf(;
     line_tap::AbstractVector{<:Real} = ones(Float64, length(line_x)),
     line_shift::AbstractVector{<:Real} = zeros(Float64, length(line_x)),
     slack_bus::Int,
-    base_impedance::Real,
+    s_base::Real,
 )::Dict{String, Any}
 
     # Convert to concrete Julia arrays for JuMP compatibility
@@ -55,14 +55,14 @@ function solve_dcopf(;
     line_cap  = collect(Float64, line_cap)
     line_tap  = collect(Float64, line_tap)
     line_shift = collect(Float64, line_shift)
-    base_impedance = Float64(base_impedance)
+    s_base = Float64(s_base)
 
     n_bus  = num_buses
     n_gen  = length(gen_bus)
     n_line = length(line_from)
 
     # ── Model ────────────────────────────────────────────────────────────
-    model = Model(create_optimizer(solver_name="highs", verbose=false))
+    model = solver_model(create_optimizer(solver_name="highs", verbose=false))
 
     # ── Variables ────────────────────────────────────────────────────────
     @variable(model, pg[1:n_gen])             # generator output (MW)
@@ -80,7 +80,7 @@ function solve_dcopf(;
 
     # ── Flow-angle coupling: pf = b_line * (θ_from - θ_to - shift) ─────
     for l in 1:n_line
-        b_line = base_impedance / (line_x[l] * line_tap[l])  # susceptance (MW/rad)
+        b_line = s_base / (line_x[l] * line_tap[l])  # susceptance (MW/rad)
         shift_rad = deg2rad(line_shift[l])
         @constraint(model, pf[l] == b_line * (θ[line_from[l]] - θ[line_to[l]] - shift_rad))
     end

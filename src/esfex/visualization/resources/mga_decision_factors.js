@@ -32,18 +32,18 @@ function refresh() {
     if (!bridge) return;
     bridge.get_data(raw => {
         let data; try { data = JSON.parse(raw); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false); return;
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return;
         }
         try {
             currentData = data;
             currentCmap = data.colormap || "Viridis";
             currentGranularity = data.granularity || "tech";
+            hideStatus();                       // render() may show its own empty state
             render(currentData, currentCmap, currentGranularity);
-            hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true); console.error(e);
+            showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e);
         }
     });
 }
@@ -112,19 +112,42 @@ function findHeatmapTraceIdx() {
     return 0;
 }
 
+// MGA technology categories, as _mga_category (results_charts.py) names
+// them: Solar / Wind / Other RE / Storage / Thermal / Other, and "All"
+// for the treemap root. The ids stay in the data; only the shown text
+// is translated.
+function mgaCatSlug(cat) {
+    return String(cat).toLowerCase().replace(/\s+/g, "_");
+}
+function mgaCategoryLabel(cat) {
+    const names = {
+        solar: _t("web.charts.helpers.mga_cat_solar"), wind: _t("web.charts.helpers.mga_cat_wind"),
+        other_re: _t("web.charts.helpers.mga_cat_other_re"), storage: _t("web.charts.helpers.mga_cat_storage"),
+        thermal: _t("web.charts.helpers.mga_cat_thermal"), other: _t("web.charts.helpers.mga_cat_other"),
+        all: _t("web.charts.helpers.mga_cat_all"),
+    };
+    return names[mgaCatSlug(cat)] || cat;
+}
+
 function render(data, cmap, granularity) {
     const df = data.decision_factors;
     if (!df || !df.views) {
-        showStatus("No decision factors to display.", false);
+        showStatus(_t("web.charts.mga_decision_factors.no_data"), false);
         return;
     }
     const view = df.views[granularity] || df.views.tech;
     if (!view || !view.matrix || view.matrix.length === 0
         || view.tech_labels.length === 0) {
-        showStatus("This view has no factor columns above the 1 MW threshold.", false);
+        showStatus(_t("web.charts.mga_decision_factors.no_columns"), false);
         return;
     }
-    const nRows = df.alt_labels.length;
+    // Rebuild the row labels ("★ Alt N") so "Alt" follows the language;
+    // fall back to the labels Python sends.
+    const altLabels = (df.alt_ids && df.alt_ids.length === df.alt_labels.length)
+        ? df.alt_ids.map((id, i) => ((df.is_optimal && df.is_optimal[i]) ? "★ " : "")
+            + _t("web.charts.mga_decision_factors.alt_label", { id: id }))
+        : df.alt_labels;
+    const nRows = altLabels.length;
     const nCols = view.tech_labels.length;
     const rowIdx = df.alt_labels.map((_, i) => i);
     const colIdx = view.tech_labels.map((_, i) => i);
@@ -173,10 +196,10 @@ function render(data, cmap, granularity) {
         colorbar: { title: { text: "MW", side: "right" },
                     thickness: 12, len: 0.6, y: 0.40, yanchor: "middle" },
         customdata: rowIdx.map(i => colIdx.map(j =>
-            [df.alt_labels[i], view.tech_labels[j], view.tech_categories[j]])),
+            [altLabels[i], view.tech_labels[j], mgaCategoryLabel(view.tech_categories[j])])),
         hovertemplate:
             "<b>%{customdata[0]} · %{customdata[1]}</b><br>" +
-            "category: %{customdata[2]}<br>" +
+            _t("web.charts.mga_decision_factors.hover_category") + "<br>" +
             "%{z:,.0f} MW<extra></extra>",
     };
     traces.push(heatmap);
@@ -194,17 +217,12 @@ function render(data, cmap, granularity) {
         });
     }
 
-    const granLabel = granularity === "tech_node"
-        ? "technology × node placement"
-        : "technology (aggregated across nodes)";
+    const subtitle = granularity === "tech_node"
+        ? _t("web.charts.mga_decision_factors.subtitle_tech_node")
+        : _t("web.charts.mga_decision_factors.subtitle_tech");
     const layout = {
-        margin: { l: 20, r: 30, t: 96, b: bottomMargin },
-        title: { text: "<b>Decision Factors — Alternatives × " +
-                       (granularity === "tech_node" ? "Tech × Node"
-                                                    : "Technologies") +
-                       "</b><br>" +
-                       "<span style='font-size:11px;color:#7f8c8d'>rows clustered by Euclidean distance · columns clustered by co-investment correlation · cell colour = MW invested · " +
-                       granLabel + "</span>",
+        margin: { l: 20, r: 30, t: 50, b: bottomMargin },
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>" + subtitle + "</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top",
                  font: { size: 13 } },
         // X axes ─────────────────────────────────────────────────────
@@ -231,7 +249,7 @@ function render(data, cmap, granularity) {
         // y3 → category colour strip just above the heatmap
         yaxis: {
             domain: [0.0, 0.65], anchor: "x",
-            tickmode: "array", tickvals: rowIdx, ticktext: df.alt_labels,
+            tickmode: "array", tickvals: rowIdx, ticktext: altLabels,
             automargin: true, autorange: "reversed",
             range: [nRows - 0.5, -0.5],
         },

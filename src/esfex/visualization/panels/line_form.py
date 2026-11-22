@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.data.gui_model import GuiModel
 from esfex.visualization.i18n import tr
+from esfex.visualization.panels.multi_edit import add_choices, combo_value, select_value
 from esfex.visualization.panels.visual_style_widget import VisualStyleWidget
 
 
@@ -85,69 +86,70 @@ class LineForm(QWidget):
         layout.addRow(tr("line_form.voltage"), self._voltage)
 
         self._line_type = QComboBox()
-        self._line_type.addItems(["", "overhead", "underground", "submarine"])
-        self._line_type.currentTextChanged.connect(self._on_changed)
+        add_choices(self._line_type, [
+            ("", ""),
+            ("overhead", tr("line_form.type_overhead")),
+            ("underground", tr("line_form.type_underground")),
+            ("submarine", tr("line_form.type_submarine")),
+        ])
+        self._line_type.currentIndexChanged.connect(self._on_changed)
         layout.addRow(tr("line_form.type"), self._line_type)
 
         self._length_km = QDoubleSpinBox()
         self._length_km.setRange(0, 100000)
         self._length_km.setDecimals(2)
-        self._length_km.setSpecialValueText("Auto")
+        self._length_km.setSpecialValueText(tr("line_form.auto"))
         self._length_km.setReadOnly(True)
         layout.addRow(tr("line_form.length"), self._length_km)
-
-        self._base_impedance = QDoubleSpinBox()
-        self._base_impedance.setRange(0, 1e6)
-        self._base_impedance.setDecimals(2)
-        self._base_impedance.setSpecialValueText("Default")
-        self._base_impedance.editingFinished.connect(self._on_changed)
-        layout.addRow(tr("line_form.base_impedance"), self._base_impedance)
 
         self._reactance_per_km = QDoubleSpinBox()
         self._reactance_per_km.setRange(0, 100)
         self._reactance_per_km.setDecimals(4)
-        self._reactance_per_km.setSpecialValueText("Default")
+        self._reactance_per_km.setSpecialValueText(tr("line_form.default"))
+        self._reactance_per_km.setToolTip(tr("line_form.reactance_per_km_tip"))
         self._reactance_per_km.editingFinished.connect(self._on_changed)
         layout.addRow(tr("line_form.reactance_per_km"), self._reactance_per_km)
 
         self._reactance_pu = QDoubleSpinBox()
         self._reactance_pu.setRange(0, 100)
         self._reactance_pu.setDecimals(6)
-        self._reactance_pu.setSpecialValueText("Global")
+        self._reactance_pu.setSpecialValueText(tr("line_form.global"))
         self._reactance_pu.editingFinished.connect(self._on_changed)
         layout.addRow(tr("line_form.reactance_pu"), self._reactance_pu)
 
         self._resistance_pu = QDoubleSpinBox()
         self._resistance_pu.setRange(0, 100)
         self._resistance_pu.setDecimals(6)
-        self._resistance_pu.setSpecialValueText("Global")
+        self._resistance_pu.setSpecialValueText(tr("line_form.global"))
         self._resistance_pu.editingFinished.connect(self._on_changed)
         layout.addRow(tr("line_form.resistance_pu"), self._resistance_pu)
 
         self._susceptance_pu = QDoubleSpinBox()
         self._susceptance_pu.setRange(0, 100)
         self._susceptance_pu.setDecimals(6)
-        self._susceptance_pu.setSpecialValueText("Global")
+        self._susceptance_pu.setSpecialValueText(tr("line_form.global"))
         self._susceptance_pu.editingFinished.connect(self._on_changed)
         layout.addRow(tr("line_form.susceptance_pu"), self._susceptance_pu)
 
         self._num_circuits = QSpinBox()
         self._num_circuits.setRange(1, 10)
+        self._num_circuits.setToolTip(tr("line_form.circuits_tip"))
         self._num_circuits.valueChanged.connect(self._on_changed)
         layout.addRow(tr("line_form.circuits"), self._num_circuits)
 
         self._frequency_hz = QDoubleSpinBox()
         self._frequency_hz.setRange(0.0, 400)
         self._frequency_hz.setDecimals(1)
-        self._frequency_hz.setSpecialValueText("N/A")
+        self._frequency_hz.setSpecialValueText(tr("line_form.not_applicable"))
         self._frequency_hz.editingFinished.connect(self._on_changed)
         self._frequency_hz.setEnabled(False)
         self._frequency_hz.setToolTip(tr("electrical.inherited_tooltip"))
         layout.addRow(tr("line_form.frequency"), self._frequency_hz)
 
         self._current_type = QComboBox()
-        self._current_type.addItems(["AC", "DC"])
-        self._current_type.currentTextChanged.connect(self._on_current_type_changed)
+        add_choices(self._current_type, [("AC", "AC"), ("DC", "DC")])
+        self._current_type.currentIndexChanged.connect(
+            lambda _i: self._on_current_type_changed(combo_value(self._current_type)))
         self._current_type.setEnabled(False)
         self._current_type.setToolTip(tr("electrical.inherited_tooltip"))
         layout.addRow(tr("line_form.current_type"), self._current_type)
@@ -215,12 +217,9 @@ class LineForm(QWidget):
         self._capacity.setValue(line.capacity_mw)
         self._voltage.setValue(line.voltage_kv or 0)
 
-        lt_idx = self._line_type.findText(line.line_type or "")
-        if lt_idx >= 0:
-            self._line_type.setCurrentIndex(lt_idx)
+        select_value(self._line_type, line.line_type or "")
 
         self._length_km.setValue(line.length_km or 0)
-        self._base_impedance.setValue(line.base_impedance or 0)
         self._reactance_per_km.setValue(line.reactance_per_km or 0)
         self._reactance_pu.setValue(line.reactance_pu or 0)
         self._resistance_pu.setValue(line.resistance_pu or 0)
@@ -229,9 +228,7 @@ class LineForm(QWidget):
 
         # Load current type first
         current_type = getattr(line, 'current_type', 'AC')
-        ct_idx = self._current_type.findText(current_type)
-        if ct_idx >= 0:
-            self._current_type.setCurrentIndex(ct_idx)
+        select_value(self._current_type, current_type)
 
         # Load frequency with proper defaults based on current type
         frequency = getattr(line, 'frequency_hz', 50.0)
@@ -346,7 +343,6 @@ class LineForm(QWidget):
         return [
             ("capacity_mw", self._capacity),
             ("line_type", self._line_type),
-            ("base_impedance", self._base_impedance),
             ("reactance_per_km", self._reactance_per_km),
             ("reactance_pu", self._reactance_pu),
             ("resistance_pu", self._resistance_pu),
@@ -387,7 +383,6 @@ class LineForm(QWidget):
         field_to_kwarg = {
             "capacity_mw": "capacity_mw",
             "line_type": "line_type",
-            "base_impedance": "base_impedance",
             "reactance_per_km": "reactance_per_km",
             "reactance_pu": "reactance_pu",
             "resistance_pu": "resistance_pu",
@@ -398,12 +393,12 @@ class LineForm(QWidget):
             if widget_is_mixed(w):
                 continue
             if isinstance(w, QComboBox):
-                val = w.currentText()
+                val = combo_value(w)
                 if attr == "line_type":
                     val = val or None
             else:
                 val = w.value()
-                if attr in ("voltage_kv", "base_impedance", "reactance_per_km",
+                if attr in ("voltage_kv", "reactance_per_km",
                             "reactance_pu", "resistance_pu", "susceptance_pu",
                             "length_km"):
                     val = val or None

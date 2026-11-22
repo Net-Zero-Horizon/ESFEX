@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.data.gui_model import GuiModel
 from esfex.visualization.i18n import tr
+from esfex.visualization.panels.multi_edit import add_choices, combo_value, select_value
 from esfex.visualization.panels.visual_style_widget import VisualStyleWidget
 
 
@@ -71,7 +73,7 @@ class BatteryForm(QWidget):
         fl_id.addRow(tr("battery_form.availability"), self._availability)
 
         self._current_type = QComboBox()
-        self._current_type.addItems(["AC", "DC"])
+        add_choices(self._current_type, [("AC", "AC"), ("DC", "DC")])
         self._current_type.currentIndexChanged.connect(self._on_changed)
         fl_id.addRow(tr("battery_form.current_type"), self._current_type)
 
@@ -118,30 +120,24 @@ class BatteryForm(QWidget):
         fl_life.addRow(tr("battery_form.degradation"), self._degradation_rate)
         self._risk_coefficient = self._dbl_spin(0, 1, 4)
         self._risk_coefficient.setValue(1.0)
-        self._risk_coefficient.setToolTip(
-            "Geographic risk derating factor (0-1). Computed from hazard exposure "
-            "and component fragility via the Risk Workbench. 1.0 = no derating."
-        )
+        self._risk_coefficient.setToolTip(tr("battery_form.risk_coefficient_tooltip"))
         fl_life.addRow(tr("battery_form.risk_coefficient"), self._risk_coefficient)
         layout.addWidget(grp_life)
 
         # --- Operating Parameters ---
         grp_op = QGroupBox(tr("battery_form.group_operating"))
         fl_op = QFormLayout(grp_op)
-        self._min_power = self._dbl_spin(0, 1, 3)
-        fl_op.addRow(tr("battery_form.min_power"), self._min_power)
-        self._min_up = self._int_spin(0, 168)
-        fl_op.addRow(tr("battery_form.min_up"), self._min_up)
-        self._min_down = self._int_spin(0, 168)
-        fl_op.addRow(tr("battery_form.min_down"), self._min_down)
         self._ramp_up = self._dbl_spin(0, 10, 3)
+        self._ramp_up.setToolTip(tr("battery_form.ramp_tooltip"))
         fl_op.addRow(tr("battery_form.ramp_up"), self._ramp_up)
         self._ramp_down = self._dbl_spin(0, 10, 3)
+        self._ramp_down.setToolTip(tr("battery_form.ramp_tooltip"))
         fl_op.addRow(tr("battery_form.ramp_down"), self._ramp_down)
-        self._eff_at_rated = self._dbl_spin(0, 1, 3)
-        fl_op.addRow(tr("battery_form.eff_at_rated"), self._eff_at_rated)
-        self._eff_at_min = self._dbl_spin(0, 1, 3)
-        fl_op.addRow(tr("battery_form.eff_at_min"), self._eff_at_min)
+        # Tristate only to show "mixed" when editing several batteries
+        self._reservable = QCheckBox()
+        self._reservable.setToolTip(tr("battery_form.reservable_tooltip"))
+        self._reservable.stateChanged.connect(self._on_changed)
+        fl_op.addRow(tr("battery_form.reservable"), self._reservable)
         self._inertia = self._dbl_spin(0, 100, 2)
         fl_op.addRow(tr("battery_form.inertia"), self._inertia)
         layout.addWidget(grp_op)
@@ -149,9 +145,8 @@ class BatteryForm(QWidget):
         # --- Costs ---
         grp_cost = QGroupBox(tr("battery_form.group_costs"))
         fl_cost = QFormLayout(grp_cost)
-        self._fuel_cost = self._dbl_spin(0, 1e6, 2)
-        fl_cost.addRow(tr("battery_form.fuel_cost"), self._fuel_cost)
-        self._fixed_cost = self._dbl_spin(0, 1e6, 2)
+        self._fixed_cost = self._dbl_spin(0, 1e9, 2)
+        self._fixed_cost.setToolTip(tr("battery_form.fixed_cost_tooltip"))
         fl_cost.addRow(tr("battery_form.fixed_cost"), self._fixed_cost)
         self._maintenance_cost = self._dbl_spin(0, 1e6, 2)
         fl_cost.addRow(tr("battery_form.maintenance_cost"), self._maintenance_cost)
@@ -162,7 +157,12 @@ class BatteryForm(QWidget):
 
         # Discharge cost curve type selector
         self._dc_curve_type = QComboBox()
-        self._dc_curve_type.addItems(["flat", "linear", "stepwise", "exponential"])
+        add_choices(self._dc_curve_type, [
+            ("flat", tr("battery_form.curve_flat")),
+            ("linear", tr("battery_form.curve_linear")),
+            ("stepwise", tr("battery_form.curve_stepwise")),
+            ("exponential", tr("battery_form.curve_exponential")),
+        ])
         self._dc_curve_type.currentIndexChanged.connect(self._on_dc_curve_type_changed)
         fl_cost.addRow(tr("battery_form.discharge_curve_type"), self._dc_curve_type)
 
@@ -223,8 +223,6 @@ class BatteryForm(QWidget):
         self._dc_curve_stack.setVisible(False)
         fl_cost.addRow(self._dc_curve_stack)
 
-        self._start_up_cost = self._dbl_spin(0, 1e9, 0)
-        fl_cost.addRow(tr("battery_form.startup_cost"), self._start_up_cost)
         self._decommissioning_cost = self._dbl_spin(0, 1e9, 0)
         fl_cost.addRow(tr("battery_form.decommissioning_cost"), self._decommissioning_cost)
         layout.addWidget(grp_cost)
@@ -293,9 +291,7 @@ class BatteryForm(QWidget):
 
         self._availability.setText(inst.availability_file or "")
 
-        ct_idx = self._current_type.findText(getattr(inst, 'current_type', 'DC'))
-        if ct_idx >= 0:
-            self._current_type.setCurrentIndex(ct_idx)
+        select_value(self._current_type, getattr(inst, 'current_type', 'DC'))
 
         self._rated_power.setValue(inst.rated_power)
         self._capacity.setValue(inst.capacity)
@@ -314,28 +310,21 @@ class BatteryForm(QWidget):
         self._degradation_rate.setValue(inst.degradation_rate)
         self._risk_coefficient.setValue(getattr(inst, "risk_coefficient", 1.0))
 
-        self._min_power.setValue(inst.min_power)
-        self._min_up.setValue(inst.min_up)
-        self._min_down.setValue(inst.min_down)
         self._ramp_up.setValue(inst.ramp_up)
         self._ramp_down.setValue(inst.ramp_down)
-        self._eff_at_rated.setValue(inst.eff_at_rated)
-        self._eff_at_min.setValue(inst.eff_at_min)
+        self._reservable.setTristate(False)
+        self._reservable.setChecked(bool(inst.reservable))
         self._inertia.setValue(inst.inertia)
 
-        self._fuel_cost.setValue(inst.fuel_cost)
         self._fixed_cost.setValue(inst.fixed_cost)
         self._maintenance_cost.setValue(inst.maintenance_cost)
         self._throughput_degradation_cost.setValue(inst.throughput_degradation_cost)
 
         # Load discharge cost curve
         dct = getattr(inst, 'discharge_cost_curve_type', 'flat') or 'flat'
-        dct_idx = self._dc_curve_type.findText(dct)
-        if dct_idx >= 0:
-            self._dc_curve_type.setCurrentIndex(dct_idx)
+        select_value(self._dc_curve_type, dct)
         self._load_dc_curve_data(getattr(inst, 'discharge_cost_curve_data', None) or {}, dct)
 
-        self._start_up_cost.setValue(inst.start_up_cost)
         self._decommissioning_cost.setValue(inst.decommissioning_cost)
 
         from esfex.visualization.data.default_colors import BATTERY
@@ -365,6 +354,11 @@ class BatteryForm(QWidget):
 
         for attr, w in self._field_map():
             set_widget_value(w, collect_attr(instances, attr))
+        flags = {bool(i.reservable) for i in instances}
+        self._reservable.setTristate(len(flags) > 1)
+        self._reservable.setCheckState(
+            Qt.PartiallyChecked if len(flags) > 1
+            else Qt.Checked if flags.pop() else Qt.Unchecked)
 
         self._updating = False
 
@@ -389,19 +383,12 @@ class BatteryForm(QWidget):
             ("initial_age", self._initial_age),
             ("degradation_rate", self._degradation_rate),
             ("risk_coefficient", self._risk_coefficient),
-            ("min_power", self._min_power),
-            ("min_up", self._min_up),
-            ("min_down", self._min_down),
             ("ramp_up", self._ramp_up),
             ("ramp_down", self._ramp_down),
-            ("eff_at_rated", self._eff_at_rated),
-            ("eff_at_min", self._eff_at_min),
             ("inertia", self._inertia),
-            ("fuel_cost", self._fuel_cost),
             ("fixed_cost", self._fixed_cost),
             ("maintenance_cost", self._maintenance_cost),
             ("throughput_degradation_cost", self._throughput_degradation_cost),
-            ("start_up_cost", self._start_up_cost),
             ("decommissioning_cost", self._decommissioning_cost),
         ]
 
@@ -431,7 +418,7 @@ class BatteryForm(QWidget):
                 elif attr in ("min_duration_hours", "max_duration_hours"):
                     pass  # handled below
             elif isinstance(w, QComboBox):
-                val = w.currentText()
+                val = combo_value(w)
             else:
                 val = w.value()
             if attr == "min_duration_hours":
@@ -452,8 +439,13 @@ class BatteryForm(QWidget):
             for inst in instances:
                 inst.technology_id = tech_id
 
+        if self._reservable.checkState() != Qt.PartiallyChecked:
+            self._reservable.setTristate(False)
+            for inst in instances:
+                inst.reservable = self._reservable.isChecked()
+
         # Sync discharge cost curve
-        dct = self._dc_curve_type.currentText()
+        dct = combo_value(self._dc_curve_type)
         dc_data = self._collect_dc_curve_data(dct)
         for inst in instances:
             inst.discharge_cost_curve_type = dct

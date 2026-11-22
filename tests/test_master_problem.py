@@ -55,7 +55,7 @@ def simple_network(julia_setup):
         bus_to_node,
         py_to_julia_matrix(connections),
         py_to_julia_matrix(distances),
-        100.0,  # base_impedance
+        100.0,  # s_base
         0.4,    # reactance_per_km
         220.0,  # voltage_level_kv
         np.deg2rad(30.0),  # max_angle_diff_rad
@@ -108,7 +108,6 @@ def simple_generators(julia_setup):
         py_to_julia_vector([0.0, 0.0]),      # maintenance_cost
         py_to_julia_vector([0.0, 0.0]),      # inertia
         py_to_julia_vector([800000.0, 800000.0]),  # invest_cost ($/MW)
-        py_to_julia_vector([200.0, 150.0]),  # invest_max (MW)
         py_to_julia_matrix(solar_avail),     # availability
         False,                               # reservable
         py_to_julia_vector([25.0, 25.0]),    # life_time
@@ -144,7 +143,6 @@ def simple_generators(julia_setup):
         py_to_julia_vector([3.0, 3.0]),      # maintenance_cost
         py_to_julia_vector([5.0, 5.0]),      # inertia
         py_to_julia_vector([600000.0, 600000.0]),  # invest_cost
-        py_to_julia_vector([100.0, 100.0]),  # invest_max
         py_to_julia_matrix(gas_avail),       # availability
         True,                                # reservable
         py_to_julia_vector([30.0, 30.0]),    # life_time
@@ -186,9 +184,7 @@ def simple_batteries(julia_setup):
         py_to_julia_vector([0.5, 0.5]),      # soc_initial
         py_to_julia_vector([0.0001, 0.0001]), # self_discharge
         py_to_julia_vector([150000.0, 150000.0]),  # invest_cost_power
-        py_to_julia_vector([200000.0, 200000.0]),  # invest_cost_capacity
         py_to_julia_vector([50.0, 40.0]),    # invest_max_power
-        py_to_julia_vector([200.0, 150.0]),  # invest_max_capacity
         py_to_julia_vector([15.0, 15.0]),    # life_time
         py_to_julia_vector([0.0, 0.0]),      # initial_age
         py_to_julia_vector([0.0, 0.0]),      # decommissioning_cost
@@ -258,7 +254,6 @@ class TestMasterProblemTargets:
             max_annual_investment=1e9,
             target_re_penetration=0.8,
             initial_re_penetration=0.2,
-            slack_penalty=1e6,
         )
 
         targets = ESFEX.calculate_target_ratios(jl_input)
@@ -309,7 +304,7 @@ class TestMasterProblemBuild:
         # Check variables were created (master uses tech-based investments)
         assert len(vars.tech_investment) == 2  # 2 years
         assert len(vars.bat_tech_power_investment) == 2
-        assert len(vars.re_penetration_ratio) == 2
+        assert len(vars.re_energy_ratio) == 2
 
         logger.info("MasterProblem model built successfully")
 
@@ -377,7 +372,6 @@ class TestMasterProblemSolve:
             max_annual_investment=5e8,  # 500M budget
             target_re_penetration=0.5,
             initial_re_penetration=0.3,
-            slack_penalty=1e9,
             verbose=False,
         )
 
@@ -434,7 +428,7 @@ class TestMasterProblemSolve:
                 py_to_julia_vector([80.0, 0.0]),     # rated_power (turbine), bus 1
                 z2(), o2(), o2(), o2(), o2(), z2(), z2(), z2(),
                 py_to_julia_vector([0.001, 0.001]),  # fuel_cost (~0, cheap)
-                z2(), z2(), z2(), z2(), z2(), avail2, True,
+                z2(), z2(), z2(), z2(), avail2, True,
                 py_to_julia_vector([100.0, 100.0]), z2(), z2(), z2(),
                 50.0, "AC",
                 py_to_julia_vector([400.0, 0.0]),    # reservoir_capacity (MWh) bus 1
@@ -451,7 +445,7 @@ class TestMasterProblemSolve:
             py_to_julia_vector([200.0, 200.0]),  # rated_power
             z2(), o2(), o2(), o2(), o2(), z2(), z2(), z2(),
             py_to_julia_vector([200.0, 200.0]),  # fuel_cost (expensive backup)
-            z2(), z2(), py_to_julia_vector([5.0, 5.0]), z2(), z2(), avail2, True,
+            z2(), z2(), py_to_julia_vector([5.0, 5.0]), z2(), avail2, True,
             py_to_julia_vector([100.0, 100.0]), z2(), z2(), z2(),
             50.0, "AC",
             z2(), z2(), z2(), o2(), py_to_julia_matrix(np.zeros((hours, 2))),
@@ -468,7 +462,7 @@ class TestMasterProblemSolve:
                 base_demand=py_to_julia_matrix(simple_demand),
                 representative_days_per_year=2, min_day_separation=1,
                 target_re_penetration=0.0, initial_re_penetration=0.0,
-                slack_penalty=1e9, verbose=False,
+                verbose=False,
             )
             model, mvars, _ = ESFEX.create_master_problem(
                 jl_input, use_representative_days=True)
@@ -523,7 +517,7 @@ class TestMasterProblemSolve:
             py_to_julia_vector([100.0, 0.0]),    # rated turbine, bus 1
             z2(), o2(), o2(), o2(), o2(), z2(), z2(), z2(),
             py_to_julia_vector([0.001, 0.001]),  # ~free water
-            z2(), z2(), z2(), z2(), z2(), avail2, True,
+            z2(), z2(), z2(), z2(), avail2, True,
             py_to_julia_vector([100.0, 100.0]), z2(), z2(), z2(),
             50.0, "AC",
             py_to_julia_vector([2000.0, 0.0]),   # reservoir_capacity (MWh)
@@ -540,7 +534,7 @@ class TestMasterProblemSolve:
             py_to_julia_vector([200.0, 200.0]),
             z2(), o2(), o2(), o2(), o2(), z2(), z2(), z2(),
             py_to_julia_vector([200.0, 200.0]),  # expensive backup
-            z2(), z2(), py_to_julia_vector([5.0, 5.0]), z2(), z2(), avail2, True,
+            z2(), z2(), py_to_julia_vector([5.0, 5.0]), z2(), avail2, True,
             py_to_julia_vector([100.0, 100.0]), z2(), z2(), z2(),
             50.0, "AC",
             z2(), z2(), z2(), o2(), py_to_julia_matrix(np.zeros((hours, 2))),
@@ -557,11 +551,12 @@ class TestMasterProblemSolve:
                 base_demand=py_to_julia_matrix(demand),
                 representative_days_per_year=2, min_day_separation=1,
                 target_re_penetration=0.0, initial_re_penetration=0.0,
-                slack_penalty=1e9, verbose=False,
+                verbose=False,
                 use_tsam=True,
                 tsam_period_start_hours=jl.seval("[[1, 25]]"),
                 tsam_period_weights=jl.seval("[[1.0, 1.0]]"),
-                tsam_chronological_order=jl.seval("[[1, 2]]"),
+                tsam_day_period=jl.seval("[[1, 2]]"),
+                hours_per_year=jl.seval("[48]"),
                 tsam_inter_period_linking=linking,
             )
             model, mvars, _ = ESFEX.create_master_problem(
@@ -618,8 +613,7 @@ class TestMasterProblemSolve:
                 initial_re_penetration=0.0,
                 representative_days_per_year=2,
                 min_day_separation=1,
-                slack_penalty=1e9,
-                verbose=False,
+                    verbose=False,
             )
 
         # Monolithic representative-day reference solve.
@@ -679,7 +673,6 @@ class TestMasterProblemSolve:
             batteries=simple_batteries,
             base_demand=py_to_julia_matrix(simple_demand),
             max_annual_investment=budget,
-            slack_penalty=1e12,  # High penalty to discourage slack
         )
 
         model, vars, targets = ESFEX.create_master_problem(jl_input)

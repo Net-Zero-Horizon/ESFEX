@@ -6,24 +6,20 @@ Each step is a QWidget displayed in the wizard's QStackedWidget.
 from __future__ import annotations
 
 import heapq
-import json
 import logging
 import math
-import time
 from collections import deque
 from pathlib import Path
 
 import numpy as np
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
-    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -38,14 +34,15 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
-    QTreeWidget,
-    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from esfex.visualization.i18n import tr
 from esfex.visualization.ui_scale import scale_qss_fonts
+
+if TYPE_CHECKING:
+    from esfex.visualization.data.gui_model import GuiNodeDemand, GuiSystemState
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +80,20 @@ def suggested_min_capacity_mw(min_voltage_kv: float) -> float:
 
 
 
+# Display label of each fetched feature type (the fetch summary).
+_FEATURE_TYPE_KEYS = {
+    "substation": "grid_builder.type_substations",
+    "generator": "grid_builder.type_generators",
+    "battery": "grid_builder.type_batteries",
+    "line": "grid_builder.type_lines",
+    "transformer": "grid_builder.type_transformers",
+    "converter": "grid_builder.type_converters",
+    "fuel_entry": "grid_builder.type_fuel_entries",
+    "fuel_storage": "grid_builder.type_fuel_storage",
+    "road": "grid_builder.type_roads",
+}
+
+
 class GridMappingSourceFetchStep(QWidget):
     """Define region, configure data sources, and fetch in one step."""
 
@@ -111,16 +122,18 @@ class GridMappingSourceFetchStep(QWidget):
         scroll_content = QWidget()
         layout = QVBoxLayout(scroll_content)
 
-        layout.addWidget(QLabel(
-            tr("grid_builder.b_step_1_region_fetch_b")
-        ))
+        # Wrapped, like every long text here: an unwrapped label sets the
+        # page's minimum width, and the page then ran past the wizard.
+        intro = QLabel(tr("grid_builder.b_step_1_region_fetch_b"))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
         # ── Region ──
         region_group = QGroupBox(tr("grid_builder.region"))
         region_lay = QVBoxLayout(region_group)
-        region_lay.addWidget(QLabel(
-            tr("grid_builder.define_the_extraction_area_draw_a")
-        ))
+        region_hint = QLabel(tr("grid_builder.define_the_extraction_area_draw_a"))
+        region_hint.setWordWrap(True)
+        region_lay.addWidget(region_hint)
         # Standard two-column domain selector: draw a polygon OR apply a GeoAsset.
         from esfex.visualization.workflows._domain_definition import (
             DomainDefinitionWidget,
@@ -134,32 +147,33 @@ class GridMappingSourceFetchStep(QWidget):
         layout.addWidget(region_group)
 
         # ── Data Sources ──
-        # Laid out in a single row: all four are enabled by default because
-        # combining them (authoritative OSM topology + plant databases +
-        # GridFinder gap-filling) gives the most complete network in general.
+        # Two columns (a single row overflowed the wizard in longer
+        # languages): all four are enabled by default because combining them
+        # (authoritative OSM topology + plant databases + GridFinder
+        # gap-filling) gives the most complete network in general.
         src_group = QGroupBox(tr("grid_builder.data_sources"))
-        src_lay = QHBoxLayout(src_group)
+        src_lay = QGridLayout(src_group)
 
         self._chk_osm = QCheckBox(tr("grid_builder.openstreetmap_overpass_api"))
         self._chk_osm.setChecked(True)
         self._chk_osm.setToolTip(
             tr("grid_builder.substations_generators_transmission_lines_transf")
         )
-        src_lay.addWidget(self._chk_osm)
+        src_lay.addWidget(self._chk_osm, 0, 0)
 
         self._chk_wri = QCheckBox(tr("grid_builder.wri_global_power_plant_database"))
         self._chk_wri.setChecked(True)
         self._chk_wri.setToolTip(
             tr("grid_builder.30_000_power_plants_worldwide_with")
         )
-        src_lay.addWidget(self._chk_wri)
+        src_lay.addWidget(self._chk_wri, 0, 1)
 
         self._chk_gem = QCheckBox(tr("grid_builder.gem_global_power_plants_2025"))
         self._chk_gem.setChecked(True)
         self._chk_gem.setToolTip(
             tr("grid_builder.global_energy_monitor_power_plant_database")
         )
-        src_lay.addWidget(self._chk_gem)
+        src_lay.addWidget(self._chk_gem, 1, 0)
 
         # GridFinder — ML-predicted transmission/distribution line routes. It
         # carries geometry only (no voltage/capacity); the builder derives those
@@ -172,14 +186,16 @@ class GridMappingSourceFetchStep(QWidget):
         self._chk_gridfinder.setToolTip(
             tr("grid_builder.gridfinder_tooltip")
         )
-        src_lay.addWidget(self._chk_gridfinder)
+        src_lay.addWidget(self._chk_gridfinder, 1, 1)
 
         layout.addWidget(src_group)
 
-        # ── Settings (Filters + Element Types + Bus Strategy in 4 cols) ──
+        # ── Settings: Filters | Bus strategy, then Element types (2 cols) ──
+        # Two columns: four side by side overflowed the wizard in longer
+        # languages (834 px in Spanish).
         settings_group = QGroupBox(tr("grid_builder.settings"))
         settings_grid = QGridLayout(settings_group)
-        for c in range(4):
+        for c in range(2):
             settings_grid.setColumnStretch(c, 1)
 
         _hdr_style = "font-weight: bold; padding-bottom: 2px;"
@@ -193,18 +209,21 @@ class GridMappingSourceFetchStep(QWidget):
         filter_form = QFormLayout(filter_widget)
         filter_form.setContentsMargins(0, 0, 0, 0)
 
-        self._spin_min_voltage = QSpinBox()
-        self._spin_min_voltage.setRange(10, 750)
+        # Decimal: standard levels such as 13.8 and 34.5 kV are not whole
+        # numbers, so a whole-kV field could not sit just at or above them.
+        self._spin_min_voltage = QDoubleSpinBox()
+        self._spin_min_voltage.setRange(10.0, 750.0)
+        self._spin_min_voltage.setDecimals(1)
         # 66 kV keeps the subtransmission that holds regional grids together.
         # Higher levels drop it: e.g. Japan's Hokkaido cohesion lives at 66 kV,
         # so a >100 kV filter shatters it into disconnected islands. Users who
         # deliberately raise this accept that reduced connectivity.
-        self._spin_min_voltage.setValue(66)
+        self._spin_min_voltage.setValue(66.0)
         self._spin_min_voltage.setSuffix(" kV")
         self._spin_min_voltage.setToolTip(
             tr("grid_builder.minimum_voltage_for_substations_and_lines")
         )
-        filter_form.addRow("Min voltage:", self._spin_min_voltage)
+        filter_form.addRow(tr("grid_builder.min_voltage_label"), self._spin_min_voltage)
 
         self._spin_min_capacity = QDoubleSpinBox()
         self._spin_min_capacity.setRange(0.0, 10000.0)
@@ -218,7 +237,7 @@ class GridMappingSourceFetchStep(QWidget):
         self._spin_min_capacity.setToolTip(
             tr("grid_builder.minimum_generator_capacity_set_to_0")
         )
-        filter_form.addRow("Min gen capacity:", self._spin_min_capacity)
+        filter_form.addRow(tr("grid_builder.min_gen_capacity_label"), self._spin_min_capacity)
 
         # Keep the capacity floor proportional to the voltage floor until the
         # user overrides it by hand: raising Min voltage (a more transmission-
@@ -229,10 +248,10 @@ class GridMappingSourceFetchStep(QWidget):
         self._spin_min_voltage.valueChanged.connect(self._on_min_voltage_changed)
         settings_grid.addWidget(filter_widget, 1, 0)
 
-        # Columns 2–3 — Element Types (4+4 split)
+        # Rows 2–3 — Element Types (4+4 split)
         col_elem_hdr = QLabel(tr("grid_builder.element_types"))
         col_elem_hdr.setStyleSheet(_hdr_style)
-        settings_grid.addWidget(col_elem_hdr, 0, 1, 1, 2)
+        settings_grid.addWidget(col_elem_hdr, 2, 0, 1, 2)
 
         self._chk_substations = QCheckBox(tr("grid_builder.substations_buses"))
         self._chk_substations.setChecked(True)
@@ -269,13 +288,13 @@ class GridMappingSourceFetchStep(QWidget):
         elem_a_widget.setLayout(elem_a)
         elem_b_widget = QWidget()
         elem_b_widget.setLayout(elem_b)
-        settings_grid.addWidget(elem_a_widget, 1, 1)
-        settings_grid.addWidget(elem_b_widget, 1, 2)
+        settings_grid.addWidget(elem_a_widget, 3, 0)
+        settings_grid.addWidget(elem_b_widget, 3, 1)
 
-        # Column 4 — Bus Creation Strategy
+        # Column 2 — Bus Creation Strategy
         col_bus_hdr = QLabel(tr("grid_builder.bus_creation_strategy"))
         col_bus_hdr.setStyleSheet(_hdr_style)
-        settings_grid.addWidget(col_bus_hdr, 0, 3)
+        settings_grid.addWidget(col_bus_hdr, 0, 1)
 
         bus_widget = QWidget()
         bus_lay = QVBoxLayout(bus_widget)
@@ -290,10 +309,10 @@ class GridMappingSourceFetchStep(QWidget):
         self._radio_per_substation = QRadioButton(tr("grid_builder.one_bus_per_substation"))
         bus_lay.addWidget(self._radio_per_substation)
         bus_lay.addStretch()
-        settings_grid.addWidget(bus_widget, 1, 3)
+        settings_grid.addWidget(bus_widget, 1, 1)
 
         # Top-aligned content rows
-        settings_grid.setRowStretch(2, 1)
+        settings_grid.setRowStretch(4, 1)
 
         layout.addWidget(settings_group)
 
@@ -384,7 +403,7 @@ class GridMappingSourceFetchStep(QWidget):
         """
         self._min_cap_user_edited = True
 
-    def _on_min_voltage_changed(self, kv: int):
+    def _on_min_voltage_changed(self, kv: float):
         """Track the capacity floor to the voltage floor unless pinned."""
         if self._min_cap_user_edited:
             return
@@ -623,7 +642,7 @@ class GridMappingSourceFetchStep(QWidget):
         self._errors.append(f"{source.upper()}: {error_msg}")
         bar, status = self._get_widgets(source)
         if status:
-            status.setText(f"Error: {error_msg}")
+            status.setText(tr("grid_builder.error_msg", error=error_msg))
             status.setStyleSheet("color: red;")
         self._pending -= 1
         if self._pending <= 0:
@@ -671,7 +690,8 @@ class GridMappingSourceFetchStep(QWidget):
                        "fuel_storage", "road"]:
             c = counts.get(ftype, 0)
             if c:
-                parts.append(f"{c} {ftype}(s)")
+                parts.append(tr("grid_builder.type_count",
+                                type=tr(_FEATURE_TYPE_KEYS[ftype]), count=c))
 
         elapsed = getattr(self, "_fetch_elapsed", 0.0)
         logger.info(
@@ -681,8 +701,8 @@ class GridMappingSourceFetchStep(QWidget):
 
         if parts:
             self._summary_label.setText(
-                f"Found {len(self._features)} features: " + ", ".join(parts)
-                + f"  (fetch {elapsed:.0f}s)"
+                tr("grid_builder.features_found", count=len(self._features),
+                   parts=", ".join(parts), seconds=f"{elapsed:.0f}")
             )
         else:
             self._summary_label.setText(
@@ -723,11 +743,10 @@ class GridMappingReviewStep(QWidget):
         filter_row.addWidget(QLabel(tr("grid_builder.filter_by_type")))
 
         self._filter_combo = QComboBox()
-        self._filter_combo.addItems([
-            "All Types", "Substations", "Generators", "Batteries",
-            "Lines", "Transformers", "Converters",
-            "Fuel Entries", "Fuel Storage",
-        ])
+        self._filter_combo.addItems([tr(f"grid_builder.{k}") for k in (
+            "filter_all_types", "type_substations", "type_generators",
+            "type_batteries", "type_lines", "type_transformers",
+            "type_converters", "type_fuel_entries", "type_fuel_storage")])
         self._filter_combo.currentIndexChanged.connect(self._apply_table_filter)
         filter_row.addWidget(self._filter_combo)
 
@@ -746,10 +765,9 @@ class GridMappingReviewStep(QWidget):
         # ── Feature table ──
         self._table = QTableWidget()
         self._table.setColumnCount(7)
-        self._table.setHorizontalHeaderLabels([
-            "Include", "Source", "Type", "Name",
-            "Voltage (kV)", "Capacity (MW)", "Fuel",
-        ])
+        self._table.setHorizontalHeaderLabels([tr(f"grid_builder.{k}") for k in (
+            "col_include", "col_source", "col_type", "col_name",
+            "col_voltage_kv", "col_capacity_mw", "col_fuel")])
         self._table.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeMode.Stretch
         )
@@ -904,7 +922,7 @@ class GridMappingReviewStep(QWidget):
         total = len(self._features)
         selected = sum(1 for f in self._features if f.include)
         self._summary_label.setText(
-            f"{selected} of {total} features selected for import"
+            tr("grid_builder.features_selected", selected=selected, total=total)
         )
 
     def get_features(self) -> list:
@@ -919,39 +937,21 @@ class GridMappingReviewStep(QWidget):
 # Step 4: Build Network (was Step 5)
 # =====================================================================
 
-_CRITERIA = [
-    {
-        "key": "infrastructure",
-        "label": "Infrastructure Density",
-        "description": (
-            "K-means on all infrastructure positions (substations, "
-            "generators, batteries, fuel entries). Places nodes at "
-            "cluster centers."
-        ),
-    },
-    {
-        "key": "demand",
-        "label": "Demand Proxy (Building Footprints)",
-        "description": (
-            "Fetches building footprints (Overture/Microsoft/Google) "
-            "and clusters by building density to approximate demand "
-            "hotspots. Requires additional download."
-        ),
-    },
-    {
-        "key": "regional",
-        "label": "Regional Balance (Uniform Coverage)",
-        "description": (
-            "Modified K-means with spatially-uniform initialization. "
-            "Ensures even geographic coverage regardless of density. "
-            "Good for planning studies."
-        ),
-    },
-]
+# Node-placement criteria; the label and description are translated where
+# they are shown (``grid_builder.criterion_<key>_label`` / ``_desc``).
+_CRITERIA = [{"key": "infrastructure"}, {"key": "demand"}, {"key": "regional"}]
+
+
+def _criterion_label(key: str) -> str:
+    return tr(f"grid_builder.criterion_{key}_label")
+
+
+def _criterion_desc(key: str) -> str:
+    return tr(f"grid_builder.criterion_{key}_desc")
 
 
 class GridMappingBuildStep(QWidget):
-    """Configure node placement, build and auto-connect the network."""
+    """Configure node placement, build and simplify the network."""
 
     buildFinished = Signal()
 
@@ -989,9 +989,12 @@ class GridMappingBuildStep(QWidget):
         scroll_content = QWidget()
         layout = QVBoxLayout(scroll_content)
 
-        layout.addWidget(QLabel(
-            tr("grid_builder.b_step_2_build_connect_b")
-        ))
+        # Wrapped: unwrapped, this long intro set the page's minimum width,
+        # wider than the wizard, and everything (the build progress bar
+        # most visibly) ran past the window's edge.
+        intro = QLabel(tr("grid_builder.b_step_2_build_connect_b"))
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
         # ── Target System ────────────────────────────────────────────
         sys_group = QGroupBox(tr("grid_builder.target_system"))
@@ -1051,13 +1054,13 @@ class GridMappingBuildStep(QWidget):
         self._spin_min_nodes.setRange(1, 5000)
         self._spin_min_nodes.setValue(2)
         self._spin_min_nodes.setToolTip(tr("grid_builder.minimum_number_of_nodes_to_create"))
-        node_form.addRow("Minimum nodes:", self._spin_min_nodes)
+        node_form.addRow(tr("grid_builder.min_nodes_label"), self._spin_min_nodes)
 
         self._spin_max_nodes = QSpinBox()
         self._spin_max_nodes.setRange(1, 5000)
         self._spin_max_nodes.setValue(20)
         self._spin_max_nodes.setToolTip(tr("grid_builder.maximum_number_of_nodes_to_create"))
-        node_form.addRow("Maximum nodes:", self._spin_max_nodes)
+        node_form.addRow(tr("grid_builder.max_nodes_label"), self._spin_max_nodes)
         node_left.addLayout(node_form)
         node_left.addStretch()
 
@@ -1068,11 +1071,11 @@ class GridMappingBuildStep(QWidget):
         node_right.addWidget(node_right_hdr)
 
         # Create description label first (toggled signal fires during init)
-        self._lbl_criterion_info = QLabel(_CRITERIA[0]["description"])
+        self._lbl_criterion_info = QLabel(_criterion_desc(_CRITERIA[0]["key"]))
         self._chk_criteria: dict[str, QCheckBox] = {}
         for crit in _CRITERIA:
-            chk = QCheckBox(crit["label"])
-            chk.setToolTip(crit["description"])
+            chk = QCheckBox(_criterion_label(crit["key"]))
+            chk.setToolTip(_criterion_desc(crit["key"]))
             chk.toggled.connect(self._on_criterion_toggled)
             self._chk_criteria[crit["key"]] = chk
             node_right.addWidget(chk)
@@ -1104,7 +1107,9 @@ class GridMappingBuildStep(QWidget):
             tr("grid_builder.define_nodes_by_clicking_the_map")
         ))
         self._node_table = QTableWidget(0, 3)
-        self._node_table.setHorizontalHeaderLabels(["Name", "Lat", "Lng"])
+        self._node_table.setHorizontalHeaderLabels(
+            [tr("grid_builder.col_name"), tr("grid_builder.col_lat"),
+             tr("grid_builder.col_lng")])
         self._node_table.horizontalHeader().setStretchLastSection(True)
         self._node_table.setMaximumHeight(180)
         self._node_table.itemChanged.connect(self._on_node_table_changed)
@@ -1192,18 +1197,6 @@ class GridMappingBuildStep(QWidget):
             tr("grid_builder.faithful_import_only_buses_of_the")
         )
         radius_row.addWidget(self._spin_station_radius)
-
-        radius_row.addWidget(QLabel(tr("grid_builder.reconnect_isolated")))
-        self._spin_reconnect = QDoubleSpinBox()
-        self._spin_reconnect.setRange(0.0, 50.0)
-        self._spin_reconnect.setValue(8.0)
-        self._spin_reconnect.setSingleStep(1.0)
-        self._spin_reconnect.setDecimals(0)
-        self._spin_reconnect.setSuffix(" km")
-        self._spin_reconnect.setToolTip(
-            tr("grid_builder.reconnect_isolated_tooltip")
-        )
-        radius_row.addWidget(self._spin_reconnect)
         radius_row.addStretch(1)
         build_right.addLayout(radius_row)
 
@@ -1212,14 +1205,14 @@ class GridMappingBuildStep(QWidget):
         simp_form = QFormLayout()
         simp_form.setContentsMargins(0, 0, 0, 0)
         self._combo_simplify = QComboBox()
-        for value, label in [
-            (0, "0 — Cleanup only"),
-            (1, "1 — Aggregate equipment & parallel lines"),
-            (2, "2 — + Radial / series bus elimination"),
-            (3, "3 — + Intra-node voltage collapse"),
-            (4, "4 — + Full node collapse"),
+        # apply_simplification_level runs the same equivalent-network
+        # reduction for every level >= 2, so only three levels are offered.
+        for value, key in [
+            (0, "grid_builder.simplify_level_0"),
+            (1, "grid_builder.simplify_level_1"),
+            (2, "grid_builder.simplify_level_2"),
         ]:
-            self._combo_simplify.addItem(label, value)
+            self._combo_simplify.addItem(tr(key), value)
         self._combo_simplify.setCurrentIndex(0)
         # Compute the natural pixel width of the widest item and force
         # the combo to at least that wide. setMinimumContentsLength
@@ -1238,11 +1231,11 @@ class GridMappingBuildStep(QWidget):
         self._combo_simplify.setToolTip(
             tr("grid_builder.simplification_applied_after_build_auto_connect")
         )
-        simp_form.addRow("Simplification level:", self._combo_simplify)
+        simp_form.addRow(tr("grid_builder.simplification_level_label"), self._combo_simplify)
 
         # Drop tiny isolated subgraphs (single-bus substations from OSM
-        # that the auto-connect distance limit couldn't bridge). The
-        # largest component is always kept — this only removes debris.
+        # that no line joins to the grid). The largest component is always
+        # kept — this only removes debris.
         self._spin_min_component = QSpinBox()
         self._spin_min_component.setRange(1, 50)
         self._spin_min_component.setValue(2)
@@ -1250,7 +1243,7 @@ class GridMappingBuildStep(QWidget):
         self._spin_min_component.setToolTip(
             tr("grid_builder.drop_isolated_subgraphs_smaller_than_this")
         )
-        simp_form.addRow("Drop isolated <", self._spin_min_component)
+        simp_form.addRow(tr("grid_builder.drop_isolated_label"), self._spin_min_component)
         build_right.addLayout(simp_form)
         build_right.addStretch()
 
@@ -1349,7 +1342,8 @@ class GridMappingBuildStep(QWidget):
         from PySide6.QtWidgets import QInputDialog
 
         name, ok = QInputDialog.getText(
-            self, "New System", "Enter the new system name:",
+            self, tr("grid_builder.new_system_title"),
+            tr("grid_builder.new_system_prompt"),
         )
         if not ok or not name.strip():
             return
@@ -1357,8 +1351,8 @@ class GridMappingBuildStep(QWidget):
 
         if name in self._all_states:
             QMessageBox.warning(
-                self, "Duplicate Name",
-                f"A system named '{name}' already exists.",
+                self, tr("grid_builder.duplicate_name_title"),
+                tr("grid_builder.duplicate_name_msg", name=name),
             )
             return
 
@@ -1430,7 +1424,7 @@ class GridMappingBuildStep(QWidget):
             if self._chk_criteria[crit["key"]].isChecked()
         ]
         if checked:
-            descs = [c["description"] for c in checked]
+            descs = [_criterion_desc(c["key"]) for c in checked]
             self._lbl_criterion_info.setText(" | ".join(descs))
         else:
             self._lbl_criterion_info.setText(
@@ -1594,8 +1588,8 @@ class GridMappingBuildStep(QWidget):
         # Validate system selection
         if not self._combo_system.currentText():
             QMessageBox.warning(
-                self, "No System",
-                "Select a target system or create a new one.",
+                self, tr("grid_builder.no_system_title"),
+                tr("grid_builder.no_system_msg"),
             )
             return
 
@@ -1615,9 +1609,8 @@ class GridMappingBuildStep(QWidget):
             # Build directly — nodes must pre-exist
             if not self._model.state.nodes:
                 QMessageBox.warning(
-                    self, "No Nodes",
-                    "No nodes exist in the system. Enable auto-create "
-                    "nodes or create nodes manually before building.",
+                    self, tr("grid_builder.no_nodes_title"),
+                    tr("grid_builder.no_nodes_msg"),
                 )
                 self._btn_build.setEnabled(True)
                 return
@@ -1637,8 +1630,8 @@ class GridMappingBuildStep(QWidget):
         ]
         if not selected:
             QMessageBox.warning(
-                self, "No Criterion",
-                "Select at least one clustering criterion.",
+                self, tr("grid_builder.no_criterion_title"),
+                tr("grid_builder.no_criterion_msg"),
             )
             self._btn_build.setEnabled(True)
             return
@@ -1686,14 +1679,17 @@ class GridMappingBuildStep(QWidget):
         # Studio for tens of minutes here).
         self._cluster_progress.setValue(100)
         self._lbl_cluster_status.setText(
-            f"Created {result.n_clusters} nodes via "
-            f"{result.criterion_used} clustering."
+            tr("grid_builder.clustering_done", count=result.n_clusters,
+               criterion=" + ".join(
+                   tr(f"grid_builder.cluster_criterion_{c}")
+                   for c in result.criterion_used.split("+") if c))
         )
         self._start_build(result.node_positions)
 
     def _on_clustering_error(self, error_msg: str):
         self._cluster_progress.setVisible(False)
-        self._lbl_cluster_status.setText(f"Clustering error: {error_msg}")
+        self._lbl_cluster_status.setText(
+            tr("grid_builder.clustering_error", error=error_msg))
         self._btn_build.setEnabled(True)
 
     def _start_build(self, node_positions):
@@ -1722,7 +1718,12 @@ class GridMappingBuildStep(QWidget):
             gen_availability=self._chk_gen_availability.isChecked(),
             use_weather=True,  # weather-based CF is now the default behaviour
             cfg_path=getattr(main_window, "_config_path", None),
-            reconnect_max_km=self._spin_reconnect.value(),
+            # Faithful topology: no bounded reconnection from the GUI. The pass
+            # fabricated bridging spans (up to the old 8 km "reach") and, before
+            # demand exists, deleted real islanded subsystems (Hokkaido/Shikoku/
+            # Okinawa), stranding their load. Kept in the build API (config/tests
+            # can still opt in) but off by default and no longer user-exposed.
+            reconnect_max_km=0.0,
         )
 
         # Block per-element signals so the thousands of created elements don't
@@ -1776,30 +1777,38 @@ class GridMappingBuildStep(QWidget):
         self._model.stateLoaded.emit()
 
         # Assemble the result text.
+        def _header(key):
+            return f"\u2500\u2500 {tr(key)} \u2500\u2500\n"
+
         sections = []
         if res.get("build_summary"):
             sections.append(res["build_summary"])
+        if res.get("inference_summary"):
+            sections.append(_header("grid_builder.report_section_inference")
+                            + res["inference_summary"])
         if res.get("simplify_summary"):
-            sections.append(
-                "\u2500\u2500 Simplification \u2500\u2500\n" + res["simplify_summary"])
+            sections.append(_header("grid_builder.report_section_simplification")
+                            + res["simplify_summary"])
         if res.get("island_summary"):
-            sections.append(
-                "\u2500\u2500 Isolated Cleanup \u2500\u2500\n" + res["island_summary"])
+            sections.append(_header("grid_builder.report_section_cleanup")
+                            + res["island_summary"])
         if self._phase_timings:
             total_s = sum(dt for _, dt in self._phase_timings)
-            timing_lines = [f"  {label}: {dt:.1f}s" for label, dt in self._phase_timings]
-            timing_lines.append(f"  Total: {total_s:.1f}s")
-            sections.append(
-                "\u2500\u2500 Timing \u2500\u2500\n" + "\n".join(timing_lines))
+            timing_lines = ["  " + tr("grid_builder.report_timing_line",
+                                      label=label, seconds=f"{dt:.1f}")
+                            for label, dt in self._phase_timings]
+            timing_lines.append("  " + tr("grid_builder.report_timing_total",
+                                          seconds=f"{total_s:.1f}"))
+            sections.append(_header("grid_builder.report_section_timing")
+                            + "\n".join(timing_lines))
         self._result_text.setPlainText("\n\n".join(sections))
 
         if res.get("cancelled"):
             self._lbl_build_status.setText(tr("grid_builder.build_cancelled_partial_network_shown"))
         else:
             level = res.get("simplify_level", 0)
-            head = "Network built"
-            head += (f"; simplified at level {level}." if level > 0
-                     else "; cleanup pass applied.")
+            head = (tr("grid_builder.report_built_simplified", level=level)
+                    if level > 0 else tr("grid_builder.report_built_cleanup"))
             self._lbl_build_status.setText(head)
 
         self._built = True
@@ -1815,398 +1824,8 @@ class GridMappingBuildStep(QWidget):
             self._model.stateLoaded.emit()
         except Exception:
             pass
-        self._lbl_build_status.setText(f"Error: {msg}")
+        self._lbl_build_status.setText(tr("grid_builder.error_msg", error=msg))
         self._restore_build_button()
-
-
-# =====================================================================
-# Step 5: Simplify & Aggregate
-# =====================================================================
-
-
-class GridMappingConnectStep(QWidget):
-    """Simplify and aggregate the network (Step 5).
-
-    Progressive simplification levels (0-4) that produce electrically
-    equivalent networks with controlled complexity reduction.
-    """
-
-    _LEVEL_ITEMS = [
-        (0, "Level 0: Cleanup Only",
-         "Remove isolated empty buses and self-loop lines."),
-        (1, "Level 1: Equipment Aggregation + Parallel Lines",
-         "Merge same-fuel generators/batteries by node + "
-         "consolidate parallel transmission lines."),
-        (2, "Level 2: Radial & Series Bus Elimination",
-         "Level 1 + prune dead-end buses + eliminate pass-through "
-         "buses (Kron reduction)."),
-        (3, "Level 3: Intra-Node Bus Collapse",
-         "Level 2 + collapse voltage levels within each node to "
-         "a single bus (remove internal transformers)."),
-        (4, "Level 4: Full Node Collapse",
-         "Level 3 + collapse all buses per node to one + "
-         "absorb negligible generators."),
-    ]
-
-    def __init__(self, model=None, parent=None):
-        super().__init__(parent)
-        self._model = model
-
-        outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-
-        scroll_content = QWidget()
-        layout = QVBoxLayout(scroll_content)
-
-        layout.addWidget(QLabel(
-            tr("grid_builder.b_step_5_simplify_aggregate_b")
-        ))
-
-        # ── Simplify & Aggregate ─────────────────────────────────
-        simplify_group = QGroupBox(tr("grid_builder.simplify_aggregate"))
-        simplify_lay = QVBoxLayout(simplify_group)
-
-        simplify_lay.addWidget(QLabel(
-            tr("grid_builder.select_a_simplification_level_higher_levels")
-        ))
-
-        infra_form = QFormLayout()
-        self._combo_infra_level = QComboBox()
-        for lvl, label, tip in self._LEVEL_ITEMS:
-            self._combo_infra_level.addItem(label, lvl)
-        self._combo_infra_level.setCurrentIndex(1)
-        tooltip_lines = [f"  {lbl}: {tip}" for _, lbl, tip in self._LEVEL_ITEMS]
-        self._combo_infra_level.setToolTip("\n".join(tooltip_lines))
-        self._combo_infra_level.setMinimumWidth(400)
-        self._combo_infra_level.setSizeAdjustPolicy(
-            QComboBox.SizeAdjustPolicy.AdjustToContents,
-        )
-        infra_form.addRow("Level:", self._combo_infra_level)
-        simplify_lay.addLayout(infra_form)
-
-        self._btn_infra_analyze = QPushButton(tr("grid_builder.analyze"))
-        self._btn_infra_analyze.setStyleSheet(scale_qss_fonts("font-size: 11px; padding: 4px 8px;"))
-        self._btn_infra_analyze.setEnabled(False)
-        self._btn_infra_analyze.clicked.connect(self._do_analyze_infrastructure)
-        simplify_lay.addWidget(self._btn_infra_analyze)
-
-        # Summary label (before/after)
-        self._lbl_summary = QLabel("")
-        self._lbl_summary.setWordWrap(True)
-        self._lbl_summary.setStyleSheet("color: #555; font-style: italic;")
-        simplify_lay.addWidget(self._lbl_summary)
-
-        self._infra_tree = QTreeWidget()
-        self._infra_tree.setHeaderLabels([
-            "Operation", "Type", "Details", "Elements",
-        ])
-        self._infra_tree.setMinimumHeight(160)
-        self._infra_tree.setRootIsDecorated(True)
-        self._infra_tree.setColumnWidth(0, 320)
-        self._infra_tree.setColumnWidth(1, 100)
-        self._infra_tree.setColumnWidth(2, 120)
-        simplify_lay.addWidget(self._infra_tree)
-
-        infra_btn_row = QHBoxLayout()
-        self._btn_infra_select_all = QPushButton(tr("grid_builder.select_all"))
-        self._btn_infra_select_all.clicked.connect(self._infra_select_all)
-        infra_btn_row.addWidget(self._btn_infra_select_all)
-        self._btn_infra_apply = QPushButton(tr("grid_builder.apply_selected"))
-        self._btn_infra_apply.setStyleSheet(scale_qss_fonts("font-size: 11px; padding: 4px 8px;"))
-        self._btn_infra_apply.setEnabled(False)
-        self._btn_infra_apply.clicked.connect(self._do_apply_infrastructure)
-        infra_btn_row.addWidget(self._btn_infra_apply)
-        simplify_lay.addLayout(infra_btn_row)
-
-        self._lbl_infra_status = QLabel("")
-        self._lbl_infra_status.setWordWrap(True)
-        simplify_lay.addWidget(self._lbl_infra_status)
-        layout.addWidget(simplify_group)
-
-        self._infra_suggestions: list = []
-        self._topo_suggestions: list = []
-
-        # ── Result log ───────────────────────────────────────────────
-        self._result_text = QTextEdit()
-        self._result_text.setReadOnly(True)
-        self._result_text.setMinimumHeight(150)
-        layout.addWidget(self._result_text, 1)
-
-        scroll.setWidget(scroll_content)
-        outer_layout.addWidget(scroll)
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def set_inputs(self):
-        """Enable action buttons when entering this step."""
-        self._btn_infra_analyze.setEnabled(True)
-        self._btn_infra_apply.setEnabled(False)
-        self._infra_tree.clear()
-        self._infra_suggestions.clear()
-        self._topo_suggestions.clear()
-        self._lbl_infra_status.setText("")
-        self._lbl_summary.setText("")
-        self._result_text.clear()
-
-    def is_valid(self) -> bool:
-        return True  # All actions are optional
-
-    # ------------------------------------------------------------------
-    # Simplify & Aggregate
-    # ------------------------------------------------------------------
-
-    def _do_analyze_infrastructure(self):
-        from esfex.visualization.data.validation import (
-            SimplificationConfig,
-            find_simplifications_for_level,
-        )
-
-        self._infra_tree.clear()
-        self._infra_suggestions.clear()
-        self._topo_suggestions.clear()
-        self._btn_infra_apply.setEnabled(False)
-        self._btn_infra_analyze.setEnabled(False)
-        self._lbl_summary.setText("")
-
-        level = self._combo_infra_level.currentData()
-
-        try:
-            # ── Phase 1: Network cleanup (always) ─────────────────
-            self._lbl_infra_status.setText(
-                tr("grid_builder.cleaning_up_network_topology")
-            )
-            state = self._model.state
-            self._model.begin_bulk_update()
-            try:
-                with self._model.suspend_checkpoints():
-                    n_removed, cleanup_log = _remove_empty_isolated_buses(
-                        self._model, state,
-                    )
-            finally:
-                self._model.end_bulk_update()
-
-            cleanup_summary = "\n".join(cleanup_log)
-            prev = self._result_text.toPlainText()
-            self._result_text.setPlainText(
-                prev + "\n\n── Network Cleanup ──\n" + cleanup_summary
-            )
-
-            if level == 0:
-                if n_removed == 0:
-                    self._lbl_infra_status.setText(
-                        tr("grid_builder.network_is_already_clean_no_changes")
-                    )
-                else:
-                    self._lbl_infra_status.setText(
-                        f"Removed {n_removed} empty element(s)."
-                    )
-                self._btn_infra_analyze.setEnabled(True)
-                return
-
-            # ── Phase 2: Full simplification analysis ─────────────
-            self._lbl_infra_status.setText(
-                f"Analyzing network (Level {level})..."
-            )
-            config = SimplificationConfig()
-            plan = find_simplifications_for_level(
-                self._model.state, level=level, config=config,
-            )
-            self._infra_suggestions = plan.infrastructure_suggestions
-            self._topo_suggestions = plan.topology_suggestions
-
-            # Show before/after summary
-            self._lbl_summary.setText(
-                f"Buses: {plan.buses_before} → {plan.buses_after}  |  "
-                f"Lines: {plan.lines_before} → {plan.lines_after}  |  "
-                f"Generators: {plan.generators_before} → {plan.generators_after}  |  "
-                f"Transformers: {plan.transformers_before} → {plan.transformers_after}"
-            )
-
-            status_parts = []
-            if n_removed > 0:
-                status_parts.append(
-                    f"Cleaned up {n_removed} element(s)."
-                )
-
-            has_suggestions = (
-                plan.infrastructure_suggestions or plan.topology_suggestions
-            )
-            if not has_suggestions:
-                status_parts.append(
-                    "No simplifications found at this level."
-                )
-                self._lbl_infra_status.setText(" ".join(status_parts))
-                self._btn_infra_analyze.setEnabled(True)
-                return
-
-            # ── Populate tree with grouped suggestions ────────────
-            # Group 1: Equipment merges
-            if plan.infrastructure_suggestions:
-                group_item = QTreeWidgetItem(["Equipment Aggregation", "", "", ""])
-                group_item.setFlags(
-                    group_item.flags() | Qt.ItemFlag.ItemIsUserCheckable
-                )
-                group_item.setCheckState(0, Qt.CheckState.Unchecked)
-                for i, s in enumerate(plan.infrastructure_suggestions):
-                    child = QTreeWidgetItem()
-                    child.setFlags(
-                        child.flags() | Qt.ItemFlag.ItemIsUserCheckable
-                    )
-                    child.setCheckState(0, Qt.CheckState.Unchecked)
-                    child.setText(0, s.description)
-                    child.setText(1, s.equipment_type)
-                    child.setText(2, f"{s.total_rated_power:.1f} MW")
-                    child.setText(3, f"-{s.reduction}")
-                    child.setData(0, Qt.ItemDataRole.UserRole, ("infra", i))
-                    group_item.addChild(child)
-                self._infra_tree.addTopLevelItem(group_item)
-                group_item.setExpanded(True)
-
-            # Group 2+: Topology suggestions by action type
-            _TOPO_LABELS = {
-                "parallel_line_merge": "Parallel Line Consolidation",
-                "radial_prune": "Radial Branch Pruning",
-                "series_eliminate": "Series Bus Elimination (Kron)",
-                "voltage_collapse": "Voltage Level Collapse",
-                "full_node_collapse": "Full Node Collapse",
-                "small_gen_absorb": "Small Generator Absorption",
-            }
-            # Group by action_type preserving order
-            from collections import OrderedDict
-            topo_groups: dict[str, list[tuple[int, object]]] = OrderedDict()
-            for j, ts in enumerate(plan.topology_suggestions):
-                topo_groups.setdefault(ts.action_type, []).append((j, ts))
-
-            for action_type, items in topo_groups.items():
-                label = _TOPO_LABELS.get(action_type, action_type)
-                group_item = QTreeWidgetItem([label, "", "", ""])
-                group_item.setFlags(
-                    group_item.flags() | Qt.ItemFlag.ItemIsUserCheckable
-                )
-                group_item.setCheckState(0, Qt.CheckState.Unchecked)
-                for j, ts in items:
-                    child = QTreeWidgetItem()
-                    child.setFlags(
-                        child.flags() | Qt.ItemFlag.ItemIsUserCheckable
-                    )
-                    child.setCheckState(0, Qt.CheckState.Unchecked)
-                    child.setText(0, ts.description)
-                    child.setText(1, action_type.replace("_", " "))
-                    child.setText(2, f"L{ts.level}")
-                    child.setText(3, f"-{ts.elements_removed}")
-                    child.setData(0, Qt.ItemDataRole.UserRole, ("topo", j))
-                    group_item.addChild(child)
-                self._infra_tree.addTopLevelItem(group_item)
-                group_item.setExpanded(True)
-
-            self._btn_infra_apply.setEnabled(True)
-            n_infra = len(plan.infrastructure_suggestions)
-            n_topo = len(plan.topology_suggestions)
-            status_parts.append(
-                f"Found {n_infra} equipment merge(s) and "
-                f"{n_topo} topology operation(s)."
-            )
-            self._lbl_infra_status.setText(" ".join(status_parts))
-
-            desc_lines = (
-                [s.description for s in plan.infrastructure_suggestions]
-                + [s.description for s in plan.topology_suggestions]
-            )
-            prev = self._result_text.toPlainText()
-            self._result_text.setPlainText(
-                prev + f"\n\n── Level {level} Analysis ──\n"
-                + "\n".join(desc_lines)
-            )
-
-        except Exception as exc:
-            logger.exception("Simplify/analyze error")
-            self._lbl_infra_status.setText(f"Error: {exc}")
-
-        self._btn_infra_analyze.setEnabled(True)
-
-    def _infra_select_all(self):
-        for i in range(self._infra_tree.topLevelItemCount()):
-            group = self._infra_tree.topLevelItem(i)
-            group.setCheckState(0, Qt.CheckState.Checked)
-            for c in range(group.childCount()):
-                group.child(c).setCheckState(0, Qt.CheckState.Checked)
-
-    def _do_apply_infrastructure(self):
-        from esfex.visualization.data.validation import (
-            SimplificationConfig,
-            apply_simplification_level,
-        )
-
-        level = self._combo_infra_level.currentData()
-        if level == 0:
-            self._lbl_infra_status.setText(tr("grid_builder.level_0_cleanup_already_applied"))
-            return
-
-        self._btn_infra_apply.setEnabled(False)
-        self._btn_infra_analyze.setEnabled(False)
-
-        try:
-            state = self._model.state
-            n_bus_before = len(state.buses)
-            n_line_before = len(state.transmission_lines)
-            n_gen_before = len(state.generators)
-            n_bat_before = len(state.batteries)
-            n_trafo_before = len(state.transformers)
-
-            self._lbl_infra_status.setText(
-                f"Applying Level {level} simplification (iterating)..."
-            )
-
-            with self._model.suspend_checkpoints():
-                log, remaining = apply_simplification_level(
-                    self._model, level, SimplificationConfig(),
-                )
-
-            n_bus_after = len(state.buses)
-            n_line_after = len(state.transmission_lines)
-            n_gen_after = len(state.generators)
-            n_bat_after = len(state.batteries)
-            n_trafo_after = len(state.transformers)
-
-            self._model.stateLoaded.emit()
-
-            status = (
-                f"Buses: {n_bus_before}→{n_bus_after}, "
-                f"Lines: {n_line_before}→{n_line_after}, "
-                f"Generators: {n_gen_before}→{n_gen_after}, "
-                f"Batteries: {n_bat_before}→{n_bat_after}, "
-                f"Transformers: {n_trafo_before}→{n_trafo_after}."
-            )
-            if remaining:
-                n_err = sum(1 for i in remaining if i.severity == "error")
-                if n_err:
-                    status += f" {n_err} issue(s) remaining."
-            self._lbl_infra_status.setText(status)
-
-            prev = self._result_text.toPlainText()
-            self._result_text.setPlainText(
-                prev + "\n\n" + "\n".join(log)
-            )
-
-            # Clear tree since suggestions are now stale
-            self._infra_tree.clear()
-            self._infra_suggestions.clear()
-            self._topo_suggestions.clear()
-            self._lbl_summary.setText("")
-            # Re-enable Analyze so the user can re-run
-            self._btn_infra_analyze.setEnabled(True)
-
-        except Exception as exc:
-            logger.exception("Infrastructure apply error")
-            self._lbl_infra_status.setText(f"Error: {exc}")
-            self._btn_infra_apply.setEnabled(True)
-            self._btn_infra_analyze.setEnabled(True)
 
 
 # =====================================================================
@@ -2345,6 +1964,7 @@ def _bus_has_any_equipment(state, bus_id: str) -> bool:
 
 
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Haversine distance in km."""
     R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -2946,7 +2566,9 @@ def _fix_disconnected_components(
     (equipment → line → LV_bus → line → TR → line → HV_bus).
 
     For components **without equipment**: creates a bus-to-bus bridge
-    line to the nearest same-voltage bus in the main component.
+    line to the nearest bus in the main component, at the island bus's
+    voltage; when the two voltage levels differ the line ends at a new bus
+    beside the main bus, joined to it by a transformer.
 
     When *max_connection_km* is set, components beyond that distance
     from the main network are NOT bridged — they form independent
@@ -3173,24 +2795,87 @@ def _fix_disconnected_components(
 
             iso_bus = state.buses[best_iso]
             main_bus = state.buses[best_main_bid]
-            v = max(iso_bus.voltage_kv, main_bus.voltage_kv) or 110.0
+            v_iso = iso_bus.voltage_kv or 0.0
+            v_main = main_bus.voltage_kv or 0.0
+            v = v_iso or v_main or 110.0
             cap = _estimate_bridge_capacity(v)
+
+            # Different voltage levels (beyond 10 %): the line runs at the
+            # island's voltage to a new bus at the main bus's substation,
+            # stepped to the main level by a transformer there — as the
+            # equipment chains and voltage-mismatch fixes join levels —
+            # instead of a line straight between two voltages.
+            end_bid = best_main_bid
+            if v_iso > 0 and v_main > 0 and (
+                    abs(v_iso - v_main) > 0.10 * max(v_iso, v_main)):
+                dy = iso_bus.latitude - main_bus.latitude
+                dx = iso_bus.longitude - main_bus.longitude
+                norm = math.hypot(dy, dx) or 1.0
+                end_bid = model.add_bus(
+                    parent_node=main_bus.parent_node,
+                    name=f"Auto bridge {v_iso:g}kV",
+                    voltage_kv=v_iso,
+                    latitude=main_bus.latitude + dy / norm * MIN_CHAIN_SPREAD,
+                    longitude=main_bus.longitude + dx / norm * MIN_CHAIN_SPREAD,
+                )
+                state.buses[end_bid].frequency_hz = main_bus.frequency_hz
+                hv, lv = ((best_main_bid, end_bid) if v_main > v_iso
+                          else (end_bid, best_main_bid))
+                tr_idx = model.add_transformer(
+                    name=f"Auto TR {max(v_iso, v_main):g}/"
+                         f"{min(v_iso, v_main):g}kV",
+                    from_bus=hv, to_bus=lv,
+                    from_voltage_kv=max(v_iso, v_main),
+                    to_voltage_kv=min(v_iso, v_main),
+                    rated_power_mva=cap,
+                    latitude=main_bus.latitude, longitude=main_bus.longitude,
+                )
+                model.add_line(
+                    from_bus=best_main_bid, to_bus=best_main_bid,
+                    capacity_mw=cap,
+                    from_endpoint=EndpointRef("bus", best_main_bid),
+                    to_endpoint=EndpointRef("transformer", str(tr_idx)),
+                )
+                model.add_line(
+                    from_bus=end_bid, to_bus=end_bid, capacity_mw=cap,
+                    from_endpoint=EndpointRef("transformer", str(tr_idx)),
+                    to_endpoint=EndpointRef("bus", end_bid),
+                )
+                nn_main.add(end_bid)
+                main_comp.add(end_bid)
+                created += 4
+            end_bus = state.buses[end_bid]
 
             lid = f"line_{state._next_line_id}"
             state._next_line_id += 1
-            state.transmission_lines.append(GuiTransmissionLine(
+            bridge = GuiTransmissionLine(
                 line_id=lid,
-                from_bus=best_main_bid, to_bus=best_iso,
-                from_node=main_bus.parent_node,
+                from_bus=end_bid, to_bus=best_iso,
+                from_node=end_bus.parent_node,
                 to_node=iso_bus.parent_node,
                 capacity_mw=cap, voltage_kv=v, waypoints=[],
-                from_endpoint=EndpointRef("bus", best_main_bid),
+                frequency_hz=main_bus.frequency_hz,
+                from_endpoint=EndpointRef("bus", end_bid),
                 to_endpoint=EndpointRef("bus", best_iso),
-            ))
+            )
+            # Length between the end buses and the standard line type's
+            # impedance at that voltage, like every other built line.
+            from esfex.visualization.data.validation import (
+                _line_impedance_pu, _line_length_km,
+            )
+            bridge.length_km = _line_length_km(state, bridge) or None
+            r_pu, x_pu, b_pu = _line_impedance_pu(state, bridge)
+            if x_pu > 0:
+                bridge.resistance_pu = r_pu
+                bridge.reactance_pu = x_pu
+                bridge.susceptance_pu = b_pu
+            state.transmission_lines.append(bridge)
             created += 1
 
+            via = (f" via TR {v_main:g}/{v_iso:g}kV"
+                   if end_bid != best_main_bid else "")
             log.append(
-                f"  Bridge: {best_iso} → {best_main_bid}"
+                f"  Bridge: {best_iso} → {best_main_bid}{via}"
                 f"  [{best_dist:.1f} km, {cap:.0f} MW]"
             )
 
@@ -3866,94 +3551,9 @@ def _estimate_bridge_capacity(voltage_kv: float) -> float:
     return 50.0
 
 
-def _remove_empty_isolated_buses(
-    model, state,
-) -> tuple[int, list[str]]:
-    """Remove buses that are completely isolated AND have no equipment.
-
-    This is a safe, **non-cascading** single pass:
-      - Build adjacency.
-      - Identify buses with degree 0 (no connections at all).
-      - Among those, keep any bus that has generators, batteries,
-        electrolyzers, transformers, or converters (regardless of
-        rated_power).
-      - Remove the rest, plus any self-loop lines.
-
-    Returns ``(removed_count, log_lines)``.
-    """
-    adj = _build_bus_adjacency(state)
-    log: list[str] = []
-    removed_buses = 0
-    removed_lines = 0
-
-    # 1. Remove TRUE self-loop lines.
-    # A true self-loop is where BOTH endpoints refer to the same element.
-    # Lines with from_bus == to_bus are NOT self-loops — they are valid
-    # connections between equipment↔bus or bus↔transformer (the from_bus/
-    # to_bus fields indicate bus ownership, not connectivity).
-    self_loops = []
-    for ln in state.transmission_lines:
-        if (ln.from_endpoint and ln.to_endpoint
-                and ln.from_endpoint.element_type == ln.to_endpoint.element_type
-                and ln.from_endpoint.element_id == ln.to_endpoint.element_id):
-            self_loops.append(ln)
-        elif (not ln.from_endpoint and not ln.to_endpoint
-              and ln.from_bus == ln.to_bus):
-            # No endpoint refs at all AND from_bus == to_bus → true self-loop.
-            self_loops.append(ln)
-
-    for ln in self_loops:
-        model.remove_line(ln.line_id)
-        removed_lines += 1
-        log.append(f"  Removed self-loop line {ln.line_id}")
-
-    # Re-build adjacency after removing self-loops
-    if self_loops:
-        adj = _build_bus_adjacency(state)
-
-    # 2. Identify degree-0 buses with no equipment
-    candidates = []
-    for bid in list(state.buses.keys()):
-        degree = len(adj.get(bid, set()))
-        if degree == 0 and not _bus_has_any_equipment(state, bid):
-            candidates.append(bid)
-
-    for bid in candidates:
-        bus = state.buses.get(bid)
-        bus_name = bus.name if bus else bid
-        model.remove_bus(bid)
-        removed_buses += 1
-        log.append(f"  Removed isolated empty bus: {bus_name} ({bid})")
-
-    total = removed_buses + removed_lines
-    if total == 0:
-        log.append("No empty isolated buses or self-loop lines found.")
-    else:
-        parts: list[str] = []
-        if removed_buses:
-            parts.append(f"{removed_buses} bus(es)")
-        if removed_lines:
-            parts.append(f"{removed_lines} self-loop line(s)")
-        log.insert(0, f"Removed {total} element(s): " + ", ".join(parts))
-
-    return total, log
-
-
 # =====================================================================
 # Fuel auto-routing via road network (Dijkstra)
 # =====================================================================
-
-
-def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Haversine distance in km."""
-    R = 6371.0
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(math.radians(lat1))
-         * math.cos(math.radians(lat2))
-         * math.sin(dlon / 2) ** 2)
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 def _build_road_graph(
@@ -4189,8 +3789,26 @@ def fuel_auto_route(
 # =====================================================================
 
 
-def write_forecast_demand_csvs(nodes, result, out_dir: Path) -> int:
+def write_forecast_demand_csvs(nodes, result, out_dir: Path,
+                               model_clock=None,
+                               start_year: Optional[int] = None) -> int:
     """Persist a demand forecast onto the model's nodes.
+
+    :func:`forecast_node_demands` followed by storing each node's
+    :class:`GuiNodeDemand`; see there. Returns the number of nodes that
+    received demand.
+    """
+    demands = forecast_node_demands(nodes, result, out_dir, model_clock,
+                                    start_year)
+    for i, demand in demands:
+        nodes[i].demand = demand
+    return len(demands)
+
+
+def forecast_node_demands(nodes, result, out_dir: Path, model_clock=None,
+                          start_year: Optional[int] = None, progress=None,
+                          cancelled=None) -> list:
+    """Each node's demand of a forecast, written to CSV; the nodes untouched.
 
     Writes each node's hourly series (the full multi-year forecast when
     available, otherwise the single representative year — the same choice the
@@ -4200,6 +3818,18 @@ def write_forecast_demand_csvs(nodes, result, out_dir: Path) -> int:
     ``demand_paths`` and the runner load per-node demand. Returns the number of
     nodes that received demand. The series stays in memory even if a file write
     fails.
+
+    The forecast is in each node's local civil time (its hour of day, weekday
+    and holidays are local calendar features). With *model_clock* (a
+    :class:`~esfex.utils.model_clock.ModelClock`) every node's series is moved
+    from its own time zone (from its centroid, DST-aware) onto that clock;
+    *start_year* (default: the forecast's base year) is the calendar year of
+    the first 8760 h.
+
+    Returns ``[(node index, GuiNodeDemand)]``. It touches no model state, so
+    it can run off the GUI thread: *progress* ``(done, total)`` is called
+    after each node, and a true *cancelled* ``()`` stops it, returning what
+    was done so far.
     """
     import re
 
@@ -4209,19 +3839,23 @@ def write_forecast_demand_csvs(nodes, result, out_dir: Path) -> int:
     if series is None:
         series = getattr(result, "demand", None)
     if series is None:
-        return 0
+        return []
 
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
 
+    if model_clock is not None:
+        series = _forecast_on_model_clock(series, nodes, model_clock, result,
+                                          start_year)
     peak_list = list(getattr(result, "peak_mw", []) or [])
     ncols = series.shape[1] if series.ndim > 1 else 1
+    total = min(ncols, len(nodes))
     used: set[str] = set()
-    applied = 0
+    out: list = []
     for i, node in enumerate(nodes):
-        if i >= ncols:
+        if i >= ncols or (cancelled is not None and cancelled()):
             break
         col = series[:, i] if series.ndim > 1 else series
         safe = re.sub(
@@ -4239,16 +3873,42 @@ def write_forecast_demand_csvs(nodes, result, out_dir: Path) -> int:
             csv_path = str(path)
         except Exception:
             pass  # keep the series in memory even if the write fails
-        node.demand = GuiNodeDemand(
+        out.append((i, GuiNodeDemand(
             csv_path=csv_path,
             data=data_list,
             num_hours=len(data_list),
             peak_mw=(peak_list[i] if i < len(peak_list)
                      else float(max(data_list, default=0.0))),
             total_mwh=float(sum(data_list)),
-        )
-        applied += 1
-    return applied
+        )))
+        if progress is not None:
+            progress(len(out), total)
+    return out
+
+
+def _forecast_on_model_clock(series, nodes, clock, result, start_year):
+    """The forecast's node columns moved from local time onto *clock*."""
+    import datetime
+
+    from esfex.utils.model_clock import local_to_model_clock
+
+    arr = np.asarray(series, dtype=float)
+    mat = arr.reshape(-1, 1) if arr.ndim == 1 else arr
+    k = min(mat.shape[1], len(nodes))
+    if start_year is None:
+        start_year = getattr(getattr(result, "config", None), "base_year", None)
+    if start_year is None:
+        start_year = datetime.date.today().year
+    coords = [(float(n.centroid_lat), float(n.centroid_lng)) for n in nodes[:k]]
+    try:
+        moved = local_to_model_clock(mat[:, :k], coords, clock, int(start_year))
+    except ValueError as exc:   # e.g. a resampled (non-hourly) forecast
+        logger.warning("Demand left in local time (not on the model clock): %s",
+                       exc)
+        return series
+    out = mat.copy()
+    out[:, :k] = moved
+    return out[:, 0] if arr.ndim == 1 else out
 
 
 class GridMappingDemandStep(QWidget):
@@ -4268,11 +3928,14 @@ class GridMappingDemandStep(QWidget):
     # touch Qt widgets directly; they emit their UI updates through this signal,
     # which Qt delivers as a queued call on the main thread.
     _ui_call = Signal(object)
+    # True while Apply Demand Fractions runs (the wizard holds its navigation).
+    busyChanged = Signal(bool)
 
     def __init__(self, model=None, all_states=None, map_widget=None,
                  parent=None):
         super().__init__(parent)
         self._ui_call.connect(self._on_ui_call)
+        self._apply_cancel = None   # threading.Event of a running apply
         self._model = model
         self._all_states = all_states or {}
         self._map_widget = map_widget
@@ -4284,6 +3947,7 @@ class GridMappingDemandStep(QWidget):
         self._fetcher = None
         self._wb_data: dict = {}
         self._era5_data: dict = {}
+        self._fetched_key = None  # inputs the cached WB/ERA5 data belong to
         self._forecast_result = None
         self._forecast_result_raw = None   # uncorrected demand_multi_year copy
         self._forecast_nodes: list = []
@@ -4348,10 +4012,9 @@ class GridMappingDemandStep(QWidget):
 
         config_grid.addWidget(QLabel(tr("grid_builder.ml_engine")), 3, 0)
         self._combo_engine = QComboBox()
-        # TFT disabled for now \u2014 forward per-node generation uses XGBoost.
-        self._combo_engine.addItem("Auto (XGBoost)", "auto")
+        self._combo_engine.addItem(tr("grid_builder.engine_auto"), "auto")
         self._combo_engine.addItem("XGBoost", "xgboost")
-        self._combo_engine.addItem("Archetype (no ML)", "archetype")
+        self._combo_engine.addItem(tr("grid_builder.engine_archetype"), "archetype")
         config_grid.addWidget(self._combo_engine, 3, 1)
 
         config_grid.addWidget(QLabel(tr("grid_builder.national_demand_gwh")), 4, 0)
@@ -4359,7 +4022,7 @@ class GridMappingDemandStep(QWidget):
         self._spin_national_gwh.setRange(0.0, 9_999_999.0)
         self._spin_national_gwh.setDecimals(1)
         self._spin_national_gwh.setValue(0.0)
-        self._spin_national_gwh.setSpecialValueText("Auto-estimate")
+        self._spin_national_gwh.setSpecialValueText(tr("grid_builder.auto_estimate"))
         self._spin_national_gwh.setToolTip(
             tr("grid_builder.override_total_national_demand_0_auto")
         )
@@ -4404,22 +4067,14 @@ class GridMappingDemandStep(QWidget):
         growth_row.addStretch()
         fg.addLayout(growth_row)
 
-        # Fetch + Run buttons
+        # One button: fetch World Bank + ERA5 inputs, then run the forecast.
         btn_row = QHBoxLayout()
-        self._btn_fetch_data = QPushButton(tr("grid_builder.fetch_wb_era5"))
-        self._btn_fetch_data.setStyleSheet(
-            scale_qss_fonts("font-size: 11px; padding: 4px 8px;")
-        )
-        self._btn_fetch_data.clicked.connect(self._fetch_wb_era5)
-        btn_row.addWidget(self._btn_fetch_data)
-
-        self._btn_forecast = QPushButton(tr("grid_builder.forecast_demand"))
-        self._btn_forecast.setStyleSheet(
+        self._btn_fetch_forecast = QPushButton(tr("grid_builder.fetch_and_forecast"))
+        self._btn_fetch_forecast.setStyleSheet(
             scale_qss_fonts("font-size: 11px; font-weight: bold; padding: 4px 12px;")
         )
-        self._btn_forecast.setEnabled(False)
-        self._btn_forecast.clicked.connect(self._run_forecast)
-        btn_row.addWidget(self._btn_forecast)
+        self._btn_fetch_forecast.clicked.connect(self._fetch_and_forecast)
+        btn_row.addWidget(self._btn_fetch_forecast)
 
         self._forecast_progress = QProgressBar()
         self._forecast_progress.setRange(0, 100)
@@ -4439,9 +4094,8 @@ class GridMappingDemandStep(QWidget):
         rg = QVBoxLayout(results_group)
 
         self._forecast_table = QTableWidget(0, 4)
-        self._forecast_table.setHorizontalHeaderLabels([
-            "Node", "Peak (MW)", "Annual (GWh)", "Load Factor",
-        ])
+        self._forecast_table.setHorizontalHeaderLabels([tr(f"grid_builder.{k}") for k in (
+            "col_node", "col_peak_mw", "col_annual_gwh", "col_load_factor")])
         self._forecast_table.horizontalHeader().setStretchLastSection(True)
         self._forecast_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers,
@@ -4485,9 +4139,9 @@ class GridMappingDemandStep(QWidget):
         vg.addLayout(imp_row)
 
         self._obs_metrics_table = QTableWidget(0, 6)
-        self._obs_metrics_table.setHorizontalHeaderLabels([
-            "Node", "MAPE %", "RMSE (MW)", "Peak err %", "Energy err %", "Corr",
-        ])
+        self._obs_metrics_table.setHorizontalHeaderLabels([tr(f"grid_builder.{k}") for k in (
+            "col_node", "col_mape", "col_rmse_mw", "col_peak_err",
+            "col_energy_err", "col_corr")])
         self._obs_metrics_table.horizontalHeader().setStretchLastSection(True)
         self._obs_metrics_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers)
@@ -4569,10 +4223,8 @@ class GridMappingDemandStep(QWidget):
 
         # Classification rules table
         self._rules_table = QTableWidget(0, 4)
-        self._rules_table.setHorizontalHeaderLabels([
-            "Type Name", "Area Min (m\u00b2)", "Area Max (m\u00b2)",
-            "Weight/m\u00b2",
-        ])
+        self._rules_table.setHorizontalHeaderLabels([tr(f"grid_builder.{k}") for k in (
+            "col_type_name", "col_area_min", "col_area_max", "col_weight_m2")])
         self._rules_table.horizontalHeader().setStretchLastSection(True)
         self._rules_table.setMinimumHeight(100)
         _fo.addWidget(self._rules_table)
@@ -4623,9 +4275,9 @@ class GridMappingDemandStep(QWidget):
 
         # Results table (bus fractions)
         self._results_table = QTableWidget(0, 5)
-        self._results_table.setHorizontalHeaderLabels([
-            "Node", "Bus", "Buildings", "Old Fraction", "New Fraction",
-        ])
+        self._results_table.setHorizontalHeaderLabels([tr(f"grid_builder.{k}") for k in (
+            "col_node", "col_bus", "col_buildings", "col_old_fraction",
+            "col_new_fraction")])
         self._results_table.horizontalHeader().setStretchLastSection(True)
         self._results_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers,
@@ -4642,7 +4294,12 @@ class GridMappingDemandStep(QWidget):
         self._btn_apply.setEnabled(False)
         self._btn_apply.clicked.connect(self._apply_all)
         apply_row.addWidget(self._btn_apply)
-        apply_row.addStretch()
+        # Writing every node's multi-year demand takes a while (~45 s for
+        # 136 nodes x 25 years): its own bar, beside its own button.
+        self._apply_progress = QProgressBar()
+        self._apply_progress.setRange(0, 100)
+        self._apply_progress.setValue(0)
+        apply_row.addWidget(self._apply_progress, 1)
         dg.addLayout(apply_row)
 
         self._lbl_apply_status = QLabel("")
@@ -4730,6 +4387,7 @@ class GridMappingDemandStep(QWidget):
         self._forecast_result = None
         self._wb_data.clear()
         self._era5_data.clear()
+        self._fetched_key = None
 
         # Reset UI
         self._forecast_progress.setValue(0)
@@ -4740,7 +4398,7 @@ class GridMappingDemandStep(QWidget):
         self._lbl_bld_status.setText("")
         self._lbl_apply_status.setText("")
         self._results_table.setRowCount(0)
-        self._btn_forecast.setEnabled(False)
+        self._btn_fetch_forecast.setEnabled(True)
         self._btn_fetch_bld.setEnabled(False)
         self._btn_apply.setEnabled(False)
 
@@ -4799,10 +4457,11 @@ class GridMappingDemandStep(QWidget):
             if len(countries) == 1:
                 c = countries[0]
                 self._lbl_forecast_status.setText(
-                    f"Country: {c['name']} ({c['iso3']})")
+                    tr("grid_builder.country_detected", name=c["name"],
+                       iso3=c["iso3"]))
             else:
                 self._lbl_forecast_status.setText(
-                    f"{len(countries)} countries detected — select one")
+                    tr("grid_builder.countries_detected", count=len(countries)))
             self._btn_detect_country.setEnabled(True)
 
         def _do_detect():
@@ -4840,14 +4499,41 @@ class GridMappingDemandStep(QWidget):
             except Exception as exc:
                 self._ui_call.emit(lambda e=exc: (
                     self._lbl_forecast_status.setText(
-                        f"Country detection failed: {e}"),
+                        tr("grid_builder.country_detection_failed", error=e)),
                     self._btn_detect_country.setEnabled(True),
                 ))
 
         threading.Thread(target=_do_detect, daemon=True).start()
 
-    def _fetch_wb_era5(self):
-        """Fetch World Bank indicators + ERA5 temperature in background."""
+    def _fetch_inputs_key(self):
+        """Identify the inputs a fetch depends on (country, domain centre,
+        weather year), or None when no country / bounds are set."""
+        country_data = self._combo_country.currentData()
+        if not country_data or not self._bounds:
+            return None
+        south, west, north, east = self._bounds
+        weather_year = min(self._spin_base_year.value() - 1, 2025)
+        return (country_data.get("iso2", ""),
+                round((south + north) / 2.0, 4), round((west + east) / 2.0, 4),
+                weather_year)
+
+    def _fetch_and_forecast(self):
+        """Fetch the World Bank + ERA5 inputs, then run the forecast.
+
+        The fetch is skipped when the data already on hand was fetched for
+        the same country, domain and weather year, so re-running the forecast
+        after tweaking its parameters doesn't hit the network again.
+        """
+        key = self._fetch_inputs_key()
+        if key is not None and key == self._fetched_key \
+                and self._wb_data and self._era5_data:
+            self._run_forecast()
+            return
+        self._fetch_wb_era5(on_done=self._run_forecast)
+
+    def _fetch_wb_era5(self, on_done=None):
+        """Fetch World Bank indicators + ERA5 temperature in background,
+        then call ``on_done`` on the GUI thread if the fetch succeeded."""
         country_data = self._combo_country.currentData()
         if not country_data:
             self._lbl_forecast_status.setText(
@@ -4857,8 +4543,9 @@ class GridMappingDemandStep(QWidget):
 
         iso2 = country_data.get("iso2", "")
         iso3 = country_data.get("iso3", iso2)
+        fetch_key = self._fetch_inputs_key()
 
-        self._btn_fetch_data.setEnabled(False)
+        self._btn_fetch_forecast.setEnabled(False)
         self._forecast_progress.setValue(5)
         self._lbl_forecast_status.setText(tr("grid_builder.fetching_world_bank_data"))
 
@@ -4918,9 +4605,9 @@ class GridMappingDemandStep(QWidget):
                 self._ui_call.emit(lambda wb=wb: (
                     self._forecast_progress.setValue(40),
                     self._lbl_forecast_status.setText(
-                        f"WB: GDP/cap=${wb.get('gdp_per_capita', 0):,.0f}, "
-                        f"Pop={wb.get('population', 0):,.0f}. "
-                        f"Fetching ERA5 temperature..."
+                        tr("grid_builder.wb_fetching_era5",
+                           gdp=f"{wb.get('gdp_per_capita', 0):,.0f}",
+                           pop=f"{wb.get('population', 0):,.0f}")
                     ),
                 ))
 
@@ -4943,32 +4630,36 @@ class GridMappingDemandStep(QWidget):
                 data = resp.json()
                 temp = data.get("hourly", {}).get("temperature_2m", [])
 
+                # Kept in UTC as fetched; the forecast puts it on each node's
+                # local time (meteo_from_utc_temperature).
                 self._era5_data = {
-                    "temperature_hourly": temp[:8760],
+                    "temperature_utc": temp,
                     "lat": lat,
                     "lon": lon,
                     "year": weather_year,
                 }
-                self._ui_call.emit(
-                    lambda wb=wb, temp=temp, weather_year=weather_year: (
-                        self._forecast_progress.setValue(60),
-                        self._lbl_forecast_status.setText(
-                            f"WB: GDP/cap=${wb.get('gdp_per_capita', 0):,.0f}, "
-                            f"Pop={wb.get('population', 0):,.0f}, "
-                            "kWh/cap="
-                            f"{wb.get('electric_consumption_kwh_capita', 0):,.0f}. "
-                            f"ERA5: {len(temp)} hours ({weather_year}). "
-                            f"Ready to forecast."
-                        ),
-                        self._btn_forecast.setEnabled(True),
-                        self._btn_fetch_data.setEnabled(True),
+                self._fetched_key = fetch_key
+
+                def _fetched(wb=wb, temp=temp, weather_year=weather_year):
+                    self._forecast_progress.setValue(60)
+                    self._lbl_forecast_status.setText(
+                        tr("grid_builder.wb_era5_done",
+                           gdp=f"{wb.get('gdp_per_capita', 0):,.0f}",
+                           pop=f"{wb.get('population', 0):,.0f}",
+                           kwh=f"{wb.get('electric_consumption_kwh_capita', 0):,.0f}",
+                           hours=len(temp), year=weather_year)
                     )
-                )
+                    if on_done is not None:
+                        on_done()  # keeps the button busy until it finishes
+                    else:
+                        self._btn_fetch_forecast.setEnabled(True)
+                self._ui_call.emit(_fetched)
 
             except Exception as exc:
                 self._ui_call.emit(lambda e=exc: (
-                    self._lbl_forecast_status.setText(f"Fetch error: {e}"),
-                    self._btn_fetch_data.setEnabled(True),
+                    self._lbl_forecast_status.setText(
+                        tr("grid_builder.fetch_error", error=e)),
+                    self._btn_fetch_forecast.setEnabled(True),
                     self._forecast_progress.setValue(0),
                 ))
 
@@ -4990,28 +4681,27 @@ class GridMappingDemandStep(QWidget):
         """Run ML demand forecast using collected data."""
         from esfex.visualization.workflows.demand_estimation_analysis import (
             DemandEstimationConfig,
-            DemandEstimationResult,
             DemandProfileBuilder,
             MacroData,
-            MeteoData,
             ProxyData,
+            meteo_from_utc_temperature,
         )
 
-        self._btn_forecast.setEnabled(False)
+        self._btn_fetch_forecast.setEnabled(False)
         self._forecast_progress.setValue(65)
         self._lbl_forecast_status.setText(tr("grid_builder.running_demand_forecast"))
 
         state = self._model.state if self._model else None
         if state is None:
             self._lbl_forecast_status.setText(tr("grid_builder.no_active_system"))
-            self._btn_forecast.setEnabled(True)
+            self._btn_fetch_forecast.setEnabled(True)
             return
 
         nodes = self._nodes_in_scope()
         num_nodes = len(nodes)
         if num_nodes == 0:
             self._lbl_forecast_status.setText(tr("grid_builder.no_nodes_in_system"))
-            self._btn_forecast.setEnabled(True)
+            self._btn_fetch_forecast.setEnabled(True)
             return
 
         country_data = self._combo_country.currentData() or {}
@@ -5079,21 +4769,14 @@ class GridMappingDemandStep(QWidget):
             logger.warning("SSP growth-rate wiring failed (%s); "
                            "trajectory falls back to scalar rates.", exc)
 
-        # Build meteo data from ERA5 fetch
+        # Build meteo data from the ERA5 fetch (UTC), on each node's local
+        # civil time: the demand models' hours are local.
         era5 = self._era5_data
-        temp_h = era5.get("temperature_hourly", [])
-        hdd_base = 18.0
-        cdd_base = 24.0
-        hdd_h = [max(0.0, hdd_base - t) for t in temp_h] if temp_h else []
-        cdd_h = [max(0.0, t - cdd_base) for t in temp_h] if temp_h else []
-
-        meteo = MeteoData(
-            temperature_hourly=temp_h,
-            hdd_hourly=hdd_h,
-            cdd_hourly=cdd_h,
-            lat=era5.get("lat", 0.0),
-            lon=era5.get("lon", 0.0),
-            year=era5.get("year", 2024),
+        meteo = meteo_from_utc_temperature(
+            era5.get("temperature_utc", []),
+            era5.get("year", 2024),
+            era5.get("lat", 0.0), era5.get("lon", 0.0),
+            proxy.node_lats, proxy.node_lons,
         )
 
         # Run in thread
@@ -5120,10 +4803,11 @@ class GridMappingDemandStep(QWidget):
             except Exception as exc:
                 logger.exception("Demand forecast failed")
                 self._ui_call.emit(lambda e=exc: (
-                    self._lbl_forecast_status.setText(f"Forecast error: {e}"),
+                    self._lbl_forecast_status.setText(
+                        tr("grid_builder.forecast_error", error=e)),
                     self._forecast_progress.setValue(0),
                 ))
-            self._ui_call.emit(lambda: self._btn_forecast.setEnabled(True))
+            self._ui_call.emit(lambda: self._btn_fetch_forecast.setEnabled(True))
 
         threading.Thread(target=_do_forecast, daemon=True).start()
 
@@ -5150,14 +4834,16 @@ class GridMappingDemandStep(QWidget):
             self._forecast_table.setItem(i, 3, QTableWidgetItem(f"{lf:.3f}"))
 
         self._lbl_forecast_summary.setText(
-            f"<b>System total:</b> Peak={result.total_peak_mw:.1f} MW, "
-            f"Annual={result.total_annual_gwh:.1f} GWh, "
-            f"LF={result.total_load_factor:.3f} "
-            f"&mdash; Source: {result.demand_source}"
+            GridMappingDemandStep._system_total_text(result)
         )
         self._lbl_forecast_summary.setStyleSheet("color: #27ae60; padding: 4px;")
         self._forecast_progress.setValue(100)
         self._lbl_forecast_status.setText(tr("grid_builder.forecast_complete"))
+        missing = self._density_model_missing_text(result)
+        if missing:
+            self._lbl_forecast_summary.setText(
+                self._lbl_forecast_summary.text() + "<br>" + missing)
+            self._lbl_forecast_summary.setStyleSheet("color: #d35400; padding: 4px;")
 
         # Remember the forecast nodes so the demand visualizer can read the
         # per-node hourly series straight from the result.
@@ -5178,6 +4864,35 @@ class GridMappingDemandStep(QWidget):
         # exists (spatial becomes runnable; a footprint proxy already was).
         self._update_distribute_enabled()
         self._btn_apply.setEnabled(True)
+
+    @staticmethod
+    def _system_total_text(result) -> str:
+        """The forecast's system-total line (peak, energy, load factor)."""
+        return tr("grid_builder.forecast_system_total",
+                  peak=f"{result.total_peak_mw:.1f}",
+                  annual=f"{result.total_annual_gwh:.1f}",
+                  lf=f"{result.total_load_factor:.3f}",
+                  source=result.demand_source)
+
+    @staticmethod
+    def _density_model_missing_text(result):
+        """What the forecast lacks for want of data, else '': the density
+        model (no spatial cells, a trend instead of the model's pattern) or
+        population / GDP rasters that could not be downloaded."""
+        if result is None:
+            return ""
+        warnings = [str(w) for w in getattr(result, "warnings", []) or []]
+        if not getattr(result, "cell_annual_mwh", None) and any(
+                w.startswith("Density model not found") for w in warnings):
+            from esfex.paths import BUNDLED_MODELS_DIR
+            return tr("grid_builder.forecast_without_density_model",
+                      source=getattr(result, "demand_source", "?"),
+                      path=str(BUNDLED_MODELS_DIR))
+        failed = [w.split(": ", 1)[1] for w in warnings
+                  if w.startswith("Data download failed: ")]
+        if failed:
+            return tr("grid_builder.forecast_data_download_failed", files=failed[0])
+        return ""
 
     def _on_view_demand(self):
         """Open the demand visualizer with every forecasted node's series."""
@@ -5242,8 +4957,8 @@ class GridMappingDemandStep(QWidget):
             return
         from PySide6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load observed demand CSV", "",
-            "Demand files (*.csv *.xlsx *.xls);;All files (*)")
+            self, tr("grid_builder.load_observed_title"), "",
+            tr("grid_builder.demand_file_filter"))
         if not path:
             return
         try:
@@ -5255,8 +4970,8 @@ class GridMappingDemandStep(QWidget):
             series = df.iloc[:, 0].astype(float)   # one series = selected node
             data = [float(x) for x in series.tolist()]
         except Exception as exc:
-            QMessageBox.warning(self, "Load failed",
-                                f"Could not read the file:\n{exc}")
+            QMessageBox.warning(self, tr("grid_builder.load_failed_title"),
+                                tr("grid_builder.load_failed_msg", error=exc))
             return
         from esfex.visualization.data.gui_model import GuiNodeDemand
         self._observed[idx] = GuiNodeDemand(
@@ -5320,8 +5035,7 @@ class GridMappingDemandStep(QWidget):
             for c, v in enumerate(vals):
                 self._obs_metrics_table.setItem(r, c, QTableWidgetItem(str(v)))
         self._lbl_validation_status.setText(
-            f"{len(rows)} node(s) with observed data — metrics compare the "
-            "base year against your series.")
+            tr("grid_builder.observed_nodes", count=len(rows)))
 
     def _on_apply_correction_toggled(self, checked: bool):
         if self._forecast_result is None or self._forecast_result_raw is None:
@@ -5355,7 +5069,7 @@ class GridMappingDemandStep(QWidget):
         self._forecast_result.demand_multi_year = corrected
         self._recompute_node_stats(corrected)
         self._lbl_validation_status.setText(
-            f"Correction applied to {n_applied} node(s); growth preserved.")
+            tr("grid_builder.correction_applied", count=n_applied))
 
     def _recompute_node_stats(self, multi_year):
         """Refresh per-node peak/GWh/LF + the results table + system total."""
@@ -5390,10 +5104,7 @@ class GridMappingDemandStep(QWidget):
             result.total_load_factor = (
                 float(sys_base.mean() / sp) if sp > 0 else 0.0)
         self._lbl_forecast_summary.setText(
-            f"<b>System total:</b> Peak={result.total_peak_mw:.1f} MW, "
-            f"Annual={result.total_annual_gwh:.1f} GWh, "
-            f"LF={result.total_load_factor:.3f} "
-            f"&mdash; Source: {result.demand_source}")
+            GridMappingDemandStep._system_total_text(result))
 
     # ==================================================================
     # Section 2: Eligible nodes detection (for bus distribution)
@@ -5515,7 +5226,7 @@ class GridMappingDemandStep(QWidget):
         self._buildings_gdf = gdf
         n = len(gdf) if gdf is not None else 0
         self._lbl_bld_status.setText(
-            f"Loaded {n:,} building footprints. Classifying..."
+            tr("grid_builder.buildings_loaded", count=f"{n:,}")
         )
         self._bld_progress.setValue(50)
         if n > 0:
@@ -5525,7 +5236,7 @@ class GridMappingDemandStep(QWidget):
 
     def _on_bld_error(self, msg):
         self._btn_fetch_bld.setEnabled(True)
-        self._lbl_bld_status.setText(f"Error: {msg}")
+        self._lbl_bld_status.setText(tr("grid_builder.error_msg", error=msg))
         self._bld_progress.setValue(0)
 
     def _load_default_rules(self):
@@ -5613,8 +5324,16 @@ class GridMappingDemandStep(QWidget):
         fallback = self._spin_fallback.value()
         from esfex.visualization.workflows._wizard_utils import stop_thread
         stop_thread(getattr(self, "_classify_worker", None))
+        # Every bus of the state decides which node a building belongs to,
+        # so a node's split counts only its own buildings.
+        state = self._model.state if self._model else None
+        reference = [
+            (b.latitude, b.longitude, (None, b.parent_node))
+            for b in (state.buses.values() if state is not None else [])
+        ]
         self._classify_worker = ClassifyDistributeWorker(
             self._buildings_gdf, rules, fallback, list(self._targets),
+            reference_buses=reference or None,
         )
         self._classify_worker.progress.connect(self._on_classify_dist_progress)
         self._classify_worker.finished.connect(self._on_classify_dist_done)
@@ -5627,7 +5346,7 @@ class GridMappingDemandStep(QWidget):
             self._lbl_status.setText(msg)
 
     def _on_classify_dist_error(self, msg):
-        self._lbl_status.setText(f"Classification failed: {msg}")
+        self._lbl_status.setText(tr("grid_builder.classification_failed", error=msg))
         self._progress.setValue(0)
         self._btn_run.setEnabled(True)
 
@@ -5638,9 +5357,10 @@ class GridMappingDemandStep(QWidget):
         cls_lines = []
         for _, r in summary.iterrows():
             cls_lines.append(
-                f"{r['building_type']}: {int(r['count']):,} bldg, "
-                f"{r['total_area_m2']:,.0f} m\u00b2, "
-                f"w={r['total_weight']:.1f}"
+                tr("grid_builder.building_class_line", type=r["building_type"],
+                   count=f"{int(r['count']):,}",
+                   area=f"{r['total_area_m2']:,.0f}",
+                   weight=f"{r['total_weight']:.1f}")
             )
 
         self._render_assignments_table()
@@ -5649,9 +5369,9 @@ class GridMappingDemandStep(QWidget):
         total_bld = int(summary["count"].sum()) if not summary.empty else 0
         total_w = summary["total_weight"].sum() if not summary.empty else 0.0
         self._lbl_status.setText(
-            f"Classified {total_bld:,} buildings "
-            f"({'; '.join(cls_lines)}; total weight: {total_w:.1f}). "
-            f"Assigned to {len(self._assignments)} buses."
+            tr("grid_builder.classified_buildings", count=f"{total_bld:,}",
+               classes="; ".join(cls_lines), weight=f"{total_w:.1f}",
+               buses=len(self._assignments))
         )
         self._btn_run.setEnabled(True)
         self._btn_apply.setEnabled(len(self._assignments) > 0)
@@ -5692,7 +5412,8 @@ class GridMappingDemandStep(QWidget):
         cells = getattr(res, "cell_annual_mwh", None) if res is not None else None
         if not cells:
             self._lbl_bld_status.setText(
-                tr("grid_builder.run_the_demand_forecast_auto_xgboost"))
+                GridMappingDemandStep._density_model_missing_text(res)
+                or tr("grid_builder.run_the_demand_forecast_auto_xgboost"))
             return
         state = self._model.state if self._model else None
         nodes = self._nodes_in_scope() if state else []
@@ -5725,9 +5446,9 @@ class GridMappingDemandStep(QWidget):
         # voltage-kV fallback scaled into the MVA range (so a node mixing
         # MVA-rated and fallback buses stays consistent).
         mva: dict[str, float] = {}
-        for tr in state.transformers:
-            m = float(getattr(tr, "rated_power_mva", 0.0) or 0.0)
-            for bid in (tr.from_bus, tr.to_bus):
+        for trafo in state.transformers:
+            m = float(getattr(trafo, "rated_power_mva", 0.0) or 0.0)
+            for bid in (trafo.from_bus, trafo.to_bus):
                 if bid:
                     mva[bid] = mva.get(bid, 0.0) + m
         load_buses_all = [b for b in state.buses.values()
@@ -5793,34 +5514,122 @@ class GridMappingDemandStep(QWidget):
         self._btn_apply.setEnabled(
             len(self._assignments) > 0 or self._forecast_result is not None)
         self._lbl_bld_status.setText(
-            f"Demand distribution: {len(self._assignments)} bus fraction(s) "
-            f"across {n_nodes} multi-bus + {n_single} single-bus node(s) from "
-            f"{len(res.cell_lats)} demand cells.")
+            tr("grid_builder.demand_distribution_done",
+               fractions=len(self._assignments), multi=n_nodes,
+               single=n_single, cells=len(res.cell_lats)))
 
     def _apply_all(self):
-        """Apply forecast demand to nodes + bus fractions to model."""
-        if not self._model:
-            return
+        """Apply forecast demand to nodes + bus fractions to model.
 
-        state = self._model.state
-        applied_fracs = 0
-        applied_demand = 0
+        Writing each node's hourly series to CSV is the slow part (~45 s for
+        136 nodes x 25 years): it runs on a worker thread with its progress on
+        the bar beside the button, and the GUI stays responsive. The model is
+        changed on the GUI thread only, once the files are written. It ran
+        entirely on the GUI thread, which froze the wizard with no sign of
+        progress.
+        """
+        if not self._model or self._apply_cancel is not None:
+            return
+        import threading
 
         # Apply forecast demand to nodes (if forecast was run). Each node's
         # hourly series is written to a CSV and a full GuiNodeDemand is stored
         # (csv_path + data + stats), so the serializer emits ``demand_paths``
-        # and the runner finds the files. (Previously only the summary stats
-        # were stashed on a SimpleNamespace, leaving demand_paths empty.)
+        # and the runner finds the files.
+        job = None
         if self._forecast_result is not None:
             # Output dir: alongside the loaded YAML if known (same convention as
             # availability profiles), else the working directory.
             cfg_path = getattr(self.window(), "_config_path", None)
             out_dir = (Path(cfg_path).parent if cfg_path else Path.cwd()) / "demand"
-            applied_demand += write_forecast_demand_csvs(
-                self._nodes_in_scope(), self._forecast_result, out_dir)
+            # The forecast is in local time: save it on the model clock (the
+            # one the weather availability already used, else the standard
+            # time of the zone with most forecast demand) and record it.
+            from esfex.utils.model_clock import resolve_for_nodes
+            nodes = self._nodes_in_scope()
+            g = self._model.global_settings
+            clock = resolve_for_nodes(
+                g.model_clock, nodes,
+                weights=list(getattr(self._forecast_result, "annual_gwh", []) or []))
+            g.model_clock = clock.zone
+            job = (nodes, self._forecast_result, out_dir, clock)
 
-        # Apply bus fractions
+        cancel = threading.Event()
+        self._apply_cancel = cancel
+        self._set_applying(True)
+        if job is None:
+            self._finish_apply(None, [], cancel)
+            return
+
+        nodes, result, out_dir, clock = job
+
+        def _progress(done, total):
+            self._ui_call.emit(lambda d=done, t=total: (
+                self._apply_progress.setValue(int(95 * d / max(t, 1))),
+                self._lbl_apply_status.setText(
+                    tr("grid_builder.apply_progress_demand", done=d, total=t)),
+            ))
+
+        def _do_apply():
+            try:
+                demands = forecast_node_demands(
+                    nodes, result, out_dir, model_clock=clock,
+                    progress=_progress, cancelled=cancel.is_set)
+            except Exception as exc:
+                logger.exception("Applying the demand forecast failed")
+                self._ui_call.emit(lambda e=exc: self._fail_apply(e, cancel))
+                return
+            self._ui_call.emit(
+                lambda: self._finish_apply(nodes, demands, cancel))
+
+        threading.Thread(target=_do_apply, daemon=True).start()
+
+    def _set_applying(self, busy: bool):
+        """Hold the step's actions (and, via busyChanged, the wizard's
+        navigation) while an apply runs."""
+        btns = [b for b in (self._btn_apply, self._btn_fetch_bld,
+                            getattr(self, "_btn_fetch_forecast", None))
+                if b is not None]
+        if busy:
+            # Restored as they were: a button that was off stays off.
+            self._apply_held = [(b, b.isEnabled()) for b in btns]
+            for b in btns:
+                b.setEnabled(False)
+        else:
+            for b, was in getattr(self, "_apply_held", []):
+                b.setEnabled(was)
+            self._apply_held = []
+        if busy:
+            self._apply_progress.setValue(0)
+            self._lbl_apply_status.setStyleSheet("padding: 4px;")
+            self._lbl_apply_status.setText(
+                tr("grid_builder.apply_progress_start"))
+        self.busyChanged.emit(busy)
+
+    def _fail_apply(self, exc, cancel):
+        if cancel is not self._apply_cancel:
+            return
+        self._apply_cancel = None
+        self._set_applying(False)
+        self._apply_progress.setValue(0)
+        self._lbl_apply_status.setText(tr("grid_builder.apply_error", error=exc))
+        self._lbl_apply_status.setStyleSheet(
+            "color: #c0392b; font-weight: bold; padding: 4px;")
+
+    def _finish_apply(self, nodes, demands, cancel):
+        """Store the written demand and the bus fractions (GUI thread)."""
+        if cancel is not self._apply_cancel or cancel.is_set():
+            return
+        self._apply_cancel = None
+        state = self._model.state
+        for i, demand in demands:
+            nodes[i].demand = demand
+        applied_demand = len(demands)
+
+        # Apply bus fractions, in one batch (one undo step, no per-bus redraw).
         skipped_connection = 0
+        fractions: dict[str, float] = {}
+        roles: dict[str, str] = {}
         for a in self._assignments:
             bus_id = a["bus_id"]
             new_frac = a["new_fraction"]
@@ -5831,18 +5640,14 @@ class GridMappingDemandStep(QWidget):
                     # (spatial/footprint split across an HV node's busbars, which
                     # role-repair leaves as 'connection'). Promote it to 'load'
                     # so the model honours the demand rather than dropping it.
-                    target_bus.role = "load"
+                    roles[bus_id] = "load"
                 else:
                     # Zero-share busbar: keep it demand-free.
                     skipped_connection += 1
                     continue
-            try:
-                self._model.update_bus(bus_id, demand_fraction=new_frac)
-                applied_fracs += 1
-            except Exception:
-                if bus_id in state.buses:
-                    state.buses[bus_id].demand_fraction = new_frac
-                    applied_fracs += 1
+            fractions[bus_id] = new_frac
+        applied_fracs = (self._model.set_demand_fractions(fractions, roles)
+                         if fractions else 0)
         if skipped_connection:
             # Expected, not an error: HV connection busbars (grid junctions) get
             # a zero demand share, so they stay demand-free. Node demand is fully
@@ -5853,16 +5658,19 @@ class GridMappingDemandStep(QWidget):
                 skipped_connection,
             )
 
+        self._set_applying(False)
         self._btn_apply.setEnabled(False)
-        parts = []
-        if applied_demand > 0:
-            parts.append(f"demand to {applied_demand} node(s)")
-        if applied_fracs > 0:
-            parts.append(f"fractions to {applied_fracs} bus(es)")
-        self._lbl_apply_status.setText(
-            f"Applied {' and '.join(parts)}."
-            if parts else "Nothing to apply."
-        )
+        self._apply_progress.setValue(100)
+        if applied_demand and applied_fracs:
+            text = tr("grid_builder.apply_done_both", nodes=applied_demand,
+                      buses=applied_fracs)
+        elif applied_demand:
+            text = tr("grid_builder.apply_done_demand", nodes=applied_demand)
+        elif applied_fracs:
+            text = tr("grid_builder.apply_done_fractions", buses=applied_fracs)
+        else:
+            text = tr("grid_builder.apply_nothing")
+        self._lbl_apply_status.setText(text)
         self._lbl_apply_status.setStyleSheet(
             "color: #27ae60; font-weight: bold; padding: 4px;"
         )
@@ -5888,3 +5696,8 @@ class GridMappingDemandStep(QWidget):
         from esfex.visualization.workflows._wizard_utils import stop_thread
         stop_thread(getattr(self, "_fetcher", None))
         stop_thread(getattr(self, "_classify_worker", None))
+        # An apply in progress stops after its current node; nothing of it is
+        # stored on the model.
+        if getattr(self, "_apply_cancel", None) is not None:
+            self._apply_cancel.set()
+            self._apply_cancel = None

@@ -6,42 +6,72 @@ The Julia code lives in `src/esfex/julia/`:
 
 ```
 src/esfex/julia/
-├── Project.toml                    # Dependencies
-├── Manifest.toml                   # Lockfile
+├── Project.toml              # Dependencies
+├── Manifest.toml             # Lockfile
+├── build_sysimage.jl         # Used by `esfex precompile`
+├── precompile_workload.jl    # Workload traced into the sysimage
+├── test/                     # runtests.jl + test Project.toml
 └── src/
-    ├── ESFEX.jl                   # Module entry point
-    ├── types.jl                    # Type definitions (~700 lines)
-    ├── power_system.jl             # Operational dispatch (~2500 lines)
-    ├── master_problem.jl           # Capacity expansion (~3600 lines)
-    ├── transmission_dc.jl          # DC power flow (~760 lines)
-    ├── primary_energy.jl           # Fuel supply chain (~1580 lines)
-    └── electrolyzer.jl             # Electrolyzers (~290 lines)
+    ├── ESFEX.jl              # Module entry point, solver factory, exports
+    ├── types.jl              # Input, variable and result structs
+    ├── user_constraints.jl   # Custom-constraint hooks (register_constraint_hook!)
+    ├── transmission_dc.jl    # DC power flow
+    ├── transmission_ac.jl    # AC power flow (Newton-Raphson), Y-bus
+    ├── transmission_acopf.jl # ACOPF formulations (SOC, QC, SDP, NLP)
+    ├── power_system.jl       # Operational dispatch / unit commitment
+    ├── primary_energy.jl     # Fuel supply chain
+    ├── committed_steps.jl    # Steps a rolling-horizon window keeps
+    ├── master_problem.jl     # Capacity expansion (single, multi-system, stochastic)
+    ├── master_fuel.jl        # Fuel balance, fuel infrastructure and electrolyzers in the master
+    ├── master_diagnostics.jl # Binding constraints, duals and paid slacks of the master
+    ├── benders.jl            # Benders decomposition of the master problem
+    ├── mga.jl                # MGA / SPORES near-optimal alternatives
+    ├── electrolyzer.jl       # Stand-alone electrolyzer model (not used by a run)
+    ├── dcopf_benchmark.jl    # Standalone DCOPF benchmark (solve_dcopf)
+    ├── acopf_benchmark.jl    # Standalone ACOPF benchmark (solve_acopf)
+    └── log_forwarding.jl     # Julia logs to the Python logger
 ```
 
 ### Module Entry Point
 
 ```julia
-# ESFEX.jl
+# ESFEX.jl (abridged)
 module ESFEX
     using JuMP
+    using JuMP: VariableRef, AffExpr
     using HiGHS
+    using Graphs
     using LinearAlgebra
+    using SparseArrays
+    using Statistics: mean
+    import MathOptInterface as MOI
 
     include("types.jl")
+    include("user_constraints.jl")
     include("transmission_dc.jl")
     include("transmission_ac.jl")
+    include("transmission_acopf.jl")
     include("power_system.jl")
     include("primary_energy.jl")
+    include("committed_steps.jl")
     include("master_problem.jl")
+    include("master_fuel.jl")
+    include("master_diagnostics.jl")
+    include("benders.jl")
+    include("mga.jl")
     include("electrolyzer.jl")
+    include("dcopf_benchmark.jl")
+    include("acopf_benchmark.jl")
+    include("log_forwarding.jl")
 
-    # Exported functions
     export create_power_system, create_master_problem
     export create_optimizer, diagnose_infeasibility
     export extract_solution, export_solution_to_dict
     # ... all public API
 end
 ```
+
+Solvers other than HiGHS are loaded lazily by `create_optimizer` (`_load_solver_module`), from ESFEX's Julia project or the optional-solver environment.
 
 
 ---
@@ -53,36 +83,47 @@ Input data flows through strongly-typed structs in `types.jl`:
 
 ### Core Types
 
+`GeneratorConfig` has about 40 positional fields. Abridged:
+
 ```julia
 struct GeneratorConfig
     name::String
-    type::String                    # "Renewable" or "Non-renewable"
+    type::String                     # "Renewable" or "Non-renewable"
     fuel::String
-    rated_power::Vector{Float64}    # Per node
+    rated_power::Vector{Float64}     # per bus
     min_power::Vector{Float64}
     efficiency_rated::Vector{Float64}
     efficiency_min::Vector{Float64}
-    ramp_up::Vector{Float64}
+    ramp_up::Vector{Float64}         # fraction of capacity per hour; <= 0 = no limit
     ramp_down::Vector{Float64}
-    min_up_time::Vector{Int}
-    min_down_time::Vector{Int}
-    fuel_cost::Vector{Float64}
-    fixed_cost::Vector{Float64}
-    maintenance_cost::Vector{Float64}
+    min_up_time::Vector{Float64}     # hours
+    min_down_time::Vector{Float64}
     start_up_cost::Vector{Float64}
-    invest_cost::Vector{Float64}
-    invest_max::Vector{Float64}
-    availability::Matrix{Float64}   # (hours x nodes)
-    life_time::Vector{Int}
-    initial_age::Vector{Int}
-    degradation_rate::Vector{Float64}
+    fuel_cost::Vector{Float64}
+    fixed_cost::Vector{Float64}       # $/MW of power in service per year
+    maintenance_cost::Vector{Float64}
     inertia::Vector{Float64}
+    invest_cost::Vector{Float64}      # prices the master's life extension
+    availability::Matrix{Float64}    # (hours x buses)
+    reservable::Bool
+    life_time::Vector{Float64}
+    initial_age::Vector{Float64}
+    degradation_rate::Vector{Float64}
+    decommissioning_cost::Vector{Float64}
+    frequency_hz::Float64
+    current_type::String             # "AC" or "DC"
+    # reservoir_* fields (hydro), risk_coefficient,
+    # reservoir_min_release, cascade_downstream, cascade_delay_hours,
+    # reservoir_head_min_factor
+    num_units::Vector{Int}           # identical units per bus (clustered UC)
 end
 ```
 
-### Convention: Per-Node Arrays
+See `types.jl` for the full definitions; the Python side builds these in `bridge/adapters.py`.
 
-Most generator and battery parameters are `Vector{Float64}` of length `num_nodes`, allowing different technical parameters per geographic location.
+### Convention: Per-Bus Arrays
+
+Most generator and battery parameters are `Vector{Float64}` with one entry per bus of the network the model is built on. The Python side expands per-node configuration onto buses before calling Julia. Variables are created only for active unit-bus pairs; `vars.buses_of_gen[g]` and `vars.gens_at_bus[b]` (and the battery equivalents) list them.
 
 ### Type System Conventions
 
@@ -113,57 +154,33 @@ struct Threshold{T<:Real}
 end
 ```
 
-**Composite input structs.** Group related parameters into nested structs. The top-level input struct (`PowerSystemInput`, `MasterProblemInput`) aggregates sub-structs:
-
-```julia
-struct CO2BudgetConfig
-    enabled::Bool
-    annual_budget::Float64     # tonnes/year
-    penalty::Float64           # $/tonne violation
-end
-
-struct ReserveConfig
-    enabled::Bool
-    spinning_fraction::Float64
-    penalty::Float64
-end
-
-# Top-level input includes both
-struct PowerSystemInput
-    generators::Vector{GeneratorConfig}
-    batteries::Vector{BatteryConfig}
-    co2_budget::CO2BudgetConfig
-    reserves::ReserveConfig
-    # ...
-end
-```
+**Top-level input structs.** `PowerSystemInput` and `MasterProblemInput` hold the unit vectors and network as sub-structs (`Vector{GeneratorConfig}`, `NetworkConfig`, `TemporalConfig`) and most scalar settings as flat fields, for example `co2_budget::Float64`, `co2_cost::Float64`, `loss_of_load_penalty::Float64`, `mode::String`, `solver_name::String`. Small grouping structs exist (`PenaltyConfig`, `TargetConfig`, `SolverSettings`) but the dispatch input does not nest them.
 
 **Naming conventions for types:**
 
 | Kind | Convention | Example |
 |------|-----------|---------|
-| Input config | `XxxConfig` | `GeneratorConfig`, `CO2BudgetConfig` |
+| Input config | `XxxConfig` | `GeneratorConfig`, `PenaltyConfig` |
 | Model variables | `XxxVariables` | `PowerSystemVariables` |
 | Solution output | `XxxResult` | `PowerSystemResult`, `MGAResult` |
 | Technology specs | `XxxTechnologyConfig` | `TechnologyConfig`, `BatteryTechnologyConfig` |
 
-**Default constructors.** Use keyword constructors for types with many fields:
+**Keyword constructors.** Large input structs get an outer keyword constructor with defaults, so callers set only what they need (from `test/runtests.jl`):
 
 ```julia
-Base.@kwdef struct SolverConfig
-    threads::Int = 4
-    time_limit::Float64 = 300.0
-    gap::Float64 = 0.01
-    verbose::Bool = false
-end
-
-# Usage: SolverConfig(threads=8, verbose=true)
+input = PowerSystemInput(
+    name = "ed", year = 2025, network = net, generators = [gen],
+    batteries = BatteryConfig[], demand = reshape([50.0, 60.0], H, 1),
+    temporal = TemporalConfig(H, 1, H, 0, H, H, 1, 1, 1),
+    mode = "economic_dispatch", solver_name = "highs", verbose = false)
 ```
+
+When you add a field, add it to the struct, the keyword constructor (with a default) and the positional call inside it.
 
 ### Adding a New Type
 
 1. Define the struct in `types.jl`
-2. Add it to the relevant input struct (`PowerSystemInput` or `MasterProblemInput`)
+2. Add it to the relevant input struct (`PowerSystemInput` or `MasterProblemInput`) and its keyword constructor
 3. Update the Python adapter in `adapters.py` to construct the Julia type
 4. Add constraints in the relevant `.jl` file
 
@@ -176,17 +193,15 @@ end
 ### Pattern: Adding a New Constraint
 
 ```julia
-function add_my_constraints!(model::Model, vars::Variables, input::PowerSystemInput)
+function add_my_constraints!(model::Model, vars::PowerSystemVariables, input::PowerSystemInput)
     hours = input.temporal.hours
-    num_nodes = input.network.num_nodes
+    n_bus = input.network.num_buses
 
-    for t in 1:hours
-        for n in 1:num_nodes
-            @constraint(model,
-                vars.my_variable[n, t] <= input.my_parameter[n],
-                base_name = "my_constraint_n$(n)_t$(t)"
-            )
-        end
+    for t in 1:hours, b in 1:n_bus
+        @constraint(model,
+            vars.my_variable[b, t] <= input.my_parameter[b],
+            base_name = "my_constraint_b$(b)_t$(t)"
+        )
     end
 end
 ```
@@ -197,8 +212,8 @@ Use descriptive base names that include indices:
 
 ```julia
 # Good
-@constraint(model, ..., base_name = "gen_capacity_g$(g)_n$(n)_t$(t)")
-@constraint(model, ..., base_name = "bat_soc_dynamics_b$(b)_n$(n)_t$(t)")
+@constraint(model, ..., base_name = "gen_capacity_g$(g)_b$(b)_t$(t)")
+@constraint(model, ..., base_name = "ramp_up_seam_g$(g)_b$(b)")
 
 # Avoid
 @constraint(model, ..., base_name = "c1")
@@ -206,23 +221,15 @@ Use descriptive base names that include indices:
 
 ### Handling Inactive Units
 
-For generators or batteries with zero capacity at a node and no investment potential, explicitly bound variables to zero:
+Generation and battery variables are `SparseAxisArray`s that exist only for active unit-bus pairs (capacity at the bus, or a pending retirement). Iterate over those pairs instead of over every bus:
 
 ```julia
-rated = gen.rated_power[n]
-is_dev = input.mode == "development"
-invest_max = gen.invest_max[n]
-
-if rated <= 0 && !(is_dev && invest_max > 0)
-    # CRITICAL: Bound variables to zero, don't just skip
-    for t in 1:hours
-        @constraint(model, vars.gen_output[g, n, t] <= 0)
-    end
-    continue
+for g in 1:length(input.generators), b in vars.buses_of_gen[g], t in 1:hours
+    add_to_expression!(expr, 1.0, vars.gen_output[g, b, t])
 end
 ```
 
-This prevents the "free generation" bug where unconstrained variables take arbitrary values.
+Indexing `vars.gen_output[g, b, t]` for an inactive pair throws a `KeyError`. Variables that are created must be bounded; an unbounded variable that enters the balance creates free energy.
 
 ### Conditional Constraints
 
@@ -232,59 +239,40 @@ if input.mode == "unit_commitment"
     # Binary commitment variables and min up/down time
 end
 
-# Only if CO2 budget is enabled
-if input.co2_budget.enabled
-    @constraint(model, sum(emissions) <= input.co2_budget.annual_budget + violation)
+# Only for the CO2 budget groups that have a budget (add_co2_constraint!):
+# one per system in a multi-system run, else one from input.co2_budget
+for grp in co2_budget_groups(input)
+    has_co2_budget(grp) || continue
+    # budget scaled to the window: grp.budget * hours * tres / hours_per_year
 end
 
-# Only if curtailment limit is active
-if input.max_curtailment_ratio < 1.0
-    @constraint(model, sum(curtailment) <= ratio * sum(renewable_gen))
+# Optional variable containers are `nothing` when unused
+if vars.ev_charging !== nothing
+    # EV constraints
 end
 ```
 
 ### Constraint Implementation Patterns
 
-#### Cyclic Constraints
+#### End-of-Horizon Storage State
 
-For storage elements (batteries, EV fleets), constrain the final time step SOC to equal the initial state:
+Check the existing conventions before adding a storage element:
 
-```julia
-function add_cyclic_soc_constraint!(model, vars, input)
-    hours = input.temporal.hours
-    for b in 1:length(input.batteries)
-        for n in 1:input.network.num_nodes
-            initial_soc = input.batteries[b].initial_soc[n]
-            @constraint(model,
-                vars.bat_soc[b, n, hours] == initial_soc,
-                base_name = "bat_soc_cyclic_b$(b)_n$(n)"
-            )
-        end
-    end
-end
-```
-
-Without this constraint, batteries discharge fully each window without replenishing.
+- Batteries are not cyclic per dispatch window. State of charge carries over between rolling-horizon windows in MWh (`battery_soc_prev`). The last window of each year has a soft floor that brings the SOC back to at least its year-start level; `cyclic_end_soc` forces an exact cycle for single full-year solves.
+- Reservoirs and the EV fleet are cyclic within each window (`ev_soc_cyclic_n…`).
+- The master problem makes battery SOC cyclic over each representative day; with TSAM seasonal linking, SOC is carried across periods and cyclic over the year.
 
 #### Linking Constraints Across Time Steps
 
-Ramp rate constraints link consecutive time steps; handle the first time step separately:
+Ramp constraints link consecutive time steps. In `add_generator_constraints!` the ramp rate is a fraction of capacity per hour, scaled by the step length and capped at full capacity; a rate <= 0 means no limit. The first step is linked to the previous window's output (`gen_output_prev`). Batteries do the same for their charge and their discharge (`add_storage_ramp_constraints!`, from `battery_charge_prev` / `battery_discharge_prev`), without the cap: a rate × step of 1 or more sets no limit.
 
 ```julia
-function add_ramp_constraints!(model, vars, gen, g, n, hours)
-    ramp_up = gen.ramp_up[n]
-    ramp_down = gen.ramp_down[n]
+tres = input.temporal.resolution_hours
+ramp_up_limit = total_capacity * min(1.0, gen.ramp_up[b] * tres)
 
-    for t in 2:hours
-        @constraint(model,
-            vars.gen_output[g, n, t] - vars.gen_output[g, n, t-1] <= ramp_up,
-            base_name = "ramp_up_g$(g)_n$(n)_t$(t)"
-        )
-        @constraint(model,
-            vars.gen_output[g, n, t-1] - vars.gen_output[g, n, t] <= ramp_down,
-            base_name = "ramp_down_g$(g)_n$(n)_t$(t)"
-        )
-    end
+for t in 2:hours
+    gen.ramp_up[b] > 0 && @constraint(model,
+        vars.gen_output[g, b, t] - vars.gen_output[g, b, t-1] <= ramp_up_limit)
 end
 ```
 
@@ -294,58 +282,31 @@ Use Big-M formulation for conditionally active constraints (e.g., minimum power 
 
 ```julia
 # gen_status is binary (1 = on, 0 = off)
-rated = gen.rated_power[n]
-min_pwr = gen.min_power[n]
+rated = gen.rated_power[b]
+min_pwr = gen.min_power[b]
 
 for t in 1:hours
     # Output <= rated * status  (off => output = 0)
     @constraint(model,
-        vars.gen_output[g, n, t] <= rated * vars.gen_status[g, n, t],
-        base_name = "gen_max_g$(g)_n$(n)_t$(t)"
+        vars.gen_output[g, b, t] <= rated * vars.gen_status[g, b, t],
+        base_name = "gen_max_g$(g)_b$(b)_t$(t)"
     )
 
     # Output >= min_power * status  (on => output >= min_power)
     @constraint(model,
-        vars.gen_output[g, n, t] >= min_pwr * vars.gen_status[g, n, t],
-        base_name = "gen_min_g$(g)_n$(n)_t$(t)"
+        vars.gen_output[g, b, t] >= min_pwr * vars.gen_status[g, b, t],
+        base_name = "gen_min_g$(g)_b$(b)_t$(t)"
     )
 end
 ```
 
 #### Network Constraints (Self-Loop Prevention)
 
-Always skip self-loops when creating transfer variables to prevent free energy injection:
-
-```julia
-for i in 1:num_nodes
-    for j in 1:num_nodes
-        i == j && continue  # CRITICAL: no self-loops
-        for t in 1:hours
-            @variable(model, trans[i, j, t] >= 0)
-        end
-    end
-end
-```
-
-A self-loop `trans[i, i, t]` appears as incoming power to node `i` without any corresponding outflow, effectively creating energy from nothing.
+Flows are one variable vector per physical branch, `vars.power_flow_by_line[ℓ][t]` (lines, then transformers, each stored low → high bus). `vars.pair_lines::Dict{(i, j), Vector{Int}}` maps a bus pair `i < j` to all of its branches, so parallel lines are summed wherever a pair flow is meant: `pair_flow(vars, i, j, t)` in custom constraints, and the `power_flow` result. Never create a self-loop branch `(i, i)`: it would appear as incoming power at bus `i` without a matching outflow, creating energy from nothing.
 
 #### Age-Based Retirement
 
-Pure LP retirement (no binary variables) using age thresholds:
-
-```julia
-function is_unit_active(unit, year_idx)
-    # Existing units: age advances each year
-    age = unit.initial_age + (year_idx - 1)
-    return age < unit.life_time
-end
-
-function is_investment_active(invest_year, current_year_idx, lifetime)
-    # Investments: age counted from investment year
-    age = current_year_idx - invest_year
-    return age >= 0 && age < lifetime
-end
-```
+The master problem retires units by age without binary variables: an existing unit is active while `initial_age + (year_idx - 1) < life_time`, and an investment made in year `y` is active for `life_time` years after it.
 
 
 ---
@@ -355,34 +316,27 @@ end
 
 ### Standard Variable Dimensions
 
-| Variable | Indices | Shape |
-|----------|---------|-------|
-| `gen_output[g, n, t]` | generator, node, time | (G, N, T) |
-| `bat_charge[b, n, t]` | battery, node, time | (B, N, T) |
-| `bat_soc[b, n, t]` | battery, node, time | (B, N, T) |
-| `power_flow[i, j, t]` | from_node, to_node, time | (N, N, T) |
-| `loss_load[n, t]` | node, time | (N, T) |
-| `curtailment[g, n, t]` | generator, node, time | (G, N, T) |
+Fields of `PowerSystemVariables` (`types.jl`):
 
-### Variable Naming
+| Variable | Indices | Container |
+|----------|---------|-----------|
+| `gen_output[g, b, t]` | generator, bus, time | `SparseAxisArray` (active pairs only) |
+| `gen_status`, `gen_startup` | generator, bus, time | `SparseAxisArray` over the committed pairs only (`committed_buses`: no variable renewable, see `is_variable_renewable`); `nothing` outside UC |
+| `gen_shutdown` | — | Always `nothing` (field kept for compatibility; no shutdown variable is built) |
+| `bat_charge`, `bat_discharge`, `bat_soc` | battery, bus, time | `SparseAxisArray` |
+| `bat_spillage`, `soc_violation` | battery, bus, time | `nothing` when not needed |
+| `curtailment[n, t]` | node, time | `Array` |
+| `load_shed[b, t]` | bus, time | `Array` |
+| `reserve_static`, `reserve_dynamic` (+ `_loss`) | node, time | `Array` |
+| `power_flow_by_line[ℓ][t]` | branch, time | `Vector{Vector{VariableRef}}` (`nothing` without DC flows) |
+| `pair_lines[(i, j)]` | bus pair `i < j` | `Dict{Tuple{Int,Int}, Vector{Int}}`: indices into `power_flow_by_line` |
+| `voltage_angle[n, t]` | node, time | `Array` |
+| `ev_charging`, `ev_v2g`, `ev_loss` | node, time | `Array` or `nothing` |
+| `ev_soc` | node, time + 1 | `Array` or `nothing` |
+| `electrolyzer_power` | electrolyzer, bus, time | `Array` or `nothing` |
+| `balance_constraints[(b, t)]` | bus, time | power-balance constraint references |
 
-```julia
-# Variables
-gen_output      # Generator electrical output (MW)
-gen_status      # Generator on/off status (binary in UC, continuous in ED)
-gen_startup     # Generator startup indicator
-gen_shutdown    # Generator shutdown indicator
-bat_charge      # Battery charging power (MW)
-bat_discharge   # Battery discharging power (MW)
-bat_soc         # Battery state of charge (MWh)
-bat_spillage    # Battery spillage (MW)
-loss_load       # Unserved energy (MW)
-curtailment     # Renewable curtailment (MW)
-ev_charge       # EV fleet charging (MW)
-ev_v2g          # EV vehicle-to-grid (MW)
-ev_soc          # EV fleet SOC (MWh)
-voltage_angle   # Bus voltage angle (radians)
-```
+Check the variable's construction in `build_variables!` before indexing: some arrays are per node, others per bus.
 
 
 ---
@@ -390,28 +344,22 @@ voltage_angle   # Bus voltage angle (radians)
 
 ## Objective Function
 
-Minimizes total operational cost:
+`build_objective!` in `power_system.jl` minimizes total cost. Energy terms are scaled by `resolution_hours`. Components, in code order:
 
-```julia
-function build_objective!(model, vars, input)
-    # Components:
-    # 1. Generator fuel costs
-    # 2. Generator maintenance costs
-    # 3. Generator start-up costs (UC mode)
-    # 4. Battery maintenance costs
-    # 5. Load shedding penalty (loss_of_load x penalty)
-    # 6. Reserve deficit penalties
-    # 7. Curtailment penalty
-    # 8. CO2 emission costs
-    # 9. Inertia deficit penalty
-    # 10. EV demand loss penalty
-    # 11. RE penetration shortfall penalty
-    # 12. Electrolyzer operating costs
-    # 13. Primary energy costs
+1. Fuel costs (flat or piecewise-linear cost curve) and maintenance, per MWh
+2. Battery maintenance and throughput degradation costs
+3. Start-up costs (UC mode)
+4. Load-shedding penalty (VOLL, with sectoral multipliers when sectoral demand is used)
+5. Curtailment penalty
+6. Static and dynamic reserve shortage penalties
+7. CO2 cost (fuel emission factor × output × `co2_cost`)
+8. Inertia shortfall, EV unmet-driving (`ev_loss`) and RE-target slack penalties
+9. SOC-violation and transfer-margin penalties
+10. Fixed O&M of the generators and batteries in service (`fixed_om_annual_cost`, $/MW·yr), prorated to the window with the other annual terms
 
-    @objective(model, Min, sum_of_all_cost_terms)
-end
-```
+The dispatch has no investment costs: it builds nothing (the master's builds reach it as existing capacity).
+
+V2G compensation is reported but is not part of the objective. Primary-energy and electrolyzer terms are added when those models are coupled in.
 
 
 ---
@@ -419,22 +367,14 @@ end
 
 ## Solution Extraction
 
+`extract_solution(model, vars, input)` returns a `PowerSystemResult` with dense arrays (`gen_output::Array{Float64,3}`, `bat_soc`, `load_shed`, `power_flow`, …), totals (`objective`, `total_generation`, `re_penetration`, `total_co2`) and `energy_prices`. Prices are the duals of `vars.balance_constraints[(b, t)]` divided by the step length. In UC mode the MIP has no duals; `recover_uc_duals_via_copy` re-solves a copy as an LP with the commitment fixed to obtain them.
+
 ```julia
-function extract_solution(model, vars, input)
-    result = PowerSystemResult()
-
-    # Extract variable values
-    result.generation = value.(vars.gen_output)
-    result.battery_charge = value.(vars.bat_charge)
-    result.objective_value = objective_value(model)
-
-    # Extract dual variables (electricity prices)
-    if has_duals(model)
-        result.nodal_prices = dual.(model[:power_balance])
-    end
-
-    return result
-end
+model, vars = create_power_system(input)
+optimize!(model)
+res = extract_solution(model, vars, input)
+res.gen_output        # [gen x bus x hour]
+res.energy_prices     # [bus x hour]
 ```
 
 
@@ -486,19 +426,11 @@ Named constraints aid debugging; remove them for production runs with large mode
 ### Solver Configuration
 
 ```julia
-function create_optimizer(; threads=4, time_limit=300.0, gap=0.01, verbose=false)
-    optimizer = optimizer_with_attributes(
-        HiGHS.Optimizer,
-        "threads" => threads,
-        "time_limit" => time_limit,
-        "mip_rel_gap" => gap,
-        "output_flag" => verbose,
-        "presolve" => "on",
-        "parallel" => "on",
-    )
-    return optimizer
-end
+create_optimizer(; solver_name="highs", threads=4, time_limit=3600.0,
+                 gap=0.01, verbose=false, solver_options=Dict{String,Any}())
 ```
+
+`create_optimizer` dispatches on `solver_name` (highs, gurobi, cplex, xpress, scip, cbc, glpk, ipopt, clarabel, scs) and maps threads, time limit, gap and verbosity to each solver's own attribute names. A `time_limit` of 0 (or less, or `Inf`) sets no time limit: the attribute is left out (`has_time_limit`); a limit ESFEX sets below `solver.time_limit` (the Benders master and subproblems) uses `capped_time_limit`, which keeps the cap when `solver.time_limit` is 0. For HiGHS it sets `threads`, `time_limit`, `mip_rel_gap` and `output_flag`, then applies `solver_options` on top; it sets no presolve or parallel options. Pinning `"solver" => "simplex"` also turns crossover off.
 
 
 ---
@@ -508,15 +440,9 @@ end
 
 ### Infeasibility Diagnosis
 
-```julia
-# After solve, if infeasible:
-if termination_status(model) == MOI.INFEASIBLE
-    diagnose_infeasibility(model)
-    # Prints conflicting constraints
-end
-```
+For the master problem, `diagnose_infeasibility(model, vars::MasterProblemVariables, input::MasterProblemInput)` reports the values of the slack variables (RE target, budget, capacity) by category as a `Dict{String,Float64}`. It does not compute an IIS.
 
-`diagnose_infeasibility` computes an Irreducible Infeasible Subsystem (IIS) when the solver supports it, listing the minimal set of conflicting constraints.
+For an IIS, use a solver that supports it. With Gurobi, setting `ESFEX_DUMP_IIS=1` makes the Python adapter write the first infeasible model as an LP file to `ESFEX_IIS_DIR` and log the constraints `compute_conflict!` finds. The runner also writes `window_infeasible_y<year>_w<window>.lp` to `<output>/logs/` when a dispatch window is not optimal. `master_conflict(model; limit=20)` returns the constraints of an infeasible master's conflict as strings (empty when the solver cannot compute one); the myopic runner logs them when a year's master is infeasible. With `ESFEX_BENDERS_DEBUG_LP=1`, Benders writes the master and subproblem LPs that fail to `<output>/logs/` (`run_benders_decomposition(...; debug_lp_dir)`).
 
 ### Model Statistics
 
@@ -549,15 +475,11 @@ for t in 1:hours
     println("t=$t: gen=$(value(vars.gen_output[1, 1, t]))")
 end
 
-# Check dual values for binding constraints
+# Check dual values of the power balance
 if has_duals(model)
-    for n in 1:num_nodes
-        for t in 1:hours
-            price = dual(model[:power_balance][n, t])
-            if abs(price) > 1e-6
-                println("Node $n, t=$t: price = $price")
-            end
-        end
+    for ((b, t), con) in vars.balance_constraints
+        price = dual(con)
+        abs(price) > 1e-6 && println("Bus $b, t=$t: dual = $price")
     end
 end
 ```
@@ -568,15 +490,15 @@ end
 
 ```julia
 # After solve
-for g in 1:num_generators, n in 1:num_nodes, t in 1:hours
-    val = value(vars.gen_output[g, n, t])
-    if val > 0 && gen.rated_power[n] <= 0
-        @warn "Generator $g producing $(val) MW at node $n with zero rated power"
+for g in 1:length(input.generators), b in vars.buses_of_gen[g], t in 1:hours
+    val = value(vars.gen_output[g, b, t])
+    if val > 1e-6 && input.generators[g].rated_power[b] <= 0 && input.mode != "development"
+        @warn "Generator $g producing $(val) MW at bus $b with zero rated power"
     end
 end
 ```
 
-**All duals are zero.** Indicates free energy entering the system. Check for self-loop transfer variables or unconstrained generators (see Bug #12 and #13 in the project history).
+**All duals are zero.** Indicates free energy entering the system. Check for self-loop flow entries or unbounded variables in the balance.
 
 **Solver stalls.** Check penalty coefficients. A penalty of 600,000,000 (instead of 600) causes the solver to spend excessive time exploring near-penalty solutions.
 
@@ -589,38 +511,30 @@ end
 ### Running Tests
 
 ```bash
-cd src/esfex/julia
-julia --project=. -e 'using Pkg; Pkg.test()'
+julia --project=src/esfex/julia -e 'using Pkg; Pkg.test()'
 ```
+
+The test dependencies (Ipopt, JuMP, Test) are in `src/esfex/julia/test/Project.toml`. CI runs this suite on Julia 1.11.
 
 ### Writing Tests
 
+`test/runtests.jl` is a single file with one `@testset "ESFEX"`. Unit tests get one testset per function (`build_ybus`, `create_optimizer`, …). Model tests go in the `integration` block, which builds small inputs directly; its local `mkgen(name, type, fuel, rated, fcost, avail; nb, H)` helper fills the positional `GeneratorConfig` fields:
+
 ```julia
-# test/test_power_system.jl
-@testset "Generator Constraints" begin
-    input = create_test_input(1, 1, 24)  # 1 gen, 1 node, 24 hours
-    model = create_power_system(input)
+@testset "economic dispatch (single bus)" begin
+    H = 2
+    gen = mkgen("GasCC", "Non-renewable", "Gas", [100.0],
+                [3.0e-5], ones(H, 1); nb = 1, H = H)
+    # ... bus, NetworkConfig, PowerSystemInput(...; mode = "economic_dispatch")
+    model, vars = create_power_system(input)
     optimize!(model)
-
-    @test termination_status(model) == MOI.OPTIMAL
-    @test objective_value(model) >= 0
-
-    gen_output = value.(model[:gen_output])
-    @test all(gen_output .>= 0)
-    @test all(gen_output .<= input.generators[1].rated_power[1])
+    @test string(termination_status(model)) == "OPTIMAL"
+    res = extract_solution(model, vars, input)
+    @test res.total_generation ≈ 110.0 atol = 1e-6
 end
 ```
 
-### Test Helpers
-
-```julia
-function create_test_input(num_gen, num_nodes, hours; kwargs...)
-    # Create minimal valid PowerSystemInput for testing
-    generators = [create_test_generator(num_nodes; kwargs...) for _ in 1:num_gen]
-    # ... construct other required fields
-    return PowerSystemInput(generators=generators, ...)
-end
-```
+There is no `create_test_input` helper and no per-file test layout. End-to-end runs through the Python bridge live in the `julia`-marked pytest tests (see [Testing](testing.md)).
 
 ### Testing Constraints in Isolation
 
@@ -670,26 +584,19 @@ end
 
 The adapter converts Python data structures to Julia types:
 
+`PowerSystemAdapter` (and the master, MGA, electrolyzer and primary-energy adapters) in `bridge/adapters.py` build the Julia structs from the Pydantic config and call the Julia entry points. Schematically:
+
 ```python
-# In adapters.py
-class PowerSystemAdapter:
-    def _create_input(self, ...):
-        jl = get_esfex_module()
+# In adapters.py (schematic)
+ESFEX = get_esfex_module()
 
-        # Convert Python dict to Julia GeneratorConfig
-        gen_config = jl.GeneratorConfig(
-            name=gen["name"],
-            type=gen["type"],
-            rated_power=jl.Vector[jl.Float64](gen["rated_power"]),
-            # ...
-        )
+gen_config = ESFEX.GeneratorConfig(      # positional fields, in struct order
+    name, gen_type, fuel, rated_power, min_power, ...)
 
-        input = jl.PowerSystemInput(
-            generators=jl.Vector[jl.GeneratorConfig]([gen_config]),
-            # ...
-        )
+jl_input = ESFEX.PowerSystemInput(       # keyword constructor
+    name=..., year=..., network=net, generators=gens, ...)
 
-        return jl.create_power_system(input)
+model, vars = ESFEX.create_power_system(jl_input, custom_constraints=specs)
 ```
 
 ### Bridge Type Mapping
@@ -717,9 +624,9 @@ Steps to add a new optimization feature:
 6. **Tests**: Add Julia and Python tests
 7. **Docs**: Update formulation and API documentation
 
-### End-to-End Example: Adding a Hydrogen Storage Constraint
+### Illustrative Example: Adding a Hydrogen Storage Constraint
 
-Every file touched when adding a new constraint:
+The files touched when adding a new constraint (hypothetical; ESFEX has no hydrogen storage model):
 
 **Step 1 --- Julia type** (`types.jl`):
 

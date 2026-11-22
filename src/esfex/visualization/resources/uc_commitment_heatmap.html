@@ -8,7 +8,8 @@
     margin: 0; padding: 0;
     width: 100%; height: 100%;
     background: #FFFFFF;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;  /* very large fleets scroll instead of clipping */
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     color: #2C3E50;
   }
@@ -21,11 +22,12 @@
 </head>
 <body>
   <div id="plot"></div>
-  <div id="status" class="empty">Loading…</div>
+  <div id="status" class="empty" data-i18n="web.common.loading">Loading…</div>
   <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
   <script src="plotly.min.js"></script>
   <script src="font_scale.js"></script>
   <script src="chart_theme.js"></script>
+  <script src="chart_labels.js"></script>
   <script src="uc_commitment_heatmap.js"></script>
 </body>
 </html>

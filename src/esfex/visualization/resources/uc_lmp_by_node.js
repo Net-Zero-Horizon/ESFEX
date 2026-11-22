@@ -35,25 +35,26 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { _ucClearPlot(); showStatus("Bad payload: " + e.message, true); return; }
-        if (!data || data.error) { _ucClearPlot(); showStatus(data && data.error ? data.error : "No data", false); return; }
-        if (!data.nodes || !data.nodes.length) { _ucClearPlot(); showStatus("No nodal data", false); return; }
+        catch (e) { _ucClearPlot(); showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
+        if (!data || data.error) { _ucClearPlot(); showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return; }
+        if (!data.nodes || !data.nodes.length) { _ucClearPlot(); showStatus(_t("web.charts.uc_lmp_by_node.no_data"), false); return; }
         try { renderLMP(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 function showStatus(t, e) { const s = document.getElementById("status"); s.textContent = t; s.style.display = "block"; s.style.color = e ? "#c0392b" : "#7F8C8D"; }
 function hideStatus() { document.getElementById("status").style.display = "none"; }
 
 function renderLMP(data) {
+    resetLabelFits();
     const heatmap = {
         z: data.z, x: data.hours, y: data.nodes,
         type: "heatmap", colorscale: "Plasma",
         colorbar: {
             title: { text: "USD/MWh", side: "right" },
-            len: 0.55, y: 0.72, yanchor: "middle", thickness: 12,
+            len: 0.42, y: 0.79, yanchor: "middle", thickness: 12,
         },
-        hovertemplate: "Node %{y}<br>Hour %{x}<br>LMP: %{z:,.1f} USD/MWh<extra></extra>",
+        hovertemplate: _t("web.charts.uc_lmp_by_node.hover_cell") + "<extra></extra>",
         xaxis: "x", yaxis: "y",
     };
 
@@ -64,7 +65,7 @@ function renderLMP(data) {
     const bar = {
         x: rankedNodes, y: rankedMean, type: "bar",
         marker: { color: "#9B59B6", opacity: 0.85 },
-        hovertemplate: "%{x}: mean %{y:,.1f} USD/MWh<extra></extra>",
+        hovertemplate: _t("web.charts.uc_lmp_by_node.hover_mean") + "<extra></extra>",
         xaxis: "x2", yaxis: "y2", showlegend: false,
     };
 
@@ -72,40 +73,50 @@ function renderLMP(data) {
         x: data.hours, y: data.system_avg,
         type: "scatter", mode: "lines",
         line: { color: "#2C3E50", width: 2 },
-        hovertemplate: "Hour %{x}: %{y:,.1f} USD/MWh<extra>System avg</extra>",
+        hovertemplate: _t("web.charts.uc_lmp_by_node.hover_hour") + "<extra>" + _t("web.charts.uc_lmp_by_node.system_avg") + "</extra>",
         xaxis: "x3", yaxis: "y3", showlegend: false,
     };
 
     const spread = Math.max(...data.mean_by_node) - Math.min(...data.mean_by_node);
-    const subTitle =
-        `Per-node spread (mean max − min): ${spread.toFixed(1)} USD/MWh` +
-        (spread > 1 ? " — transmission constraints active" : " — uniform pricing");
+    const spreadTxt = { spread: spread.toFixed(1) };
+    const subTitle = spread > 1
+        ? _t("web.charts.uc_lmp_by_node.spread_constrained", spreadTxt)
+        : _t("web.charts.uc_lmp_by_node.spread_uniform", spreadTxt);
 
     const layout = {
-        margin: { t: 110, r: 70, b: 60, l: 100 },
+        margin: { t: 80, r: 70, b: 60, l: 10 },
         grid: { rows: 3, columns: 1, pattern: "independent", roworder: "top to bottom" },
         annotations: [
-            { text: `<b>Locational Marginal Prices — Year ${data.year}</b>`,
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.13, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: subTitle,
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.07, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 11, color: "#5D6D7E" } },
         ],
         xaxis:  { domain: [0, 1], anchor: "y", showticklabels: false },
-        yaxis:  { domain: [0.55, 1.0], title: "<b>Node</b>", autorange: "reversed" },
-        xaxis2: { domain: [0, 1], anchor: "y2", tickangle: -25 },
-        yaxis2: { domain: [0.28, 0.48], title: "<b>Mean LMP</b>", rangemode: "tozero" },
-        xaxis3: { domain: [0, 1], anchor: "y3", title: "<b>Hour</b>" },
-        yaxis3: { domain: [0.0, 0.20], title: "<b>System avg</b>", rangemode: "tozero" },
+        // Node names: shortened tick text, margin sized to fit (the
+        // "Node" title is pushed out past the labels), and thinned when
+        // there are more nodes than readable rows.
+        yaxis:  Object.assign({ domain: [0.58, 1.0], autorange: "reversed",
+                                title: { text: "<b>" + _t("web.charts.uc_lmp_by_node.axis_node") + "</b>", standoff: 8 } },
+            labelAxis({ axis: "yaxis", labels: data.nodes, fontSize: 11,
+                        fraction: 0.2, domain: [0.58, 1.0] })),
+        // Names under the bar panel are rotated −45° and must fit the
+        // gap above the system-average panel (18 % of the plot height):
+        // the character cap follows that gap and ticks are thinned so
+        // neighbouring labels never overlap.
+        xaxis2: Object.assign({ domain: [0, 1], anchor: "y2" },
+            labelAxis({ axis: "xaxis2", labels: rankedNodes, fontSize: 11,
+                        fraction: 0.2, maxChars: 24, angle: -45,
+                        depth: sz => 0.18 * sz.h - 6 })),
+        yaxis2: { domain: [0.34, 0.50], title: "<b>" + _t("web.charts.uc_lmp_by_node.axis_mean_lmp") + "</b>", rangemode: "tozero" },
+        xaxis3: { domain: [0, 1], anchor: "y3", title: "<b>" + _t("web.charts.uc_lmp_by_node.axis_hour") + "</b>" },
+        yaxis3: { domain: [0.0, 0.16], title: "<b>" + _t("web.charts.uc_lmp_by_node.system_avg") + "</b>", rangemode: "tozero" },
     };
     Plotly.purge("plot");
     Plotly.newPlot("plot", [heatmap, bar, sysavg], layout, {
         responsive: true, displaylogo: false,
         modeBarButtonsToRemove: ["lasso2d", "select2d"],
-    });
+    }).then(refitLabels);
 }
 
 window.addEventListener("resize", () => {

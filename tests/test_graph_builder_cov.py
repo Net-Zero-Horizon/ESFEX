@@ -360,14 +360,17 @@ def test_transformer_edge_same_substation():
     assert p["label"] == "250 MVA"
 
 
-def test_transformer_across_substations_excluded():
-    # transformer between buses in different nodes -> same-substation
-    # guard drops it.
+def test_transformer_across_nodes_is_drawn():
+    # A transformer between buses in different nodes joins them in the
+    # diagram too: dropping it cut the network wherever a node boundary
+    # crosses a substation (Cuba's reduced case lost 10 of 38).
     state = _state_two_nodes()  # b0@node0, b1@node1
     state.transformers = [GuiTransformer(
         name="T", from_bus="b0", to_bus="b1", rated_power_mva=100.0)]
     out = gb.build_elk_graph(state)
-    assert out["elkGraph"]["edges"] == []
+    [edge] = out["elkGraph"]["edges"]
+    assert edge["properties"]["edgeType"] == "transformer"
+    assert {edge["sources"][0], edge["targets"][0]} == {"bus_b0", "bus_b1"}
 
 
 def test_parallel_transformers_stay_separate():

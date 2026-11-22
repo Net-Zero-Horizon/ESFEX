@@ -21,8 +21,10 @@ import numpy as np
 from esfex.analysis.frequency import (
     FrequencyAnalyzer,
     GeneratorFreqParams,
+    analyzer_settings,
     build_gen_freq_params_from_hdf5,
 )
+from esfex.io.exporter import demand_is_step_major
 from esfex.visualization.data.gui_model import GuiSystemState
 
 log = logging.getLogger(__name__)
@@ -56,9 +58,12 @@ class SldResultsLoader:
     """
 
     def __init__(self, h5_path: str | Path, state: GuiSystemState,
-                 base_prefix: str = "") -> None:
+                 base_prefix: str = "", system_config=None) -> None:
         self._path = Path(h5_path)
         self._state = state
+        # SystemConfig whose frequency keys (frequency_nominal, rocof_limit,
+        # ...) set the frequency gauge's limits; None uses the defaults.
+        self._system_config = system_config
         self._base_prefix = base_prefix
         self._freq_analyzer = None  # Set up after loading mappings
 
@@ -271,11 +276,13 @@ class SldResultsLoader:
                 }
 
             # ── Demand / Load shedding ──
-            demand_ds = grp.get("demand")  # [nodes x hours]
+            demand_ds = grp.get("demand")  # [nodes x hours]; old files may be [hours x nodes]
             shed_ds = grp.get("loss_load")  # [nodes x hours]
+            demand_t = demand_ds is not None and demand_is_step_major(demand_ds, self._hours)
             for node in self._state.nodes:
                 ni = node.index
-                demand_mw = _safe_read_2d(demand_ds, ni, h)
+                demand_mw = (_safe_read_2d(demand_ds, h, ni) if demand_t
+                             else _safe_read_2d(demand_ds, ni, h))
                 shed_mw = _safe_read_2d(shed_ds, ni, h)
                 result["loads"][f"load_node_{ni}"] = {
                     "demand_mw": round(demand_mw, 2),
@@ -286,12 +293,16 @@ class SldResultsLoader:
             flow_ds = grp.get("power_flow")  # [from x to x hours]
             if flow_ds is not None:
                 fshape = flow_ds.shape
-                for edge_id, (from_n, to_n, cap_mw) in self._edge_map.items():
+                for edge_id, (from_n, to_n, cap_mw, share) in self._edge_map.items():
                     flow_mw = 0.0
                     if (len(fshape) == 3
-                            and from_n < fshape[0] and to_n < fshape[1]
+                            and max(from_n, to_n) < min(fshape[0], fshape[1])
                             and h < fshape[2]):
-                        flow_mw = float(flow_ds[from_n, to_n, h])
+                        # Net node-pair flow from -> to (lines of the pair
+                        # oriented the other way are stored at [to, from]),
+                        # this line's share of it.
+                        flow_mw = share * (float(flow_ds[from_n, to_n, h])
+                                           - float(flow_ds[to_n, from_n, h]))
                     elif len(fshape) == 2 and from_n < fshape[0] and h < fshape[1]:
                         flow_mw = float(flow_ds[from_n, h])
                     util = abs(flow_mw) / cap_mw * 100 if cap_mw > 0 else 0.0
@@ -381,6 +392,7 @@ class SldResultsLoader:
                         "d_total_mw_per_hz": round(freq_resp.d_total_mw_per_hz, 2),
                         "is_stable": freq_resp.is_stable,
                         "rocof_ok": freq_resp.rocof_ok,
+                        "f_nom_hz": self._freq_analyzer.f_nom,
                     }
 
         return result
@@ -395,7 +407,8 @@ class SldResultsLoader:
             )
             if not gen_params:
                 return None
-            return FrequencyAnalyzer(gen_params)
+            return FrequencyAnalyzer(
+                gen_params, **analyzer_settings(self._system_config, self._state))
         except Exception:
             log.debug("Could not build frequency analyzer", exc_info=True)
             return None
@@ -469,22 +482,39 @@ class SldResultsLoader:
 
     def _build_edge_map(
         self, state: GuiSystemState,
-    ) -> dict[str, tuple[int, int, float]]:
-        """Map SLD edge_id → (from_node, to_node, capacity_mw).
+    ) -> dict[str, tuple[int, int, float, float]]:
+        """Map SLD edge_id → (from_node, to_node, capacity_mw, share).
 
         Only transmission line edges are mapped (transformers/converters
-        are intra-node and don't carry inter-node power flow).
+        are intra-node and don't carry inter-node power flow). The results
+        hold one flow per node pair, so the lines joining the same two
+        nodes split it: by susceptance (1/X, as DC flow divides between
+        parallel paths) when all of them have a reactance, else by
+        capacity (each then shows the pair's utilisation), else equally.
         """
         bus_to_node = {b.bus_id: b.parent_node for b in state.buses.values()}
-        result: dict[str, tuple[int, int, float]] = {}
+        pairs: dict[frozenset, list[tuple[str, int, int, float, float]]] = {}
 
         for line in state.transmission_lines:
             from_n = bus_to_node.get(line.from_bus)
             to_n = bus_to_node.get(line.to_bus)
             if from_n is None or to_n is None or from_n == to_n:
                 continue
-            edge_id = f"edge_{line.line_id}"
-            cap = line.capacity_mw or 0.0
-            result[edge_id] = (from_n, to_n, cap)
+            x = float(getattr(line, "reactance_pu", None) or 0.0)
+            pairs.setdefault(frozenset((from_n, to_n)), []).append(
+                (f"edge_{line.line_id}", from_n, to_n,
+                 line.capacity_mw or 0.0, x))
+
+        result: dict[str, tuple[int, int, float, float]] = {}
+        for members in pairs.values():
+            if all(x > 0 for *_, x in members):
+                weights = [1.0 / x for *_, x in members]
+            elif sum(cap for _, _, _, cap, _ in members) > 0:
+                weights = [cap for _, _, _, cap, _ in members]
+            else:
+                weights = [1.0] * len(members)
+            total = sum(weights)
+            for (edge_id, from_n, to_n, cap, _), w in zip(members, weights):
+                result[edge_id] = (from_n, to_n, cap, w / total)
 
         return result

@@ -26,47 +26,50 @@ from esfex.visualization.data.gui_model import GuiModel, GuiStochasticScenario
 from esfex.visualization.i18n import tr
 from esfex.visualization.panels.word_wrap_header import WordWrapHeaderView
 
-# All cost-affecting elements that can be used as stochastic multipliers.
-# Grouped logically: (key, display_label)
+# The ScenarioMultipliers fields, grouped for the picker:
+# (key, label translation key, group translation key). Each one scales a term
+# of the stochastic master problem; legacy keys of older files are translated
+# by the serializer (see esfex.config.schema.SCENARIO_MULTIPLIER_ALIASES).
 _COST_MULTIPLIER_CATALOG: list[tuple[str, str, str]] = [
-    # --- Generator investment ---
-    ("gen_invest_cost", "stochastic_form.mult_gen_invest_cost", "stochastic_form.group_investment"),
-    ("gen_decommissioning_cost", "stochastic_form.mult_gen_decommissioning_cost", "stochastic_form.group_investment"),
-    # --- Generator operational ---
-    ("gen_fuel_cost", "stochastic_form.mult_gen_fuel_cost", "stochastic_form.group_operational"),
-    ("gen_fixed_cost", "stochastic_form.mult_gen_fixed_cost", "stochastic_form.group_operational"),
-    ("gen_maintenance_cost", "stochastic_form.mult_gen_maintenance_cost", "stochastic_form.group_operational"),
-    ("gen_start_up_cost", "stochastic_form.mult_gen_start_up_cost", "stochastic_form.group_operational"),
-    # --- Battery / Storage ---
+    # --- Investment ---
+    ("invest_cost_renewables", "stochastic_form.mult_invest_cost_renewables", "stochastic_form.group_investment"),
+    ("invest_cost_conventional", "stochastic_form.mult_invest_cost_conventional", "stochastic_form.group_investment"),
+    ("invest_cost_storage", "stochastic_form.mult_invest_cost_storage", "stochastic_form.group_investment"),
     ("bat_invest_cost_power", "stochastic_form.mult_bat_invest_cost_power", "stochastic_form.group_investment"),
     ("bat_invest_cost_capacity", "stochastic_form.mult_bat_invest_cost_capacity", "stochastic_form.group_investment"),
-    ("bat_maintenance_cost", "stochastic_form.mult_bat_maintenance_cost", "stochastic_form.group_operational"),
+    ("invest_cost_transmission", "stochastic_form.mult_invest_cost_transmission", "stochastic_form.group_investment"),
+    ("gen_decommissioning_cost", "stochastic_form.mult_gen_decommissioning_cost", "stochastic_form.group_investment"),
     ("bat_decommissioning_cost", "stochastic_form.mult_bat_decommissioning_cost", "stochastic_form.group_investment"),
-    # --- Transmission ---
-    ("transmission_invest_cost", "stochastic_form.mult_transmission_invest_cost", "stochastic_form.group_investment"),
-    ("transmission_cost_per_mw_km", "stochastic_form.mult_transmission_cost_per_mw_km", "stochastic_form.group_investment"),
-    # --- Electrolyzer ---
+    ("converter_invest_cost", "stochastic_form.mult_converter_invest_cost", "stochastic_form.group_investment"),
+    # M2 (#89): fuel infrastructure and electrolyzers built by the master
+    ("fuel_storage_invest_cost", "stochastic_form.mult_fuel_storage_invest_cost", "stochastic_form.group_investment"),
     ("electrolyzer_invest_cost", "stochastic_form.mult_electrolyzer_invest_cost", "stochastic_form.group_investment"),
+    # --- Operational ---
+    ("gen_fixed_cost", "stochastic_form.mult_gen_fixed_cost", "stochastic_form.group_operational"),
+    ("maintenance_cost", "stochastic_form.mult_maintenance_cost", "stochastic_form.group_operational"),
+    ("bat_maintenance_cost", "stochastic_form.mult_bat_maintenance_cost", "stochastic_form.group_operational"),
+    ("gen_start_up_cost", "stochastic_form.mult_gen_start_up_cost", "stochastic_form.group_operational"),
+    ("converter_variable_cost", "stochastic_form.mult_converter_variable_cost", "stochastic_form.group_operational"),
+    ("transmission_cost_per_mw_km", "stochastic_form.mult_transmission_cost_per_mw_km", "stochastic_form.group_operational"),
+    # M2 (#89): electrolyzer operation
     ("electrolyzer_fixed_cost", "stochastic_form.mult_electrolyzer_fixed_cost", "stochastic_form.group_operational"),
     ("electrolyzer_variable_cost", "stochastic_form.mult_electrolyzer_variable_cost", "stochastic_form.group_operational"),
     ("electrolyzer_water_cost", "stochastic_form.mult_electrolyzer_water_cost", "stochastic_form.group_operational"),
-    # --- Converters ---
-    ("converter_invest_cost", "stochastic_form.mult_converter_invest_cost", "stochastic_form.group_investment"),
-    ("converter_variable_cost", "stochastic_form.mult_converter_variable_cost", "stochastic_form.group_operational"),
-    # --- Primary energy / Fuel supply ---
+    # --- Fuel ---
+    ("fuel_cost", "stochastic_form.mult_fuel_cost", "stochastic_form.group_fuel"),
+    ("fuel_price_growth", "stochastic_form.mult_fuel_price_growth", "stochastic_form.group_fuel"),
+    # M2 (#89): master fuel balance
     ("fuel_import_cost", "stochastic_form.mult_fuel_import_cost", "stochastic_form.group_fuel"),
-    ("fuel_price", "stochastic_form.mult_fuel_price", "stochastic_form.group_fuel"),
     ("fuel_transport_cost", "stochastic_form.mult_fuel_transport_cost", "stochastic_form.group_fuel"),
-    ("fuel_storage_invest_cost", "stochastic_form.mult_fuel_storage_invest_cost", "stochastic_form.group_fuel"),
-    ("fuel_price_growth_rate", "stochastic_form.mult_fuel_price_growth_rate", "stochastic_form.group_fuel"),
     # --- Penalties ---
     ("penalty_loss_of_load", "stochastic_form.mult_penalty_loss_of_load", "stochastic_form.group_penalty"),
-    ("penalty_co2_cost", "stochastic_form.mult_penalty_co2_cost", "stochastic_form.group_penalty"),
-    ("penalty_co2_budget_violation", "stochastic_form.mult_penalty_co2_budget_violation", "stochastic_form.group_penalty"),
+    ("carbon_price", "stochastic_form.mult_carbon_price", "stochastic_form.group_penalty"),
     ("penalty_loss_of_reserve", "stochastic_form.mult_penalty_loss_of_reserve", "stochastic_form.group_penalty"),
     ("penalty_curtailment", "stochastic_form.mult_penalty_curtailment", "stochastic_form.group_penalty"),
-    ("penalty_loss_of_fuel_supply", "stochastic_form.mult_penalty_loss_of_fuel_supply", "stochastic_form.group_penalty"),
     ("penalty_fre_penetration", "stochastic_form.mult_penalty_fre_penetration", "stochastic_form.group_penalty"),
+    ("penalty_co2_budget_violation", "stochastic_form.mult_penalty_co2_budget_violation", "stochastic_form.group_penalty"),
+    # M2 (#89)
+    ("penalty_loss_of_fuel_supply", "stochastic_form.mult_penalty_loss_of_fuel_supply", "stochastic_form.group_penalty"),
     # --- Demand ---
     ("demand_growth", "stochastic_form.mult_demand_growth", "stochastic_form.group_demand"),
     # --- Financial ---

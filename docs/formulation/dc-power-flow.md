@@ -1,6 +1,6 @@
 # DC Power Flow
 
-The DC power flow model implements network-constrained power flow using Kirchhoff's laws. It is implemented in `transmission_dc.jl` and based on the cycle-flow formulation from Horsch et al. (2018).
+The DC power flow model implements network-constrained power flow with an angle-based (B-θ) DC-OPF: each line's flow is tied to the voltage angles of its two buses. It is implemented in `transmission_dc.jl` and used whenever `power_flow_mode` is `dcopf` (the default) or `dcopf_ac_verify` and the system has more than one bus. The master problem and the Benders subproblems always use this formulation, whatever `power_flow_mode` says.
 
 ## Overview
 
@@ -21,11 +21,9 @@ ESFEX distinguishes between **buses** (electrical abstraction) and **nodes** (ge
 | **Node** | Geographic location with coordinates | City, substation site |
 | **Bus** | Electrical point in the network | HV bus, LV bus at same substation |
 
-Each bus has a `parent_node` and carries a `demand_fraction` of its parent node's total demand. Multiple buses can map to the same node (e.g., different voltage levels at the same substation).
+Each bus has a `parent_node` and carries a `demand_fraction` \(\alpha_n\) of its parent node's demand. Multiple buses can map to the same node (e.g., different voltage levels at the same substation). Buses with `role: connection` carry no demand: their \(\alpha_n\) is treated as 0, so node-level demand-side terms (demand, load shedding, EV, rooftop) do not appear at them.
 
-## Graph Structures
-
-### Incidence Matrix
+## Incidence Matrix
 
 The bus-line incidence matrix \(\mathbf{K} \in \mathbb{R}^{N \times L}\) encodes the network topology:
 
@@ -38,199 +36,210 @@ K_{n,l} = \begin{cases}
 \tag{DC-K}
 \]
 
-Built by `build_incidence_matrix()`. Supports parallel lines between the same bus pair (each is a separate column).
-
-### Cycle Matrix
-
-The cycle-line matrix \(\mathbf{C} \in \mathbb{R}^{L \times |\mathcal{C}|}\) encodes the independent cycles found via spanning tree analysis:
-
-\[
-C_{l,c} = \begin{cases}
-+1 & \text{if line } l \text{ is in cycle } c \text{ (forward direction)} \\
--1 & \text{if line } l \text{ is in cycle } c \text{ (reverse direction)} \\
-0 & \text{otherwise}
-\end{cases}
-\tag{DC-C}
-\]
-
-Built by `find_cycles()` using the **Graphs.jl** library:
-
-1. Construct a spanning tree of the network graph
-2. Each non-tree edge creates exactly one independent cycle
-3. For each non-tree edge, find the path through the tree between its endpoints
-4. The cycle = tree path + non-tree edge
+Built by `build_incidence_matrix()`. Every branch is oriented from its lower-index bus to its higher-index bus, so a positive flow runs from the lower to the higher bus index. Parallel lines between the same bus pair are separate columns. Transformers are appended as extra branches (see [Transformer Modeling](#transformer-modeling)).
 
 ## Constraints
 
 ### DC-1: KCL (Kirchhoff's Current Law)
 
-Power balance at each bus \(n\) and time \(t\), with transmission losses on incoming flows:
+Power balance at each bus \(n\) and time \(t\):
 
 \[
-\underbrace{\sum_{g} P_{g,n,t} + \sum_{b} P^{dis}_{b,n,t} + L_{n,t}}_{\text{injection}} - \underbrace{D_{n,t} \cdot \phi_n + \sum_{b} P^{ch}_{b,n,t} + R^{st}_{n,t} + R^{dyn}_{n,t}}_{\text{withdrawal}} = \sum_{l} K_{n,l} \cdot f^{loss}_{l,t}
+\underbrace{\sum_{g} p_{g,n,t} + \sum_{b} p^{dis}_{b,n,t} + \alpha_n p^{v2g}_{i,t} + LS_{n,t} + \alpha_n P^{roof}_{i,t} + P^{conv}_{n,t}}_{\text{injection}}
+- \underbrace{\left(\alpha_n D_{i,t} + p^{elz}_{n,t} + \sum_{b} p^{ch}_{b,n,t} + p^{pump}_{n,t} + \alpha_n p^{ev}_{i,t} + \alpha_n RC_{i,t}\right)}_{\text{withdrawal}}
+= \sum_{l} K_{n,l} \, f_{l,t} + \sum_{l} \tfrac{1}{2} |K_{n,l}| \, P^{loss}_{l,t}
 \tag{DC-1}
 \]
 
-where the loss-adjusted flow is:
+where \(i\) is the parent node of bus \(n\), \(D_{i,t}\) the node demand, \(P^{conv}\) the net AC/DC and frequency converter injection (CONV-2), \(p^{pump}\) reservoir pumping and \(RC\) rooftop curtailment. The loss term is that of the PWL or linear loss model (LOSS-5, see [Transmission Losses](#transmission-losses)); with `loss_model: none` it is absent.
 
-\[
-f^{loss}_{l,t} = \begin{cases}
-f_{l,t} & \text{if } K_{n,l} < 0 \text{ (outgoing)} \\
-f_{l,t} \cdot (1 - \lambda_l) & \text{if } K_{n,l} > 0 \text{ (incoming)}
-\end{cases}
-\]
+Two terms are deliberately left out of the balance:
 
-Here \(\lambda_l\) is the per-line loss factor (from `resistance_pu` for transmission lines, `losses_fraction` for transformers).
+- **Flexible demand curtailment** is not in the KCL. It enters only the objective (as a benefit) and the sectoral constraints; in the balance it would let the model remove demand at negative cost.
+- **Reserves** are free capacity, not energy (see [Operational Dispatch](operational-dispatch.md)).
 
-!!! note "Injection Terms"
-    The KCL injection also includes EV V2G power, flexible demand curtailed, and converter flows (AC/DC, frequency converters) when applicable.
+In the master problem the same KCL also carries the candidate technologies' output, the battery technologies' net discharge and the sectoral loss of load, passed through `extra_injections_fn`.
 
 Implemented in `add_dc_constraints!()`.
 
-### DC-2: KVL (Kirchhoff's Voltage Law)
+#### DC-1b: Load Shedding Bound
 
-For each independent cycle \(c\), the sum of voltage drops around the cycle must be zero:
+Load shedding sits on the supply side of DC-1, so it is bounded by the demand on its own bus:
 
 \[
-\sum_{l \in \mathcal{C}_c} C_{l,c} \cdot X_l \cdot f_{l,t} = 0 \quad \forall c, t
+LS_{n,t} \leq \max(\alpha_n D_{i,t},\, 0) \quad \forall n, t
+\tag{DC-1b}
+\]
+
+Without the bound, `load_shed` would act as a virtual generator: shed more than a bus consumes and export the surplus. On connection buses the bound is 0. Constraint name: `max_load_shed_dc_b{n}_t{t}`. The single-bus balance and the ACOPF formulations apply the same bound.
+
+### DC-2: Flow-Angle Coupling
+
+Each line's flow follows the angle difference across it:
+
+\[
+f_{l,t} = \frac{S_{base}}{x_l} \left( \theta_{i,t} - \theta_{j,t} \right) \quad \forall l = (i,j),\; t
 \tag{DC-2}
 \]
 
-where \(X_l\) is the line reactance. For parallel lines, the effective reactance is `reactance_pu / num_circuits`.
+where \(x_l\) is the line reactance in p.u. and \(S_{base}\) converts the per-unit susceptance to MW per radian. \(S_{base}\) is the system power base `ac_power_flow.base_mva` (default 100 MVA), the base the Grid Builder uses for line per-unit values. Constraint name: `flow_angle_{l}_{t}`.
 
-This constraint ensures that power flows are consistent with the physical network impedances, not just the KCL balance.
+- **Parallel circuits**: `capacity_mw`, `reactance_pu` and `resistance_pu` describe the whole line, all its `num_circuits` circuits together; the model uses them as given and does not rescale them by the circuit count. A line of two 300 MW circuits of 0.1 p.u. each is written `capacity_mw: 600`, `reactance_pu: 0.05`, `num_circuits: 2` (this is what the Grid Builder writes).
+- **Missing reactance**: a line without `reactance_pu` gets `length_km × reactance_per_km / Z_base / num_circuits` (the per-km value is that of one circuit), with \(Z_{base} = V^2 / S_{base}\) and \(V\) the line's `voltage_kv` (else `dc_power_flow.voltage_level_kv`); 0.01 p.u. / `num_circuits` when it has no length. A reactance \(\leq 0\) is replaced by 0.01 p.u.
+- **Negligible lines**: a branch with capacity below 0.1 MW has its flow fixed to zero (`flow_zero_{l}_{t}`) unless investment can expand it: a candidate corridor of 0 MW in the master problem, such as a development-zone link, or a corridor whose ends both allow transference investment in a development-mode dispatch.
+
+DC-2 replaced an earlier cycle-based KVL formulation; one equation per line handles parallel lines and disconnected networks directly.
 
 ### DC-3: Line Capacity
 
-Each line has a thermal capacity limit:
+Each branch has a thermal limit:
 
 \[
--\bar{F}_l \leq f_{l,t} \leq \bar{F}_l \quad \forall l, t
+-\bar{F}_{l} \cdot o_{l,t} \leq f_{l,t} \leq \bar{F}_{l} \cdot o_{l,t} \quad \forall l, t
 \tag{DC-3}
 \]
 
-where \(\bar{F}_l\) is the total transfer capacity, which may include investment:
+where \(o_{l,t} \in [0, 1]\) is the deterministic scheduled-outage factor of the line or transformer (1 when no outage is scheduled; see [Scheduled Interruptions](../user-guide/scheduled-interruptions.md)) and \(\bar{F}_l\) is the transfer capacity, which may include investment:
 
 \[
 \bar{F}_l = F^{base}_l + I^{tr}_{l}
 \]
 
+In the master problem \(I^{tr}_l\) is the cumulative investment on the line's corridor; in operational dispatch in development mode it is a per-corridor variable `tf_inv_{i}_{j}`, with `transfer_symmetry_{i}_{j}` forcing equal investment in both directions. The capacity constraints are unnamed.
+
 Implemented in `add_line_capacity_constraints!()`.
 
-### DC-4: Voltage Angle Limits
+### DC-4: Voltage Angle Reference
 
-Voltage angle differences across each line are bounded:
+One bus per connected component of the network is the angle reference:
 
 \[
-|\theta_{n_1,t} - \theta_{n_2,t}| \leq \theta^{max} \quad \forall (n_1, n_2) \in \mathcal{L}, t
+\theta_{n^{ref}_c,t} = 0 \quad \forall c, t
 \tag{DC-4}
 \]
 
-where \(\theta^{max}\) is the maximum angle difference (default: 30 degrees = 0.524 rad).
+The component that contains `dc_power_flow.slack_bus` (0-indexed, default 0) uses that bus; every other component, including an isolated bus, uses its first bus. All angles are bounded to \([-\pi, \pi]\).
 
-### DC-5: Slack Bus Reference
-
-One bus is designated as the slack (reference) bus with angle fixed to zero:
-
-\[
-\theta_{n^{ref},t} = 0 \quad \forall t
-\tag{DC-5}
-\]
-
-By default, bus 1 is the slack bus.
+!!! note "No angle-difference limits in the DC model"
+    The DC formulation has no limit on \(|\theta_i - \theta_j|\). With \(f = (S_{base}/x)\,\Delta\theta\), such a limit caps the flow at \((S_{base}/x)\,\theta^{max}\), which for many lines is far below the thermal rating. Flows are limited by DC-3 only. `dc_power_flow.max_angle_diff_deg` is used by the ACOPF formulations (see [AC Optimal Power Flow](ac-power-flow.md)).
 
 ## Converter Constraints
 
 ### AC/DC Converters
 
-AC/DC converters (VSC or LCC type) allow power transfer between AC and DC networks with directional efficiency:
+AC/DC converters (VSC or LCC type) carry power between an AC bus (`from`) and a DC bus (`to`) with directional efficiency. Each converter \(c\) has a rectifying flow \(p^{rect}_{c,t} \geq 0\) (AC→DC, `acdc_rectify`) and an inverting flow \(p^{inv}_{c,t} \geq 0\) (DC→AC, `acdc_invert`):
 
 \[
-P^{conv}_{n,t} \leq \bar{P}^{conv}_n + I^{conv}_n
+p^{rect}_{c,t} + p^{inv}_{c,t} \leq S^{conv}_c \cdot o_{c,t}
 \tag{CONV-1}
 \]
 
 \[
-P^{ac}_{n,t} = \begin{cases}
-P^{conv}_{n,t} \cdot \eta^{rect} & \text{rectifying (AC→DC)} \\
-P^{conv}_{n,t} / \eta^{inv} & \text{inverting (DC→AC)}
-\end{cases}
+P^{conv}_{\text{AC bus},t} = -p^{rect}_{c,t} + \eta^{inv}_c \, p^{inv}_{c,t}, \qquad
+P^{conv}_{\text{DC bus},t} = \eta^{rect}_c \, p^{rect}_{c,t} - p^{inv}_{c,t}
 \tag{CONV-2}
 \]
 
+where \(S^{conv}_c\) is `rated_power_mva` and \(o_{c,t}\) the scheduled-outage factor. Converter capacity is not an investment variable of the dispatch (the master problem can build it).
+
 ### Frequency Converters
 
-Similar to AC/DC converters but connecting networks of different frequencies (e.g., 50 Hz to 60 Hz):
+Frequency converters connect networks of different frequencies (e.g., 50 Hz to 60 Hz) in the same way, with flows `freq_a_to_b` and `freq_b_to_a`, efficiencies per direction, and
 
 \[
-P^{freq}_{n,t} \leq \bar{P}^{freq}_n + I^{freq}_n
+p^{a \to b}_{c,t} + p^{b \to a}_{c,t} \leq S^{conv}_c \cdot o_{c,t}
 \tag{FREQ-1}
 \]
 
-Implemented in `add_converter_constraints!()`.
+Both converter types add `variable_cost` × throughput to the objective.
+
+**Minimum power.** When the dispatch runs unit commitment (`unit_commitment` mode, or `use_uc_in_dispatch`), a converter with `min_power_mva` \(\underline{S}_c > 0\) is either off or carries at least \(\underline{S}_c\) in one direction. Binaries \(u^{f}_{c,t}, u^{b}_{c,t} \in \{0, 1\}\) per direction (`acdc_on_rectify`/`acdc_on_invert`, `freq_on_a_to_b`/`freq_on_b_to_a`) give
+
+\[
+u^{f}_{c,t} + u^{b}_{c,t} \leq 1, \qquad
+\underline{S}_c \, u^{f}_{c,t} \leq p^{f}_{c,t} \leq S^{conv}_c \, o_{c,t} \, u^{f}_{c,t}, \qquad
+\underline{S}_c \, u^{b}_{c,t} \leq p^{b}_{c,t} \leq S^{conv}_c \, o_{c,t} \, u^{b}_{c,t}
+\tag{CONV-3}
+\]
+
+with \(p^{f}, p^{b}\) the two flows (rectify/invert, A→B/B→A). For the energy prices the binaries are fixed at their optimum with the generators' commitment and the LP re-solved. Economic dispatch and the master problem (LP) ignore `min_power_mva`. Implemented in `add_converter_constraints!()`.
 
 ## Transformer Modeling
 
 Transformers are modeled as additional branches appended to the line set:
 
-- **Reactance**: Series reactance from `reactance_pu` field
-- **Capacity**: Thermal limit from `rated_power_mva`
-- **Losses**: Per-transformer `losses_fraction`
-- **Tap ratio**: Not modeled in DC approximation (linear model)
+- **Resistance**: `resistance_pu`, or `losses_fraction × impedance_pu` when not given
+- **Reactance**: \(x = \sqrt{z^2 - r^2}\) from `impedance_pu` and the resistance
+- **Capacity**: thermal limit from `rated_power_mva`
+- **Tap ratio**: not modeled in the DC approximation
 
-Self-loop transformers (both ends at the same bus) are skipped with a warning.
+Self-loop transformers (both ends at the same bus) are skipped.
 
 ## Transmission Losses
 
 ESFEX supports three transmission loss models, selected via `dc_power_flow.loss_model`:
 
-| Mode | Key | Description | Formulation |
-|------|-----|-------------|-------------|
-| Lossless | `"none"` | No transmission losses | \(P^{loss}_{l,t} = 0\) |
-| Linear (legacy) | `"linear"` | Constant loss factor on incoming flows | \(P^{loss}_{l,t} = \lambda_l \cdot |f_{l,t}|\) |
-| Piecewise linear | `"pwl"` | PWL approximation of quadratic \(I^2R\) losses (default) | See below |
+| Mode | Key | Description |
+|------|-----|-------------|
+| Lossless | `"none"` | No transmission losses |
+| Linear | `"linear"` | A constant fraction \(\lambda_l\) of the flow is lost |
+| Piecewise linear | `"pwl"` | PWL approximation of quadratic \(I^2R\) losses (default) |
+
+The loss coefficient of a branch is its per-unit series resistance \(R_l\): `resistance_pu` for lines (0 when not given, i.e. lossless) and the transformer resistance above for transformers.
+
+The master problem's representative days and the Benders subproblems use the same `loss_model`, with `pwl_loss_segments_master` segments for `pwl`. Their network has one link per connected node pair (from `nodes_connections`). The link's reactance and resistance are those of the bus-level lines joining the two nodes in parallel, the resistance weighted by how the flow splits between them:
+
+\[
+X^{link}_{ij} = \Big(\sum_k 1/X_k\Big)^{-1}, \qquad R^{link}_{ij} = \sum_{k} R_k \, s_k^2, \qquad s_k = \frac{1/X_k}{\sum_{m} 1/X_m}
+\]
+
+with \(R_k\), \(X_k\) those of each whole line. A node pair with no bus-level lines between them gets a lossless link whose reactance is derived from its `fuel_transport_distances` entry and `voltage_level_kv` (0.01 p.u. without a distance).
+
+### Linear Model
+
+The linear model is the PWL model below with one segment of slope \(\lambda_l = R_l\) (clamped to \([0, 1]\)):
+
+\[
+P^{loss}_{l,t} = \lambda_l \left( f^{+}_{l,t} + f^{-}_{l,t} \right)
+\]
+
+so a fraction \(\lambda_l\) of the flow is lost whichever way it runs, half at each end (LOSS-5). Unlike the quadratic model, the loss fraction does not grow with the flow.
 
 ### Physical Model
 
-Real power losses on a transmission line are governed by the quadratic relationship:
+Real power losses on a branch follow the quadratic relationship:
 
 \[
-P^{loss}_l(f) = g_l \cdot f_l^2 \tag{LOSS-PHYS}
+P^{loss}_l(f) = R_l \cdot \frac{f_l^2}{S_{base}} \tag{LOSS-PHYS}
 \]
 
-where \(g_l\) is the line conductance derived from the series impedance:
-
-\[
-g_l = \frac{R_l}{R_l^2 + X_l^2}
-\]
-
-with \(R_l\) the resistance and \(X_l\) the reactance (both in per-unit). Direct inclusion of the quadratic term would make the problem a QP. Instead, we use a piecewise linear (PWL) approximation that preserves LP compatibility.
+with \(f_l\) in MW and \(R_l\) in p.u. The coefficient is clamped at \(R_l \leq 50\) as a guard against bad data. Direct inclusion of the quadratic term would make the problem a QP. Instead, a piecewise linear (PWL) approximation keeps it an LP.
 
 ### PWL Approximation
 
-The quadratic loss curve is approximated by \(N\) linear segments (configured via `pwl_loss_segments`). The flow range \([0, \bar{F}_l]\) is divided into \(N\) equal segments with breakpoints:
+The quadratic loss curve is approximated by \(N\) linear segments (`pwl_loss_segments`). The flow range \([0, F^{base}_l]\) is divided into \(N\) equal segments with breakpoints:
 
 \[
-f_k = k \cdot \Delta f, \qquad \Delta f = \frac{\bar{F}_l}{N}, \qquad k = 0, 1, \ldots, N
+f_k = k \cdot \Delta f, \qquad \Delta f = \frac{F^{base}_l}{N}, \qquad k = 0, 1, \ldots, N
 \]
 
-The slope of the \(k\)-th segment (\(k = 1, \ldots, N\)) is derived from the secant of the quadratic between breakpoints \(f_{k-1}\) and \(f_k\):
+The slope of the \(k\)-th segment (\(k = 1, \ldots, N\)) is the secant of the quadratic between breakpoints \(f_{k-1}\) and \(f_k\):
 
 \[
-m_k = g_l \cdot (2k - 1) \cdot \Delta f \tag{LOSS-SLOPE}
+m_k = \frac{R_l \cdot (2k - 1) \cdot \Delta f}{S_{base}} \tag{LOSS-SLOPE}
 \]
 
-Since \(m_1 < m_2 < \cdots < m_N\) (monotonically increasing slopes), the PWL approximation forms a **convex** function. This convexity property is critical: for a cost-minimizing LP, the solver will naturally fill lower-slope segments first, so no binary variables are needed to enforce segment ordering.
+Since \(m_1 < m_2 < \cdots < m_N\), the PWL approximation is **convex**: while energy has a positive value, a cost-minimizing LP fills lower-slope segments first and runs one direction only, so no binary variables are needed. When energy is worth less than nothing at some bus (surplus renewables whose curtailment has a cost, a binding curtailment limit or RE target), it does not: see [Exact losses](#exact-losses). Branches with \(R_l = 0\), or with a capacity below 0.1 MW that investment cannot expand, are lossless (`ploss_{l}_{t}` fixed to 0). A PWL branch with zero base capacity is lossless too, since its segments have zero width; with the linear model it loses \(\lambda_l\) of its flow like any other branch.
 
 ### Flow Decomposition
 
-Because losses depend on the magnitude of flow (not its direction), each line flow is decomposed into positive and negative components:
+Because losses depend on the magnitude of flow (not its direction), each line flow is decomposed into positive and negative components (`fpos_{l}_{t}`, `fneg_{l}_{t}`):
 
 \[
 f_{l,t} = f^{+}_{l,t} - f^{-}_{l,t}, \qquad f^{+}_{l,t}, f^{-}_{l,t} \geq 0 \tag{LOSS-1}
 \]
 
-Each direction is further decomposed into \(N\) segment variables:
+Each direction is further decomposed into \(N\) segment variables (`dp_{l}_{k}_{t}`, `dn_{l}_{k}_{t}`):
 
 \[
 f^{+}_{l,t} = \sum_{k=1}^{N} \delta^{+}_{l,k,t}, \qquad f^{-}_{l,t} = \sum_{k=1}^{N} \delta^{-}_{l,k,t} \tag{LOSS-2}
@@ -242,6 +251,8 @@ with segment width bounds:
 0 \leq \delta^{+}_{l,k,t} \leq \Delta f, \qquad 0 \leq \delta^{-}_{l,k,t} \leq \Delta f \tag{LOSS-3}
 \]
 
+The segments span the base capacity \(F^{base}_l\). On a line that investment can expand (master problem and Benders), the last segment also spans the most capacity the corridor can gain by that year (the upper bounds of its investment variables; in the master only when that is above 0), so flow can use the built capacity at the last slope \(m_N\); it has no upper bound only when the investment has none (and, in Benders, on every corridor with an investment variable). The master used to leave the last segment open on every line with a corridor variable, even one whose `transference_invest_max` is 0: \(f^+\) and \(f^-\) could then grow together, and on Cuba's masters (no line may be built) the barrier iterates ran to \(10^6\) MW and the solve ended `NUMERICAL_ERROR`.
+
 ### PWL Loss Computation
 
 The total loss on each line is the sum of segment contributions from both directions:
@@ -252,13 +263,36 @@ P^{loss}_{l,t} = \sum_{k=1}^{N} m_k \cdot \left( \delta^{+}_{l,k,t} + \delta^{-}
 
 ### Half-Loss Split KCL
 
-Losses are allocated equally between the two endpoint buses of each line. The KCL equation (DC-1) becomes:
+Losses are allocated equally between the two endpoint buses of each line. The flow side of DC-1 becomes:
 
 \[
-\text{net\_inj}_{n,t} = \sum_{l} \left( K_{n,l} \cdot f_{l,t} - \frac{1}{2} \cdot |K_{n,l}| \cdot P^{loss}_{l,t} \right) \tag{LOSS-5}
+\text{net\_inj}_{n,t} = \sum_{l} \left( K_{n,l} \cdot f_{l,t} + \frac{1}{2} \cdot |K_{n,l}| \cdot P^{loss}_{l,t} \right) \tag{LOSS-5}
 \]
 
-where \(K_{n,l}\) is the incidence matrix entry and \(|K_{n,l}|\) ensures both endpoint buses absorb half the loss regardless of flow direction. This formulation is symmetric and avoids the need to track flow direction for loss allocation.
+The \(+\) sign makes the loss a withdrawal: each end supplies its share of the flow plus half of the line's loss. \(|K_{n,l}|\) charges both endpoint buses regardless of flow direction.
+
+### Exact Losses
+
+LOSS-1 to LOSS-4 allow \(\delta^{+}\) and \(\delta^{-}\) to be positive together, and a steep segment to fill before a flat one. Both raise \(P^{loss}\) above the PWL loss of the net flow \(|f_{l,t}|\), so the LP can discard energy on any lossy line, up to twice its full-flow loss, at no cost. It does so whenever discarding energy pays: curtailment has a cost (`curtailment_cost`), a curtailment limit binds, or an RE target counts renewable output that is then lost. Surplus renewable energy then disappears as "losses" instead of being curtailed. No LP formulation can forbid this, because the set \(\{P^{loss} = \text{PWL}(|f|)\}\) is not convex.
+
+Every solve of a model with PWL or linear losses (the dispatch, the master problem, the Benders subproblems, MGA) is therefore repaired:
+
+1. Solve with LOSS-1 to LOSS-4.
+2. At each step where some branch loses more than \(\text{PWL}(|f_{l,t}|)\) (beyond 0.001 MW), every lossy branch of that step is linearised: its flow is held in the direction it had (\(\delta^{-} = 0\) or \(\delta^{+} = 0\)), and its loss becomes \(P^{loss}_{l,t} = \alpha_{l,t} \, |f_{l,t}|\), with \(\alpha_{l,t} = \text{PWL}(|f^{*}|)/|f^{*}|\) the PWL secant at the flow \(f^{*}\) just found (\(m_1\) at zero flow). The flow runs on the first segment of its direction (the others are fixed at 0: at the same \(\alpha\) they would only be copies of it). A loss that is linear in the flow cannot be inflated.
+3. Solve again. \(\alpha\) follows the new flow until each linearised loss is within 2 % (or 0.1 MW) of the PWL loss of its flow, at most twice per branch-step (a flow that keeps moving with \(\alpha\) keeps its second value). Steps that now over-lose are linearised too. A round that would only update \(\alpha\) (no step over-loses) is not run when the linearised losses together miss the PWL losses of their flows by at most 0.1 % of all line losses: the losses are then settled.
+4. Direction check (off in ESFEX 0.4: on Cuba's master it took the repair from 3 rounds to 19 and the master 2.5 to 10 times longer). Step 2 holds each branch in the direction the over-losing solve gave it, and that direction is arbitrary where the solve was discarding energy: Cuba's one-year master ended 4.4 % apart under two Gurobi methods, whose first solves differed only in which of their equal-cost points they returned. Once the losses are settled, a held branch-step whose flow sits at zero (within 0.001 MW) is checked: the first segment of the other direction, held at 0, is exactly the PWL model's first segment that way (slope \(m_1\), nothing flowing the held way), so its reduced cost is how the objective of the exact-loss model changes as the flow starts to reverse. When it is negative and worth more than \(10^{-7}\) of the objective over that segment's width, the branch-step is released back to LOSS-1 to LOSS-4 and the repair goes on from step 2; if its step over-loses again, it is held in the direction its reduced cost asked for. Every such branch-step is released at once. (Each reduced cost holds for one branch moving, the others adjusting; releasing only the best branch of each step converged far more slowly on Cuba's master, about 190 releases per cycle against 2377 and then fewer, and was still 2 % above after 30 rounds.) A branch-step is released at most twice per solve, and the repair runs at most 8 rounds. It ends on the settled round of lowest objective: when a later round ends higher, or still over-losing at the round limit, that round's model is solved again. A held flow above zero is a local optimum of its direction and is not checked, so the result can still depend on the first solve, much less. The check needs duals: a MIP (unit commitment) or a solve without duals skips it (a DEBUG note). Barrier without crossover has duals.
+
+Each re-solve uses the LP method of the first solve. Gurobi and CPLEX restart a changed LP from the previous basis with simplex whatever `Method` (`CPXPARAM_LPMethod`) says; on a large master that barrier solves in a few minutes, that simplex can run for an hour. Unless the method is simplex, the re-solves ignore the previous basis (Gurobi `LPWarmStart = 0`, CPLEX `CPXPARAM_Advance = 0`, set back afterwards). Other solvers re-solve as they do.
+
+Steps without over-loss keep the PWL model and its marginal losses. The surplus is curtailed (at `curtailment_cost`, within `max_curtailment_ratio` in the master), stored or not generated, and curtailment is reported. Each solve starts again from the PWL model, so a model solved again after a change (Benders iterations, MGA, NPV retirement) is repaired for its new solution. The model stays an LP (or the MIP it was): a step costs one more solve per round, and only when some branch over-loses. If a repaired solve has no solution (losing energy on the lines was the only way to balance the model), the PWL solution is kept and a warning is logged. The master's annual curtailment limit no longer causes this: curtailment above it is priced ([Capacity Expansion](capacity-expansion.md#836-annual-curtailment-limit)).
+
+A re-solve can also end with a point that is feasible but not optimal: Gurobi's barrier stalls short of its tolerances and returns its best iterate (`SUBOPTIMAL`, which JuMP reports as `LOCALLY_SOLVED`). Such a point does not steer another round: without crossover it is an interior point, so lines the optimum leaves alone can carry flow both ways and look over-losing (Cuba's 2037 master: 85 steps "over-losing" by 376 MW·step at the stalled point of a round that had only updated \(\alpha\), none at the optimum of the same model). In a master and in a dispatch window, every solve of the repair that ends `NUMERICAL_ERROR` or `LOCALLY_SOLVED` is first repeated once with Gurobi's homogeneous barrier (`BarHomogeneous = 1`, see [Solver Guide](../user-guide/solver-guide.md#numerical-trouble-in-a-master-problem)). If a re-solve is still not optimal (at once with a solver without retry parameters), the round is undone and the model of the round before, whose solve was optimal, is solved again and kept; a warning gives the status and how far that round's losses are from the PWL losses of their flows. A master takes only an optimal plan; a dispatch window whose first solve is still `LOCALLY_SOLVED` after the retry keeps that feasible point, with a WARNING naming the window. Earlier versions repaired the dispatch from such a point, without a retry.
+
+#### Bounds of the repair
+
+Every lossy line-step can carry the PWL loss of its net flow, so each point of the model with exact PWL losses (\(P^{loss}_{l,t} = \text{PWL}(|f_{l,t}|)\), segments filled in order in one direction) is a point of LOSS-1 to LOSS-4. The first solve is therefore a relaxation of the exact-loss model and its objective a lower bound of that model's optimum (for a MIP, up to the MIP gap of the solve). It bounds the exact-PWL-loss model only, not the quadratic losses the PWL segments approximate. The repaired solve is a point of the exact-loss model, up to the 2 % (or 0.1 MW) tolerance of the linearised losses, so its objective is an upper bound. The repair records both, their gap \((z^{rep} - z^{PWL}) / |z^{rep}|\), the rounds, the branch-steps held in one direction at the end and the releases of step 4 (`loss_repair_bounds`). The runner logs them at INFO when the gap exceeds 0.1 %, at DEBUG otherwise: once per master solve, and once per dispatch year with the windows summed and the largest window gap. They are written to the year's scenario attributes in the HDF5 (`master_loss_repair_*`, `dispatch_loss_repair_*`; see the [HDF5 Output Schema](../reference/hdf5-output-schema.md#attributes-per-year-metadata)). A large gap says how much energy the lines discarded in the first solve, not how far the repaired plan is from the optimum: Cuba's one-year master with 8 GW of PV has a PWL objective of 1.53 G\$ and a repaired one of 5.77 G\$ (a 73 % gap), because the lines discarded most of the surplus PV in the first solve.
+
+The dispatch's losses are in the results: per node and step (`line_losses`, half of each line's loss at each end) and per year (`transmission_losses`, MWh); see the [HDF5 Output Schema](../reference/hdf5-output-schema.md#network-data).
 
 ### Configuration
 
@@ -266,250 +300,110 @@ where \(K_{n,l}\) is the incidence matrix entry and \(|K_{n,l}|\) ensures both e
 |-----------|---------|-------------|
 | `loss_model` | `"pwl"` | Loss model selection: `"none"`, `"linear"`, or `"pwl"` |
 | `pwl_loss_segments` | 3 | Number of PWL segments for operational dispatch |
-| `pwl_loss_segments_master` | 2 | Number of PWL segments for master problem (fewer for performance) |
+| `pwl_loss_segments_master` | 2 | Number of PWL segments for the master problem and Benders subproblems |
 
-Increasing the number of segments improves accuracy but adds variables and constraints. Three segments typically capture over 95% of the quadratic loss curve.
+Increasing the number of segments improves accuracy but adds variables and constraints.
 
 ## Power Balance: Single Bus vs. Multi-Bus
 
 | Network Size | Model | Function |
 |-------------|-------|----------|
 | 1 bus | Simple power balance (PB-1) | `add_demand_constraints!()` |
-| 2+ buses | DC power flow (DC-1 through DC-5) | `add_dc_constraints!()` |
+| 2+ buses | DC power flow (DC-1 through DC-4) | `add_dc_constraints!()` |
 
-The model automatically selects the appropriate formulation based on `network.num_buses`.
+The model selects the formulation from `network.num_buses`.
 
-## Inter-System DC Power Flow
+## Inter-System Links
 
-When multiple power systems are coupled via inter-system transmission links (defined in `MetaNetworkConfig.systems_links`), ESFEX implements a **bidirectional DC power flow model** with piecewise-linear loss approximation. This model treats inter-system links as HVDC-like connections with independent voltage references in each system.
+When several systems are coupled by inter-system links (`meta_network.systems_links`), the runner merges all systems into one network before building the models. Each connection of a `link_type: transmission` link (the default) becomes an ordinary transmission line between the first bus of each endpoint node, with:
 
-### Architecture
+- capacity `existing_capacity_MW`
+- length `distance_km`
+- `reactance_pu` and `resistance_pu` when given (otherwise the usual defaults for lines)
 
-Unlike intra-system transmission (which enforces Kirchhoff's Voltage Law across all network cycles), inter-system links:
+The link then follows DC-1 to DC-3 and the configured loss model like any other line, inside one angle reference. Investment uses `max_investment_MW` and `investment_cost_per_MW`, which are written into `transference_invest_max` and `transference_invest_cost` at both endpoint nodes (the larger value where a node already has one). `loss_factor` is not used by this path. `cost_per_mw_km` is the link's flow cost: the master problem ([Capacity Expansion](capacity-expansion.md), §8.3.9) and the dispatch charge `distance_km` × `cost_per_mw_km` per MWh it carries, in either direction. In the dispatch it is the line's `flow_cost` \(c^{\text{flow}}_l\), charged as \(\Delta t \sum_t c^{\text{flow}}_l a_{l,t}\) with \(a_{l,t} \geq \pm f_{l,t}\) (`line_flow_abs_l*_t*_pos/neg`, `add_line_flow_costs!`) and reported as `line_flow_cost` in the cost breakdown.
 
-- **Do not enforce KVL** across systems (independent voltage angle references)
-- **Inject/withdraw power** at boundary nodes via the `external_injections` parameter
-- **Model losses** using the same PWL approach as intra-system lines (or linear fallback)
-- **Support investment** in both directions symmetrically
+A `link_type: fuel_route` link is not part of the electrical network: its connections become primary-energy fuel transport routes for its `fuel` (see [Inter-System Links](../gui/inter-system-links.md#how-links-enter-the-model) for the field mapping).
 
-This is analogous to HVDC interconnectors between asynchronous AC systems.
-
-### Variables
-
-For each inter-system link \(l\) connecting system A (node \(n_A\)) to system B (node \(n_B\)):
-
-| Variable | Bounds | Description |
-|----------|--------|-------------|
-| \(pf_l\) | Unbounded | Net power flow (positive = A→B, negative = B→A) |
-| \(fp_l\) | \(\geq 0\) | Forward flow component (A→B) |
-| \(fn_l\) | \(\geq 0\) | Reverse flow component (B→A) |
-| \(dp_{l,k}\) | \([0, \Delta f]\) | Segment \(k\) flow (forward direction) |
-| \(dn_{l,k}\) | \([0, \Delta f]\) | Segment \(k\) flow (reverse direction) |
-| \(ploss_l\) | \(\geq 0\) | Total power loss on link \(l\) |
-
-### Constraints
-
-#### IS-1: Bidirectional Flow Decomposition
-
-The net flow is decomposed into positive (forward) and negative (reverse) components:
-
-\[
-pf_l = fp_l - fn_l
-\tag{IS-1}
-\]
-
-#### IS-2 & IS-3: Capacity Limits
-
-Each link has thermal capacity limits in both directions, including investment:
-
-\[
-pf_l \leq \bar{F}_l^{base} + \sum_{y} I_{l,y}^{inter}
-\tag{IS-2}
-\]
-
-\[
-pf_l \geq -\left(\bar{F}_l^{base} + \sum_{y} I_{l,y}^{inter}\right)
-\tag{IS-3}
-\]
-
-where \(I_{l,y}^{inter}\) is the inter-system link investment in year \(y\).
-
-#### IS-4: PWL Loss Approximation
-
-If the link has both `reactance_pu` and `resistance_pu` defined, losses are modeled using the same PWL approach as intra-system lines. The link conductance is:
-
-\[
-g_l = \frac{R_l}{R_l^2 + X_l^2}
-\]
-
-Each direction is decomposed into \(N\) PWL segments (configured via `inter_system_loss_segments`):
-
-\[
-fp_l = \sum_{k=1}^{N} dp_{l,k}, \quad fn_l = \sum_{k=1}^{N} dn_{l,k}
-\]
-
-with segment slopes:
-
-\[
-m_k = g_l \cdot (2k - 1) \cdot \Delta f, \quad \Delta f = \frac{\bar{F}_l}{N}
-\]
-
-The total loss is:
-
-\[
-ploss_l = \sum_{k=1}^{N} m_k \left( dp_{l,k} + dn_{l,k} \right)
-\tag{IS-4}
-\]
-
-**Linear loss fallback**: If `resistance_pu` or `reactance_pu` is not provided (or if `inter_system_loss_segments = 0`), the model falls back to:
-
-\[
-ploss_l = \lambda_l \cdot |pf_l| = \lambda_l \cdot (fp_l + fn_l)
-\]
-
-where \(\lambda_l\) is the `loss_factor` from the config.
-
-#### IS-5 & IS-6: KCL Injection with Half-Loss Split
-
-The inter-system link injects/withdraws power at the boundary nodes with losses split equally:
-
-**System A (FROM bus)**:
-
-\[
-\text{external\_inj}_{n_A} = +pf_l - 0.5 \cdot ploss_l
-\tag{IS-5}
-\]
-
-**System B (TO bus)**:
-
-\[
-\text{external\_inj}_{n_B} = -pf_l - 0.5 \cdot ploss_l
-\tag{IS-6}
-\]
-
-The negative sign on the TO bus ensures power leaves System A and enters System B (accounting for losses).
-
-### Configuration
-
-Inter-system transmission links are configured in `MetaNetworkConfig.systems_links`:
+A merged system without `transmission_lines_geo` keeps its internal network: each node pair connected in `nodes_connections` becomes a line between the first buses of the two nodes, with that capacity, the `fuel_transport_distances` entry as length and the adjacency defaults (X from the length, R = 0.1 × X). Systems with lines use only their lines.
 
 ```yaml
 meta_network:
+  systems: ["SystemA", "SystemB"]
   systems_links:
     - systems: ["SystemA", "SystemB"]
-      connections: [[0, 1]]  # Node pairs
+      connections: [[0, 1]]  # Node pairs (node of SystemA, node of SystemB)
       existing_capacity_MW: [500.0]
       max_investment_MW: [500.0]
       investment_cost_per_MW: [1000000.0]
-      loss_factor: [0.02]  # Linear loss if R/X not provided
-      reactance_pu: [0.01]  # Series reactance (p.u.)
-      resistance_pu: [0.001]  # Series resistance (p.u.)
+      # loss_factor is for fuel_route links only (optional here)
+      reactance_pu: [0.01]
+      resistance_pu: [0.001]
       distance_km: [100.0]
-      cost_per_mw_km: [10000.0]
+      cost_per_mw_km: [0.01]     # Flow cost, $ per MWh and km
 ```
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `reactance_pu` | list[float] | `[0.01]` | Per-link series reactance (p.u.) |
-| `resistance_pu` | list[float] | `[0.001]` | Per-link series resistance (p.u.) |
-
-Global setting:
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `inter_system_loss_segments` | int | 2 | PWL segments for inter-system links (0 = linear fallback, max 5) |
-
-### Implementation
-
-- **Master Problem**: Inter-system variables/constraints are added in `master_problem.jl` via `_add_inter_system_constraints!()`
-- **Operational Dispatch**: Each system receives `external_injections` kwarg in `add_day_operational_constraints!()` with link flows computed by the master problem
-- **No KVL**: Inter-system links do NOT participate in the cycle matrix \(\mathbf{C}\) — each system has independent voltage angle references
-
-### References
-
-This formulation is similar to HVDC modeling in production cost models (e.g., PLEXOS, PowerSimulations.jl), where DC links provide controllable power transfer without enforcing AC voltage angle consistency.
 
 ---
 
 
 ## N-1 Security-Constrained DC Power Flow
 
-When N-1 security is enabled (`n1_security.enabled: true`), the optimizer adds contingency constraints ensuring the system remains feasible after the loss of any single critical element.
+When `n1_security.enabled: true` and the run's `simulation_mode` is in `n1_security.apply_to_modes` (default: `development` and `unit_commitment`), the operational dispatch adds N-1 security constraints. The list holds simulation modes, not the dispatch formulation: the windows of a development run get N-1 when `development` is listed, whether they are solved as economic dispatch or, with `master_problem.use_uc_in_dispatch`, as unit commitment. They are not applied in the master problem or in Benders. They act on the DC flow variables, so with an `acopf_*` mode only the generation part applies.
 
-### Critical Element Identification
+With `scopf_enabled: false` (default) the constraints are preventive; with `scopf_enabled: true` they are replaced by the SCOPF constraints below. Both are soft: every shortfall or overload is a slack priced at `penalties.loss_of_reserve_static`.
 
-Not all elements need to be tested as contingencies. ESFEX identifies critical elements to reduce computational burden:
+### Critical Elements
 
-**Transmission lines:** A line is critical if its base-case loading exceeds the `critical_threshold`:
+- **Transmission lines**: every transmission line (all its circuits together: the outage of a line takes out all of them) with capacity \(C_l = \) `capacity_mw` \(> 0\). No loading threshold is applied. Transformers are not included.
+- **Largest generator**: the (generator, bus) pair with the largest `rated_power`, chosen once from the configured ratings, independently of commitment, output or investment. In a merged multi-system run each original system has its own (see below).
 
-\[
-\frac{|f_{l,t}|}{\bar{F}_l} \geq \tau^{crit} \quad \text{for any } t
-\tag{N1-CRIT}
-\]
+### Preventive N-1 (soft)
 
-where \(\tau^{crit}\) is the `critical_threshold` (default: 0.50). Lines loaded below 50% in the base case are unlikely to cause issues when outaged.
+#### N1-1: Generation
 
-**Generators:** The largest online generator (or the generator with the highest output) is tested. The reserve type determines the required generation reserve:
-
-| Reserve Type | Reserve Requirement |
-|-------------|---------------------|
-| `largest_unit` | Reserve ≥ output of largest online generator |
-| `percentage` | Reserve ≥ `reserve_percentage` × total demand |
-| `fixed` | Reserve ≥ fixed MW value |
-
-### Post-Contingency Constraints
-
-#### N1-1: Line Outage
-
-For each critical line \(l_c\), the remaining network must serve all demand without any remaining line exceeding the post-contingency loading limit:
+If the largest unit \((g^*, n^*)\) trips, the headroom of the rest must cover its output:
 
 \[
-|f_{l,t}^{(l_c)}| \leq \bar{F}_l \cdot \rho^{post} \quad \forall l \neq l_c, \forall t
+H^{N1}_t + s^{gen}_t \geq p_{g^*,n^*,t} \quad \forall t
 \tag{N1-1}
 \]
 
-where:
-- \(f_{l,t}^{(l_c)}\) is the flow on line \(l\) after outage of line \(l_c\)
-- \(\rho^{post}\) is the `transmission_reserve_factor` (default: 0.70)
+where \(H^{N1}_t\) is the system-wide headroom of reservable non-renewable units other than \((g^*, n^*)\) (online units only in unit commitment) plus battery headroom, as in the reserve constraints of the [operational dispatch](operational-dispatch.md). Constraint `n1_gen_reserve_system_t{t}`, shortfall `n1_gen_reserve_system_shortfall_t{t}`. In a merged multi-system run N1-1 holds per original system, like the reserves: each system's largest unit, covered by that system's headroom only (`n1_gen_reserve_system_s{k}_t{t}` for system \(k\)). The N-1 generation dual reported per step is the sum over the systems.
 
-The post-contingency flows are computed using Power Transfer Distribution Factors (PTDFs):
+#### N1-2: Transmission
 
-\[
-f_{l,t}^{(l_c)} = f_{l,t} + \text{PTDF}_{l,l_c} \cdot f_{l_c,t}
-\]
-
-The PTDF matrix describes how the outaged line's flow redistributes across the remaining network.
-
-#### N1-2: Generator Outage
-
-The system must maintain sufficient spinning reserve to cover the loss of the largest generator:
+Each critical line keeps a share of its capacity free for post-contingency flows:
 
 \[
-\sum_{g \neq g_c} \left(\bar{P}_{g,n} - p_{g,n,t}\right) \cdot u_{g,n,t} \geq P_{g_c,n,t} \quad \forall t
+-\rho^{post} C_l - s^{tr}_{l,t} \leq f_{l,t} \leq \rho^{post} C_l + s^{tr}_{l,t} \quad \forall l, t
 \tag{N1-2}
 \]
 
-This ensures that the headroom on committed generators can compensate for the lost unit.
+where \(\rho^{post}\) is `transmission_reserve_factor` (default 0.70) and \(f_{l,t}\) the flow of that physical line. Constraints `n1_trans_reserve_l{l}_t{t}_pos` / `_neg`, slack `n1_trans_over_l{l}_t{t}`.
+
+Both slacks are priced at `penalties.loss_of_reserve_static` per MW and time step and reported as `n1_security_shortfall_cost`, so an insecure fleet or network shows up as a cost instead of an infeasible model.
+
+With `generation_reserve_type: percentage` the requirement of N1-1 is `generation_reserve_percentage` × the system's total demand of the step instead of the largest unit's output, and no unit is excluded from the headroom.
+
+`critical_line_threshold`, `contingency_depth`, `redistribution_mode`, `pi_screening_threshold`, `transformer_contingencies` and `battery_contingencies` only configure the post-hoc contingency analysis of the Studio's single-line diagram.
 
 ### PTDF Matrix Construction
 
-The PTDF (Power Transfer Distribution Factor) matrix is computed from the network admittance matrix:
+The PTDF (Power Transfer Distribution Factor) matrix is computed from the network susceptances:
 
 \[
 \text{PTDF} = \mathbf{B}_f \cdot \mathbf{B}^{-1}_{bus}
 \]
 
 where:
-- \(\mathbf{B}_{bus}\) is the bus susceptance matrix (imaginary part of admittance)
+- \(\mathbf{B}_{bus}\) is the bus susceptance matrix with \(b_l = 1/X_l\) (\(X_l\) the reactance of the whole line)
 - \(\mathbf{B}_f\) is the branch-bus susceptance matrix
 
-For the DC approximation, susceptances are simply the inverse of reactances: \(b_l = 1/X_l\).
+The slack bus row and column are removed before inversion (pseudo-inverse). Only transmission lines are included, not transformers.
 
-The PTDF matrix is precomputed once and reused for all contingency evaluations.
+### LODF-Based Contingency Analysis
 
-### LODF-Based Fast Contingency Analysis
-
-Line Outage Distribution Factors (LODFs) enable O(1) per-contingency evaluation without rebuilding the B-matrix:
+Line Outage Distribution Factors (LODFs) give the post-contingency flows without rebuilding the B-matrix:
 
 \[
 \text{LODF}_{l,k} = \frac{\text{PTDF}_{l,\text{from}_k} - \text{PTDF}_{l,\text{to}_k}}{1 - (\text{PTDF}_{k,\text{from}_k} - \text{PTDF}_{k,\text{to}_k})}
@@ -522,30 +416,61 @@ Post-contingency flow on line \(l\) when line \(k\) trips:
 f_l^{(k)} = f_l + \text{LODF}_{l,k} \cdot f_k
 \]
 
-Both PTDF and LODF matrices are precomputed once and cached. The Python `ContingencyAnalyzer` uses LODF for `analyze_line_loss_fast()`, while the Julia SCOPF directly embeds LODF constraints into the optimization.
+For a radial line (denominator ≈ 0) the LODF column is set to 0. The Python `ContingencyAnalyzer` uses LODF for `analyze_line_loss_fast()`, while the Julia SCOPF embeds LODF constraints in the optimization.
 
-### Contingency Screening
+### Security-Constrained OPF (SCOPF)
 
-Not all contingencies require full evaluation. The Performance Index (PI) provides a fast screening metric:
+When `scopf_enabled: true`, the preventive constraints are replaced, in a single solve, by:
+
+**Line outages** (if `transmission_enabled`): for every pair of transmission lines \(l \neq k\) with capacity and \(|\text{LODF}_{l,k}| \geq 10^{-6}\),
+
+\[
+-C_l - o_{l,t} \leq f_{l,t} + \text{LODF}_{l,k} \cdot f_{k,t} \leq C_l + o_{l,t} \quad \forall t
+\tag{SCOPF-1}
+\]
+
+with \(C_l\) the base capacity (`capacity_mw`), \(f\) the flow of each physical line in its own from→to direction, and \(o_{l,t} \geq 0\) the worst post-contingency overload of line \(l\) over all outages (`scopf_over_l{l}_t{t}`). Constraint names `scopf_line{l}_outage{k}_t{t}_pos` / `_neg`. All pairs are added at once; there is no iteration.
+
+**Generation** (if `generation_enabled`):
+
+- With `corrective_enabled: false`: the preventive headroom test N1-1 (`scopf_n1_gen_reserve_t{t}`, shortfall `scopf_n1_gen_reserve_shortfall_t{t}`).
+- With `corrective_enabled: true`: re-dispatch after the trip. Every non-renewable unit other than \((g^*, n^*)\), reservable or not, contributes its headroom up to what it can ramp in one step, and batteries their headroom:
+
+\[
+\sum_{(g,n) \neq (g^*,n^*)} r_{g,n,t} + \sum_{b,n} \left( \bar{P}^{dis}_{b,n} - p^{dis}_{b,n,t} + p^{ch}_{b,n,t} \right) + s^{gen}_t \geq p_{g^*,n^*,t}, \qquad 0 \leq r_{g,n,t} \leq \min\left( h_{g,n,t},\; \bar{P}_{g,n} \, R^{up}_{g,n} \Delta t \right)
+\tag{SCOPF-2}
+\]
+
+with \(h_{g,n,t}\) the unit's headroom as in N1-1 and no ramp cap when `ramp_up` is 0 or \(R^{up} \Delta t \geq 1\) (`n1_corrective_gen_t{t}`, shortfall `n1_corrective_gen_shortfall_t{t}`). `corrective_enabled` has no effect without `scopf_enabled`.
+
+All slacks are priced at `penalties.loss_of_reserve_static` and reported as `n1_security_shortfall_cost`. The number of line-outage constraints grows with the square of the number of lines.
+
+### Post-Optimization Contingency Analysis
+
+The following analyses run in Python after the dispatch (`contingency.py`, `n1_assessment.py`) and do not change the optimization.
+
+#### Contingency Screening
+
+The Performance Index (PI) provides a fast screening metric:
 
 \[
 \text{PI}_c = \sum_l \left(\frac{f_{l}^{(c)}}{\bar{F}_l}\right)^2
 \tag{PI}
 \]
 
-Contingencies with PI below a threshold (default 1.0) are unlikely to cause overloads and can be skipped. The `screen_contingencies()` method returns a ranked list of the most critical contingencies.
+Contingencies with PI below a threshold are unlikely to cause overloads and can be skipped (`pi_screening_threshold`, default 0 = analyze all). The `screen_contingencies()` method returns a ranked list of the most critical contingencies.
 
-### Transformer Contingencies
+#### Transformer Contingencies
 
-Transformers are modeled as branches with their own impedance and thermal rating. When a transformer trips, the B-matrix is rebuilt without that branch, identical to a line outage. Transformer reactance is computed from the tap ratio and short-circuit impedance.
+Transformers are modeled as branches with their own impedance and thermal rating. When a transformer trips, the B-matrix is rebuilt without that branch, identical to a line outage (`transformer_contingencies`).
 
-### Battery Contingencies
+#### Battery Contingencies
 
-Batteries actively discharging act as generation sources. When a discharging battery trips, the power deficit is redistributed among remaining generators using the same droop-based or pro-rata redistribution as generator contingencies. Only batteries with net injection > 0 are considered.
+Batteries actively discharging act as generation sources. When a discharging battery trips, the power deficit is redistributed among remaining generators using the same droop-based or pro-rata redistribution as generator contingencies. Only batteries with net injection > 0 are considered (`battery_contingencies`).
 
-### N-1-1 (N-k) Analysis
+#### N-1-1 (N-k) Analysis
 
-Sequential contingency analysis: after the first element trips and power redistributes, a second contingency is evaluated on the stressed system. The `analyze_n1_1()` method:
+Sequential contingency analysis (`contingency_depth: n1_1`): after the first element trips and power redistributes, a second contingency is evaluated on the stressed system. The `analyze_n1_1()` method:
 
 1. Applies the first contingency → post-contingency state
 2. Rebuilds a modified snapshot reflecting the new operating point
@@ -553,38 +478,17 @@ Sequential contingency analysis: after the first element trips and power redistr
 
 The `screen_n1_1()` method identifies the most critical pairs by first finding N-1 contingencies that stress lines above a threshold (default 80% loading), then testing those stressed lines as second contingencies.
 
-### Droop-Based Generation Redistribution
+#### Droop-Based Generation Redistribution
 
-When a generator trips, remaining generators can redistribute power using droop-based participation factors instead of simple pro-rata:
+With `redistribution_mode: droop`, remaining generators pick up a lost unit's output with droop-based participation factors instead of pro-rata:
 
 \[
 \Delta P_g = \frac{(1/R_g) \cdot P^{rated}_g}{\sum_{g'} (1/R_{g'}) \cdot P^{rated}_{g'}} \cdot P^{lost}
 \]
 
-where \(R_g\) is the generator's droop coefficient. This matches the primary frequency response assumption from the frequency analysis module, providing consistent results between electrical and frequency N-1 assessments.
+where \(R_g\) is the generator's droop coefficient. This matches the primary frequency response assumption from the frequency analysis module.
 
-### Security-Constrained OPF (SCOPF)
-
-When `scopf_enabled: true`, ESFEX replaces the preventive N-1 approach with an iterative SCOPF that adds constraints only for binding contingencies:
-
-1. Solve base-case dispatch (no N-1 constraints)
-2. Evaluate all N-1 contingencies using LODF
-3. For each violated contingency, add: \(f_l + \text{LODF}_{l,k} \cdot f_k \leq \bar{F}_l\)
-4. Re-solve until no new violations are found (max iterations configurable)
-
-This is more efficient than the preventive approach because only a fraction of contingency constraints are typically binding.
-
-### Corrective N-1 Actions
-
-When `corrective_enabled: true`, post-contingency battery response is allowed:
-
-- Base-case flows are limited to full line capacity (not reduced by reserve factor)
-- Post-contingency, batteries can adjust charge/discharge to relieve overloads
-- Generator output is also allowed to change within ramp limits
-
-This produces less conservative results than preventive N-1, reflecting the reality that storage-rich systems can respond to contingencies within the frequency response timeframe.
-
-### Integrated N-1 Assessment
+#### Integrated N-1 Assessment
 
 The `IntegratedN1Analyzer` combines three security dimensions into a unified assessment:
 
@@ -609,52 +513,49 @@ When N-1 security is active, the following data is exported to the HDF5 output f
 | `gen_reserve_duals` | `[hours]` | Dual of generation N-1 reserve constraint (USD/MW) |
 | `trans_reserve_duals/` | Group | Duals of SCOPF transmission constraints per line/outage pair |
 | `binding_contingencies` | String array | Names of binding contingency constraints |
-| `security_cost` | Scalar attr | Incremental cost of N-1 security ($) |
+| `security_cost` | Scalar attr | Cost of N-1 security ($): objective with N-1 minus objective without it, with `compute_security_cost: true`; 0 otherwise |
 
 ### Configuration
+
+`n1_security` is a top-level section of the configuration:
 
 ```yaml
 n1_security:
   enabled: true
+  apply_to_modes: [development, unit_commitment]
   transmission_enabled: true
   transmission_reserve_factor: 0.70
-  critical_threshold: 0.50
   generation_enabled: true
-  reserve_type: largest_unit      # largest_unit, percentage, fixed
-  reserve_percentage: 0.15
-  scopf_enabled: false            # Use iterative SCOPF instead of preventive N-1
-  scopf_max_iterations: 5         # Max SCOPF iterations
-  scopf_violation_tolerance: 0.01 # MW tolerance for violation detection
-  corrective_enabled: false       # Allow corrective post-contingency actions
+  scopf_enabled: false            # true: LODF post-contingency limits instead of preventive N-1
+  corrective_enabled: false       # SCOPF generation N-1 by ramp-limited re-dispatch
+  compute_security_cost: false    # true: re-solve each window without N-1 for n1_security_cost
 ```
+
+### Cost of N-1 security
+
+With `compute_security_cost: true`, every operational window that has N-1 constraints is solved a second time without them (`compute_n1_security_cost!`, `power_system.jl`): the solved model is copied, including the primary-energy block and user constraints, and the copy is re-solved with the N-1 shortfall and overload slacks free of charge, which makes all N-1 constraints inactive (they are soft). The difference
+
+\[
+C^{\text{N-1}} = z^{\text{with N-1}} - z^{\text{without N-1}}
+\]
+
+is the window's `n1_security_cost`: the re-dispatch, commitment and shortfall cost that security adds. In a rolling horizon both objectives are valued over the window's committed steps only, as the window's objective is (each cost term for the hours it belongs to, the overlap tail left to the next window), and the year's value adds those differences. In unit commitment both solves stop at the solver's `gap`, so the difference is exact only up to that gap. The extra solve roughly doubles the solve time; with the option off, `n1_security_cost` is 0.
 
 ### Computational Impact
 
-N-1 constraints can significantly increase problem size:
+Preventive N-1 adds two constraints and one slack per critical line and hour, plus one constraint per hour for generation. SCOPF adds two constraints per ordered pair of lines and hour, which grows quickly with network size. To keep the model small, apply N-1 only to the modes where it is needed (`apply_to_modes`), use the network reduction (`network_reduction`, see [Config Reference](../reference/config-reference.md#networkreductionconfig)) for large networks, and use the post-optimization analysis to study contingencies in detail.
 
-| Metric | Without N-1 | Preventive N-1 (10 lines) | SCOPF (10 lines) |
-|--------|-------------|---------------------------|-------------------|
-| Constraints | ~10,000 | ~110,000 | ~15,000-50,000 |
-| Variables | ~5,000 | ~5,000 (same) | ~5,000 (same) |
-| Solve time | 1× | 5-15× | 2-8× |
-
-To manage computational cost:
-- Use SCOPF instead of preventive N-1 (adds only binding constraints)
-- Increase `critical_threshold` to test fewer contingencies
-- Use `screen_contingencies()` with PI threshold to pre-filter
-- Apply N-1 only in the master problem (representative days) rather than every operational window
-
-Implemented in `add_n1_security_constraints!()` and `add_scopf_constraints!()` in `power_system.jl`. Post-optimization analysis in `contingency.py` and `n1_assessment.py`.
+Implemented in `add_n1_security_constraints!()` and `add_scopf_constraints!()` in `power_system.jl`.
 
 ---
 
 
 ## Example: 3-Bus System
 
-A simple 3-bus example illustrates the DC power flow formulation:
+A small lossless example (`loss_model: none`) illustrates the DC power flow formulation, with \(S_{base} = 100\):
 
 ```
-    Bus 1 (Slack, Gen=200MW)
+    Bus 1 (Slack, Gen=130MW)
      / \
   L1/   \L2
    /     \
@@ -667,11 +568,11 @@ Bus 2     Bus 3
 
 **Network data:**
 
-| Line | From | To | Reactance (pu) | Capacity (MW) |
-|------|------|----|-----------------|---------------|
-| L1 | 1 | 2 | 0.10 | 150 |
-| L2 | 1 | 3 | 0.15 | 100 |
-| L3 | 2 | 3 | 0.20 | 80 |
+| Line | From | To | Reactance (pu) | Susceptance \(S_{base}/x\) (MW/rad) | Capacity (MW) |
+|------|------|----|-----------------|------|---------------|
+| L1 | 1 | 2 | 0.10 | 1000 | 150 |
+| L2 | 1 | 3 | 0.15 | 666.7 | 100 |
+| L3 | 2 | 3 | 0.20 | 500 | 80 |
 
 **Incidence matrix K:**
 
@@ -681,16 +582,19 @@ Bus 2     Bus 3
 | Bus 2 | -1 | 0 | +1 |
 | Bus 3 | 0 | -1 | -1 |
 
-**One independent cycle:** L1 → L3 → L2 (via spanning tree), giving cycle matrix C = [+1, -1, +1]ᵀ
+**Flow-angle coupling (DC-2)**, with \(\theta_1 = 0\):
 
-**KVL constraint:** `0.10·f₁ - 0.15·f₂ + 0.20·f₃ = 0`
+- \(f_1 = 1000\,(\theta_1 - \theta_2)\)
+- \(f_2 = 666.7\,(\theta_1 - \theta_3)\)
+- \(f_3 = 500\,(\theta_2 - \theta_3)\)
 
-**KCL at each bus:**
-- Bus 1: 200 - 0 = f₁ + f₂ → f₁ + f₂ = 200 (generation minus demand)
-- Bus 2: 0 - 100 = -f₁ + f₃ → f₃ - f₁ = -100
-- Bus 3: 50 - 80 = -f₂ - f₃ → f₂ + f₃ = 30 (net demand = 30 MW)
+**KCL at each bus (DC-1):**
 
-**Solution:** f₁ ≈ 96.7 MW, f₂ ≈ 33.3 MW, f₃ ≈ -3.3 MW (reverse flow on L3)
+- Bus 1: 130 = f₁ + f₂
+- Bus 2: −100 = −f₁ + f₃
+- Bus 3: 50 − 80 = −f₂ − f₃
+
+**Solution:** θ₂ = −0.0878 rad, θ₃ = −0.0633 rad, giving f₁ ≈ 87.8 MW, f₂ ≈ 42.2 MW, f₃ ≈ −12.2 MW (L3 flows from bus 3 to bus 2). All flows are within capacity.
 
 
 ---
@@ -701,6 +605,8 @@ Bus 2     Bus 3
 The DC power flow approximation is computationally efficient and well-suited for optimization, but it neglects voltage magnitude variations and reactive power. ESFEX provides an optional post-DC AC power flow verification step that runs a full Newton-Raphson solver on the DC-OPF dispatch solution, validating that the operating point is physically feasible under the full AC power flow equations.
 
 ### Purpose
+
+It runs in unit-commitment dispatch, for systems with `transmission_lines_geo`, when `power_flow_mode: dcopf_ac_verify` or `ac_power_flow.enabled: true`.
 
 The AC verification serves as a validation layer, not a re-optimization:
 
@@ -752,6 +658,8 @@ The `ACContingencyAnalyzer` extends N-1 security analysis to the AC domain:
 - The analyzer is backend-agnostic: it works with both `NativeACBridge` (default) and `PandapowerBridge` through duck typing
 
 ### Configuration
+
+Settings are read from the system's `ac_power_flow` section:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|

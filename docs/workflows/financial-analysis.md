@@ -1,6 +1,6 @@
 # Financial Analysis Wizard
 
-System-level post-optimization financial assessment of energy system investments. Access via **Workflows > Financial Analysis**.
+System-level post-optimization financial assessment of energy system investments. Access via **Workflows > Financial Analysis...**.
 
 The wizard evaluates the economic viability of an optimized generation and storage portfolio over its planning horizon. Starting from the HDF5 results produced by the optimizer, it computes discounted cash flows, investment return metrics, per-technology cost breakdowns, and risk-adjusted project value. The analysis follows standard project finance methodology [**[68]**](../reference/bibliography.md#ref68) and system cost metrics used in energy planning [**[48]**](../reference/bibliography.md#ref48) [**[64]**](../reference/bibliography.md#ref64).
 
@@ -18,7 +18,7 @@ All computations use the `esfex.models.financial_analysis` engine, which can als
 ## Phase A — Economic Overview
 
 
-### Step 1: Load Results & Assumptions
+### Step 1: Load & Configure
 
 Load completed simulation results and configure the financial assumptions that govern the analysis.
 
@@ -82,7 +82,7 @@ Per-technology financial comparison. This step links the physical optimization r
 
 **Metrics table:**
 
-One row per generator and battery (including virtual units from technology investments). Columns:
+One row per generator and battery (including virtual units from technology investments). A virtual unit has no configuration of its own: it is costed with its technology's fuel, maintenance and fixed O&M costs. Every unit's fixed O&M is charged on its MW in service in each year, as recorded in the results file (an existing unit's capacity after retirement, life extension and degradation; a battery's rated power, also for the batteries the master built, whose dispatched power degrades; older files: its configured rated power). Fuel is valued at each year's price: the `fuel_cost` grown by its fuel's `price_growth_rate` from the run's first year, as the dispatch charges it (files written before the growth was recorded: the flat `fuel_cost`). A virtual unit's CAPEX is what the master built from its technology each year × the technology's investment cost, including builds that only replace retired or degraded capacity. Results files written before the technologies' operating costs were recorded have none for these rows; the investment metrics of Step 6 then borrow the costs of an existing unit of the same fuel. Columns:
 
 | Column | Units | Description |
 |--------|-------|-------------|
@@ -189,7 +189,7 @@ Dashboard of key return and bankability metrics displayed as large-format metric
 A supplementary chart plots NPV as a function of discount rate from 0% to 25%. The x-intercept of this curve is the project IRR.
 
 
-### Step 7: Sensitivity & Risk
+### Step 7: Sensitivity & MC
 
 Quantifies how financial outcomes respond to changes in assumptions and assesses the probability distribution of project value under uncertainty.
 
@@ -257,7 +257,7 @@ Distribution of IRR outcomes, showing the probability of achieving the target re
 - The fraction of NPV samples above zero gives the probability that the project is economically viable.
 
 
-### Step 8: Report Export
+### Step 8: Report & Export
 
 Generate a summary report and export all analysis results.
 
@@ -345,7 +345,7 @@ FV^+ = \sum_{\{y : CF_y > 0\}} CF_y \cdot (1 + r_{\text{reinvest}})^{N-y}, \qqua
 The finance rate is the cost of debt and the reinvestment rate is the cost of equity. MIRR avoids the multiple-root and reinvestment-rate assumptions inherent in standard IRR.
 
 
-### Levelized Cost of Energy (LCOE) [**[48]**](../reference/bibliography.md#ref48) [**[64]**](../reference/bibliography.md#ref64)
+### Levelized Cost of Energy (LCOE) [**[48]**](../reference/bibliography.md#ref48) [**[64]**](../reference/bibliography.md#ref64) {#levelized-cost-of-energy-lcoe}
 
 **System LCOE:**
 

@@ -32,11 +32,13 @@ This bundles SALib [**[19]**](../reference/bibliography.md#ref19) (Sensitivity A
 
 ### LP-Level Analysis
 
-Parses an exported LP file (`.lp` format), perturbs objective coefficients and constraint right-hand-sides, and re-solves each perturbation. Runs thousands of evaluations in minutes.
+Parses an exported LP file (`.lp` format), perturbs groups of objective coefficients and constraint right-hand sides, and re-solves each perturbation. A development-mode run with perfect-foresight planning writes its master problem to `<output>/logs/master_problem_debug.lp` when the environment variable `ESFEX_MASTER_DEBUG_LP=1` is set (e.g. `ESFEX_MASTER_DEBUG_LP=1 esfex run -c my_system.yaml`); not with myopic planning, the Benders solver or when MGA/SPORES is enabled. The Studio's sensitivity dialog picks that file up from the run's `logs` folder. The parameters are detected from the LP's variable and constraint names: investment cost per technology (`inv_tech_<t>`), per battery technology (`inv_bat_pow_<b>`, `inv_bat_cap_<b>`), transmission investment (`inv_trans`), the load-shedding and RE-shortfall penalties, and the RE-target and curtailment-limit right-hand sides. Runs thousands of evaluations in minutes.
 
 ### Config-Level Analysis
 
-Creates modified YAML files by applying multipliers to base-case parameters, then runs the full ESFEX optimization for each sample. Captures how parameter changes affect investment decisions, not just operational costs. Each evaluation takes minutes to hours.
+Writes a modified copy of the YAML for each sample by applying multipliers to base-case parameters, then runs `esfex run` on it in a subprocess. Captures how parameter changes affect investment decisions, not just operational costs. Each evaluation is a full run over the default 25-year horizon (the engine does not pass `--years`), so it takes minutes to hours.
+
+The copies are written to the output directory, and relative data paths are resolved against the current directory when they are not found next to the copy. Run the analysis from the directory that holds the base configuration, or use absolute paths for `demand_path` and `Availability`.
 
 ---
 
@@ -44,31 +46,35 @@ Creates modified YAML files by applying multipliers to base-case parameters, the
 
 ### Predefined Config-Level Parameters
 
-| Parameter Key | Display Name | Default Range | Description |
+| Parameter Key | Display Name | Default Range | What it changes |
 |--------------|-------------|---------------|-------------|
-| `invest_cost_renewables` | RE Investment Cost | [0.5, 2.0] | Scales solar/wind investment costs |
-| `invest_cost_storage` | Storage Investment Cost | [0.5, 2.0] | Scales battery investment costs |
-| `invest_cost_conventional` | Conv. Investment Cost | [0.5, 2.0] | Scales diesel/gas investment costs |
-| `invest_cost_transmission` | Transmission Inv. Cost | [0.5, 2.0] | Scales transmission investment costs |
-| `fuel_cost` | Fuel Cost | [0.5, 3.0] | Scales all fuel costs |
-| `maintenance_cost` | Maintenance Cost | [0.5, 2.0] | Scales all maintenance costs |
-| `demand_growth` | Demand Growth | [0.8, 1.5] | Scales demand growth rate |
-| `fuel_price_growth` | Fuel Price Growth | [0.5, 2.0] | Scales fuel price escalation |
-| `carbon_price` | Carbon Price | [0.0, 3.0] | Scales CO2 penalty cost |
+| `invest_cost_renewables` | RE Investment Cost | [0.5, 2.0] | `invest_cost` of solar/wind `technologies` and `generators` |
+| `invest_cost_storage` | Storage Investment Cost | [0.5, 2.0] | `invest_cost_power`/`invest_cost_energy` of `battery_technologies` (and `invest_cost` of `batteries`) |
+| `invest_cost_conventional` | Conv. Investment Cost | [0.5, 2.0] | `invest_cost` of all other `technologies` and `generators` |
+| `fuel_cost` | Fuel Cost | [0.5, 3.0] | The `fuel_cost` field of `generators` and `technologies` |
+| `invest_cost_transmission` | Transmission Inv. Cost | [0.5, 2.0] | Nothing at present |
+| `maintenance_cost` | Maintenance Cost | [0.5, 2.0] | Nothing at present |
+| `demand_growth` | Demand Growth | [0.8, 1.5] | Nothing at present |
+| `fuel_price_growth` | Fuel Price Growth | [0.5, 2.0] | Nothing at present |
+| `carbon_price` | Carbon Price | [0.0, 3.0] | Nothing at present |
 
 Ranges are multipliers on base-case values. [0.5, 2.0] means half to double the base-case value.
 
+Only the first four parameters change the configuration. The last five are listed (by `get_config_parameters()` and in the GUI dialog) but are not applied, so every sample runs with their base values and their Sobol indices come out near zero. Leave them out of config-level studies.
+
+A unit counts as solar/wind when its `type`, `technology`, `fuel` or `name` contains "solar", "wind", "pv" or "photovolt"; everything else (including hydro and biomass) is scaled by `invest_cost_conventional`. `fuel_cost` scales only explicit `fuel_cost` values: a fuel cost the loader derives from the `fuels` block (`price_base`) is not changed.
+
 ### Custom Parameters
 
-You can define custom parameters targeting specific configuration paths:
+You can build your own parameter list, for example with other bounds. For config-level analysis the `key` must be one of the four applied keys above; any other key is accepted but leaves the configuration unchanged:
 
 ```python
 from esfex.sensitivity.engine import SensitivityParameter
 
 custom_params = [
     SensitivityParameter(
-        name="Diesel Fuel Cost",
-        key="fuel_cost_diesel",
+        name="Fuel Cost",
+        key="fuel_cost",
         lower_bound=0.5,
         upper_bound=3.0,
         category="config",
@@ -87,20 +93,6 @@ custom_params = [
         upper_bound=2.0,
         category="config",
     ),
-    SensitivityParameter(
-        name="Demand Growth",
-        key="demand_growth",
-        lower_bound=0.5,
-        upper_bound=2.0,
-        category="config",
-    ),
-    SensitivityParameter(
-        name="Discount Rate",
-        key="discount_rate",
-        lower_bound=0.5,
-        upper_bound=2.0,
-        category="config",
-    ),
 ]
 ```
 
@@ -114,7 +106,7 @@ custom_params = [
    - **Mode**: Choose "LP-level" (fast) or "Config-level" (accurate)
    - **LP File**: For LP-level, browse to the exported `.lp` file from your simulation
    - **Parameters**: Check/uncheck parameters to include. Adjust bounds using the spin boxes.
-   - **Samples (N)**: Set the base sample count (128-1024; higher = more accurate but slower)
+   - **Samples (N)**: Set the base sample count (16-2048, default 64; higher = more accurate but slower)
    - **KPIs**: Select which output metrics to analyze
 4. Click **Run Analysis**. A progress bar shows completion.
 5. Results appear as:
@@ -135,8 +127,8 @@ from esfex.sensitivity.engine import (
     get_lp_parameters,
 )
 
-# Auto-detect parameters from LP file
-lp_path = "results/master_problem.lp"
+# Auto-detect parameters from LP file (written with ESFEX_MASTER_DEBUG_LP=1)
+lp_path = "results/logs/master_problem_debug.lp"
 parameters = get_lp_parameters(lp_path)
 
 print(f"Found {len(parameters)} parameters:")
@@ -183,8 +175,10 @@ from esfex.sensitivity.engine import (
     get_config_parameters,
 )
 
-# Use predefined config-level parameters
-parameters = get_config_parameters()
+# Predefined parameters, keeping only the ones that are applied
+applied = {"invest_cost_renewables", "invest_cost_storage",
+           "invest_cost_conventional", "fuel_cost"}
+parameters = [p for p in get_config_parameters() if p.key in applied]
 
 # Or use custom parameters (see above)
 # parameters = custom_params
@@ -192,16 +186,16 @@ parameters = get_config_parameters()
 engine = SensitivityEngine(
     mode="config",
     parameters=parameters,
-    kpi_names=["total_cost", "inv_gen_total", "inv_bat_total", "curtailment", "load_shedding"],
+    kpi_names=["total_cost", "curtailment", "load_shedding"],
     n_base_samples=64,  # Lower for config-level (each evaluation is expensive)
 )
 
 print(f"Total evaluations: {engine.n_evaluations}")
-# With 9 parameters and N=64: 64 * (2*9 + 2) = 1,280 full simulations
+# With 4 parameters and N=64: 64 * (4 + 2) = 384 full simulations
 
 results = engine.run_config_analysis(
     base_config_path="island_system.yaml",
-    output_dir="results/sensitivity/",
+    output_dir="results/",          # runs go to results/sensitivity/run_0000, ...
     progress_callback=on_progress,
 )
 
@@ -225,33 +219,31 @@ results.to_csv("config_sensitivity_results.csv")
 
 ### Example Output
 
+Illustrative config-level output for the four applied parameters:
+
 ```
 --- total_cost ---
 Parameter                         S1       ST   S1_conf  ST_conf
-Fuel Cost                       0.4523   0.5187   0.0312   0.0298
-RE Investment Cost               0.2156   0.2834   0.0287   0.0265
-Storage Investment Cost          0.1478   0.2012   0.0234   0.0221
-Demand Growth                    0.0987   0.1456   0.0198   0.0187
-Carbon Price                     0.0456   0.0823   0.0156   0.0143
-Maintenance Cost                 0.0234   0.0456   0.0123   0.0112
-Discount Rate                    0.0123   0.0345   0.0098   0.0089
+Fuel Cost                       0.6123   0.6687   0.0312   0.0298
+RE Investment Cost               0.1956   0.2434   0.0287   0.0265
+Storage Investment Cost          0.0978   0.1312   0.0234   0.0221
+Conv. Investment Cost            0.0234   0.0456   0.0123   0.0112
 
---- re_penetration ---
+--- curtailment ---
 Parameter                         S1       ST   S1_conf  ST_conf
-RE Investment Cost               0.3812   0.4523   0.0298   0.0287
-Storage Investment Cost          0.2987   0.3512   0.0276   0.0265
-Fuel Cost                       0.1523   0.1987   0.0234   0.0221
-Carbon Price                     0.0876   0.1234   0.0198   0.0187
-Demand Growth                    0.0534   0.0876   0.0156   0.0143
+Storage Investment Cost          0.4212   0.4923   0.0298   0.0287
+RE Investment Cost               0.3187   0.3712   0.0276   0.0265
+Fuel Cost                       0.0923   0.1387   0.0234   0.0221
+Conv. Investment Cost            0.0176   0.0334   0.0156   0.0143
 ```
 
 ### Reading the Results
 
-- **Total cost** is most sensitive to fuel cost (S1 = 0.45), which directly drives thermal generation expenditure. The ST-S1 gap (0.52 vs 0.45) indicates interaction with other parameters (e.g., higher fuel cost makes RE investment more attractive).
+- **Total cost** is most sensitive to fuel cost (S1 = 0.61), which directly drives thermal generation expenditure. The ST-S1 gap (0.67 vs 0.61) indicates interaction with other parameters (e.g., higher fuel cost makes RE investment more attractive).
 
-- **RE penetration** is most sensitive to RE investment cost (S1 = 0.38) and storage investment cost (S1 = 0.30), together explaining ~68% of variance. The ST > S1 gap reflects solar-storage complementarity.
+- **Curtailment** is most sensitive to storage and RE investment cost, which together explain about 74% of its variance: cheap storage absorbs surplus RE, cheap RE leads to more of it. The ST > S1 gap reflects solar-storage complementarity.
 
-- **Carbon price** has moderate direct effect on RE penetration (S1 = 0.09) but larger total effect (ST = 0.12), indicating interaction with fuel and investment costs.
+- **Conventional investment cost** has little effect when the existing thermal fleet covers demand and few conventional candidates are built.
 
 ### Tornado Diagram
 
@@ -267,30 +259,32 @@ Parameters are sorted by ST (largest at top). A wide gap between blue and orange
 
 ## Available KPIs
 
-| KPI | Description | Units |
-|-----|-------------|-------|
-| `total_cost` | NPV of total system cost (investment + operations) | $ |
-| `inv_gen_total` | Total generation investment across all years | MW |
-| `inv_bat_total` | Total storage investment across all years | MW + MWh |
-| `curtailment` | Total RE curtailment across all years | MWh |
-| `load_shedding` | Total unserved energy (loss of load) across all years | MWh |
+| KPI | LP-level | Config-level | Units |
+|-----|----------|--------------|-------|
+| `total_cost` | Objective of the perturbed master problem (investment + representative-day operation) | Sum of the yearly dispatch costs (`summary_results/total_cost`); investment cost is not included | $ |
+| `inv_gen_total` | Total technology investment, all years | Not available | MW |
+| `inv_bat_total` | Total battery-technology investment, all years | Not available | MW + MWh |
+| `curtailment` | Sum of the master's curtailment variables | Total curtailment over all years | MWh |
+| `load_shedding` | Sum of the master's load-shedding variables | Total unserved energy over all years (`summary_results/loss_of_load`) | MWh |
+
+In config-level mode `inv_gen_total` and `inv_bat_total` are not extracted from the results, so their indices are always zero. A failed run counts as missing for every KPI and is replaced by a large value before the indices are computed, so check the run logs if the indices look odd.
 
 ---
 
 ## Computational Cost
 
-Total model evaluations: N x (2D + 2), where N = `n_base_samples` and D = number of parameters.
+Total model evaluations: N x (D + 2), where N = `n_base_samples` and D = number of parameters (Saltelli sampling without second-order indices).
 
 | Parameters (D) | Samples (N) | Evaluations | LP-Level Time | Config-Level Time |
 |----------------|-------------|-------------|---------------|-------------------|
-| 5 | 128 | 1,536 | ~2 min | ~26 hours |
-| 5 | 256 | 3,072 | ~4 min | ~51 hours |
-| 5 | 1024 | 12,288 | ~15 min | ~205 hours |
-| 9 | 64 | 1,280 | ~2 min | ~21 hours |
-| 9 | 128 | 2,560 | ~3 min | ~43 hours |
-| 9 | 256 | 5,120 | ~6 min | ~85 hours |
+| 4 | 64 | 384 | ~1 min | ~6 hours |
+| 4 | 128 | 768 | ~1.5 min | ~13 hours |
+| 5 | 128 | 896 | ~1.5 min | ~15 hours |
+| 5 | 256 | 1,792 | ~3 min | ~30 hours |
+| 5 | 1024 | 7,168 | ~12 min | ~120 hours |
+| 9 | 256 | 2,816 | ~5 min | ~47 hours |
 
-LP-level times assume ~0.1 seconds per solve. Config-level times assume ~1 minute per full simulation (small system, 5 years).
+LP-level times assume ~0.1 seconds per solve. Config-level times assume ~1 minute per full simulation, which is only realistic for a very small system (each run covers 25 years).
 
 ### Choosing Sample Size
 
@@ -320,40 +314,26 @@ for worker_id in range(4):
 
 ## Common Parameters to Test
 
-### Economic Parameters
+The uncertainties below are common in planning studies. Only some have a built-in parameter; the others have to be varied by editing the configuration and running separately (or, for an LP-level screen, through the matching LP group).
 
-| Parameter | Typical Range | Rationale |
+| Uncertainty | Typical Range | Built-in parameter |
 |-----------|--------------|-----------|
-| Fuel cost (diesel/gas) | [0.5x, 3.0x] | Oil/gas prices are highly volatile |
-| RE investment cost (solar/wind) | [0.4x, 1.5x] | Learning curves drive cost reductions |
-| Battery investment cost | [0.3x, 2.0x] | Battery costs declining rapidly |
-| Discount rate | [0.5x, 2.0x] | Different stakeholders use different rates |
-
-### Demand Parameters
-
-| Parameter | Typical Range | Rationale |
-|-----------|--------------|-----------|
-| Demand growth rate | [0.5x, 2.0x] | Economic growth uncertainty |
-| EV adoption rate | [0.5x, 3.0x] | Electrification uncertainty |
-
-### Policy Parameters
-
-| Parameter | Typical Range | Rationale |
-|-----------|--------------|-----------|
-| Carbon price | [0x, 5.0x] | Policy uncertainty (carbon tax may or may not be implemented) |
-| RE target | [0.8x, 1.2x] | Political ambition varies |
-
-### Resource Parameters
-
-| Parameter | Typical Range | Rationale |
-|-----------|--------------|-----------|
-| RE availability | [0.8x, 1.2x] | Climate variability affects capacity factors |
+| Fuel cost (diesel/gas) | [0.5x, 3.0x] | Config: `fuel_cost` |
+| RE investment cost (solar/wind) | [0.4x, 1.5x] | Config: `invest_cost_renewables`; LP: `inv_tech_<t>` |
+| Battery investment cost | [0.3x, 2.0x] | Config: `invest_cost_storage`; LP: `inv_bat_pow_<b>`, `inv_bat_cap_<b>` |
+| Transmission investment cost | [0.5x, 2.0x] | LP: `inv_trans` |
+| RE target | [0.8x, 1.2x] | LP: `re_target` (RHS) |
+| Discount rate | [0.5x, 2.0x] | None |
+| Demand growth | [0.5x, 2.0x] | None (write the demand years into the demand file) |
+| EV adoption | [0.5x, 3.0x] | None |
+| Carbon price | [0x, 5.0x] | None (`carbon_price` is listed but not applied) |
+| RE availability | [0.8x, 1.2x] | None |
 
 ---
 
 ## Best Practices
 
-1. **Start with LP-level**: Run LP-level analysis first with N=256 to quickly identify the most important parameters. Then use config-level analysis with fewer parameters and lower N to refine.
+1. **Start with LP-level**: Run LP-level analysis first with N=256 to quickly identify the most important parameters. Then use config-level analysis with the applied parameters and a lower N to refine.
 
 2. **Check convergence**: Run the analysis with increasing N (64, 128, 256) and verify that Sobol indices stabilize. If they change significantly between N=128 and N=256, you need more samples.
 

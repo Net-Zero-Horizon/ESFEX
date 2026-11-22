@@ -47,6 +47,7 @@ from esfex.visualization.data.serializer import (
     config_to_stochastic_scenarios,
     gui_state_to_yaml,
     inter_system_links_to_config_dict,
+    rename_system_in_config,
 )
 from esfex.visualization.map_widget import MapWidget
 from esfex.visualization.sld_widget import SldWidget
@@ -85,6 +86,10 @@ from esfex.visualization.ui_scale import scale_qss_fonts
 
 
 logger = logging.getLogger(__name__)
+# The SLD analysis handlers log through ``log``; it was never defined, so
+# every one of their fallbacks (no AC bridge, analyzer build failure, N-k
+# error) raised NameError instead of logging.
+log = logger
 
 _SUPPORTED_GEO_EXTENSIONS = {".geojson", ".json", ".shp", ".kml", ".kmz", ".gpkg"}
 
@@ -99,14 +104,55 @@ class _GeoAssetInfo:
     is_domain: bool = False   # applied as a workflow domain
 
 
+_WGS84_CRS_NAMES = {
+    "urn:ogc:def:crs:ogc:1.3:crs84", "urn:ogc:def:crs:epsg::4326",
+    "epsg:4326", "crs84", "ogc:crs84",
+}
+
+
+def _geojson_needs_reprojection(data: dict) -> bool:
+    """True when a GeoJSON declares a ``crs`` member other than WGS84.
+
+    RFC 7946 GeoJSON is always WGS84 and has no ``crs``; older files
+    (GeoJSON 2008, QGIS exports) may name a projected CRS there.
+    """
+    crs = data.get("crs") if isinstance(data, dict) else None
+    if not isinstance(crs, dict):
+        return False
+    name = str((crs.get("properties") or {}).get("name", "")).strip().lower()
+    return bool(name) and name not in _WGS84_CRS_NAMES
+
+
+def _to_wgs84(gdf):
+    """Reproject a GeoDataFrame to WGS84 (EPSG:4326), the map's coordinates.
+
+    A layer without a CRS is assumed to be WGS84 already (logged).
+    """
+    if gdf.crs is None:
+        logger.warning(
+            "Geo file has no coordinate reference system; assuming WGS84 "
+            "longitude/latitude.")
+        return gdf
+    if gdf.crs.to_epsg() != 4326:
+        logger.info("Reprojecting geo file from %s to WGS84", gdf.crs)
+        return gdf.to_crs(epsg=4326)
+    return gdf
+
+
 def _read_geo_file(path: str) -> tuple[str, dict]:
-    """Read any supported geo file, return (geojson_str, geojson_dict)."""
+    """Read any supported geo file, return (geojson_str, geojson_dict).
+
+    The result is always in WGS84 longitude/latitude (what the map and the
+    model use): files in a projected CRS (e.g. a UTM shapefile) are
+    reprojected.
+    """
     ext = Path(path).suffix.lower()
     if ext in (".geojson", ".json"):
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        return json.dumps(data), data
-    # All other formats require geopandas
+        if not _geojson_needs_reprojection(data):
+            return json.dumps(data), data
+    # All other formats (and GeoJSON in a projected CRS) require geopandas
     import geopandas as gpd  # noqa: F811
     if ext == ".kmz":
         import zipfile
@@ -118,10 +164,20 @@ def _read_geo_file(path: str) -> tuple[str, dict]:
                 gdf = gpd.read_file(kml_file, driver="KML")
     elif ext == ".kml":
         gdf = gpd.read_file(path, driver="KML")
-    else:  # .shp, .gpkg
+    else:  # .shp, .gpkg, projected GeoJSON
         gdf = gpd.read_file(path)
+    gdf = _to_wgs84(gdf)
     geojson_str = gdf.to_json()
     return geojson_str, json.loads(geojson_str)
+
+
+def _validation_counts(n_errors: int, n_warnings: int) -> str:
+    """Translated "N error(s), M warning(s)" summary for validation dialogs."""
+    if n_errors and n_warnings:
+        return tr("messages.n_errors_warnings", errors=n_errors, warnings=n_warnings)
+    if n_errors:
+        return tr("messages.n_errors", n=n_errors)
+    return tr("messages.n_warnings", n=n_warnings)
 
 
 class _BusyOverlay(QWidget):
@@ -142,7 +198,7 @@ class _BusyOverlay(QWidget):
         vbox.setContentsMargins(24, 18, 24, 18)
         vbox.setSpacing(10)
 
-        self._label = QLabel("Processing...")
+        self._label = QLabel(tr("messages.processing"))
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._label.setStyleSheet(scale_qss_fonts("color: #2C3E50; font-size: 13px; background: transparent;"))
         vbox.addWidget(self._label)
@@ -270,18 +326,20 @@ class _ConfigSaveWorker(QThread):
     failed = Signal(str)
 
     def __init__(self, states, base_config, path, links, global_settings,
-                 scenarios, geo_assets, parent=None):
+                 scenarios, geo_assets, parent=None, data_base_dir=None,
+                 last_results_file=None):
         super().__init__(parent)
         self._args = (states, base_config, path, links, global_settings,
-                      scenarios, geo_assets)
+                      scenarios, geo_assets, data_base_dir, last_results_file)
 
     def run(self):
         try:
             from esfex.visualization.data.serializer import gui_state_to_yaml
-            states, base, path, links, gs, scen, geo = self._args
+            states, base, path, links, gs, scen, geo, data_base, results = self._args
             gui_state_to_yaml(
                 states, base, path, inter_system_links=links,
-                global_settings=gs, stochastic_scenarios=scen, geo_assets=geo)
+                global_settings=gs, stochastic_scenarios=scen, geo_assets=geo,
+                data_base_dir=data_base, last_results_file=results)
             self.done.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -369,9 +427,21 @@ class MainWindow(QMainWindow):
         self.model = GuiModel(self)
         self._loaded_config = None  # ESFEXConfig (set externally)
         self._raw_config_dict: dict | None = None  # raw YAML dict for GUI-only keys
-        self._result_config = None  # set on export/save
         self._config_path: Optional[str] = None
+        # Path of the last successful File > Save (read by launch_studio).
+        self._last_saved_path: Optional[str] = None
+        # Directory relative data paths resolve against when the file was
+        # loaded from somewhere other than _config_path (``studio -c in -o out``).
+        self._load_base_dir: Optional[str] = None
+        # True while a config handed to the window (``studio -c``) waits for
+        # the map to become ready before it is populated. Every save path is
+        # blocked meanwhile: the GUI does not hold the project yet, so a save
+        # would overwrite the user's file with an empty placeholder system.
+        self._project_load_pending: bool = False
         self._last_output_dir: str = ""
+        # Absolute path of the results file the project remembers (saved as
+        # the GUI-only ``_last_results`` key); "" when it remembers none.
+        self._project_results_file: str = ""
         self._all_states: dict[str, object] = {}  # system_name -> GuiSystemState
         self._current_system_name: str = ""
         self._suppress_fit_bounds: bool = False
@@ -428,8 +498,8 @@ class MainWindow(QMainWindow):
         self.run_output = RunOutputView()
 
         self._console_tabs = QTabWidget()
-        self._console_tabs.addTab(self.run_output, "Run Output")
-        self._console_tabs.addTab(self.console, "Python REPL")
+        self._console_tabs.addTab(self.run_output, tr("messages.tab_run_output"))
+        self._console_tabs.addTab(self.console, tr("messages.tab_python_repl"))
         bottom_hsplitter.addWidget(self._console_tabs)
 
         # Slightly taller tab bar so the corner Stop button sits
@@ -453,11 +523,8 @@ class MainWindow(QMainWindow):
         self._run_status_label = QLabel("")
         self._run_status_label.setObjectName("runStatusLabel")
         _sb_layout.addWidget(self._run_status_label)
-        self._stop_btn = QPushButton("■  Stop")
-        self._stop_btn.setToolTip(
-            "Cancel the running simulation (SIGINT, same as Ctrl+C). "
-            "Press again to force-kill."
-        )
+        self._stop_btn = QPushButton(tr("messages.stop_run"))
+        self._stop_btn.setToolTip(tr("messages.stop_run_tip"))
         # Compact size that fits within the (now 30px) tab bar.
         self._stop_btn.setFixedHeight(24)
         self._stop_btn.setStyleSheet(
@@ -697,6 +764,9 @@ class MainWindow(QMainWindow):
 
         self._user_prefs = load_preferences()
         apply_shortcuts(self._action_registry, get_shortcuts(self._user_prefs))
+        # Editor preferences apply from startup, not only after the
+        # Preferences dialog is closed.
+        self.script_editor.apply_preferences(self._user_prefs.get("editor", {}))
 
         # Auto-save timer (controlled by preferences)
         self._auto_save_timer = QTimer(self)
@@ -897,21 +967,21 @@ class MainWindow(QMainWindow):
         h.addWidget(self._sld_btn_analysis)
 
         # Load results button
-        self._sld_btn_load = QPushButton("Load Results")
+        self._sld_btn_load = QPushButton(tr("messages.sld_load_results"))
         self._sld_btn_load.clicked.connect(self._on_sld_load_results)
         h.addWidget(self._sld_btn_load)
 
         h.addWidget(QLabel("|"))
 
         # Year combo
-        h.addWidget(QLabel("Year:"))
+        h.addWidget(QLabel(tr("messages.sld_year")))
         self._sld_year_combo = QComboBox()
         self._sld_year_combo.setEnabled(False)
         self._sld_year_combo.currentIndexChanged.connect(self._on_sld_year_changed)
         h.addWidget(self._sld_year_combo)
 
         # Hour slider + spinbox
-        h.addWidget(QLabel("Hour:"))
+        h.addWidget(QLabel(tr("messages.sld_hour")))
         self._sld_hour_slider = QSlider(Qt.Orientation.Horizontal)
         self._sld_hour_slider.setMinimum(0)
         self._sld_hour_slider.setMaximum(0)
@@ -951,9 +1021,9 @@ class MainWindow(QMainWindow):
         h.addWidget(QLabel("|"))
 
         # Contingency combo (Level 2)
-        h.addWidget(QLabel("Contingency:"))
+        h.addWidget(QLabel(tr("messages.sld_contingency")))
         self._sld_contingency_combo = QComboBox()
-        self._sld_contingency_combo.addItem("None", None)
+        self._sld_contingency_combo.addItem(tr("messages.sld_no_contingency"), None)
         self._sld_contingency_combo.setEnabled(False)
         self._sld_contingency_combo.setMinimumWidth(180)
         self._sld_contingency_combo.currentIndexChanged.connect(
@@ -964,13 +1034,13 @@ class MainWindow(QMainWindow):
         h.addStretch()
 
         # Export SVG
-        self._sld_btn_export = QPushButton("Export SVG")
+        self._sld_btn_export = QPushButton(tr("messages.sld_export_svg"))
         self._sld_btn_export.setEnabled(False)
         self._sld_btn_export.clicked.connect(self._on_sld_export_svg)
         h.addWidget(self._sld_btn_export)
 
         # Clear overlay
-        self._sld_btn_clear = QPushButton("Clear")
+        self._sld_btn_clear = QPushButton(tr("messages.sld_clear"))
         self._sld_btn_clear.setEnabled(False)
         self._sld_btn_clear.clicked.connect(self._on_sld_clear_overlay)
         h.addWidget(self._sld_btn_clear)
@@ -988,22 +1058,30 @@ class MainWindow(QMainWindow):
 
         return bar
 
+    def _current_system_config(self):
+        """The loaded :class:`SystemConfig` of the system being edited, or None."""
+        cfg = self._loaded_config
+        systems = getattr(cfg, "systems", None) or {}
+        return systems.get(self._current_system_name)
+
     def _on_sld_load_results(self):
         """Open HDF5 file picker and load results for SLD overlay."""
         from PySide6.QtWidgets import QFileDialog
         from esfex.visualization.sld.sld_results_loader import SldResultsLoader
 
         path, _ = QFileDialog.getOpenFileName(
-            self, "Load Simulation Results", str(Path.home()),
-            "HDF5 Files (*.h5 *.hdf5);;All Files (*)",
+            self, tr("messages.sld_load_results_title"), str(Path.home()),
+            tr("messages.filter_hdf5"),
         )
         if not path:
             return
 
         try:
-            loader = SldResultsLoader(path, self.model.state)
+            loader = SldResultsLoader(path, self.model.state,
+                                      system_config=self._current_system_config())
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to load results:\n{e}")
+            QMessageBox.warning(
+                self, tr("common.error"), tr("messages.load_results_failed", e=e))
             return
 
         self._sld_results_loader = loader
@@ -1020,13 +1098,22 @@ class MainWindow(QMainWindow):
         self._sld_hour_slider.setMaximum(max_h)
         self._sld_hour_spin.setMaximum(max_h)
 
+        self._enable_sld_results_controls()
+
+    def _enable_sld_results_controls(self):
+        """Put the SLD back in results mode for the loaded HDF5 file.
+
+        Builds the results contingency analyzer, enables the time controls
+        and redraws the overlay. Used after loading results and when the
+        Analysis mode (which disables those controls) is switched off.
+        """
+        loader = getattr(self, "_sld_results_loader", None)
+        if loader is None:
+            return
         # Build contingency analyzer (Level 2)
         self._sld_contingency_analyzer = None
         try:
-            from esfex.analysis.contingency import (
-                ContingencyAnalyzer,
-                build_contingency_from_state,
-            )
+            from esfex.analysis.contingency import build_contingency_from_state
             self._sld_contingency_analyzer = build_contingency_from_state(
                 self.model.state,
                 loader.num_nodes,
@@ -1101,8 +1188,8 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QFileDialog
 
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export SLD as SVG", str(Path.home() / "sld_export.svg"),
-            "SVG Files (*.svg);;All Files (*)",
+            self, tr("messages.sld_export_svg_title"), str(Path.home() / "sld_export.svg"),
+            tr("messages.filter_svg"),
         )
         if not path:
             return
@@ -1119,9 +1206,10 @@ class MainWindow(QMainWindow):
         if path and svg_markup:
             try:
                 Path(path).write_text(svg_markup, encoding="utf-8")
-                self.statusBar().showMessage(f"SVG exported to {path}", 5000)
+                self.statusBar().showMessage(
+                    tr("messages.svg_exported", path=path), 5000)
             except Exception as e:
-                QMessageBox.warning(self, "Export Error", str(e))
+                QMessageBox.warning(self, tr("messages.export_error_title"), str(e))
 
     def _on_sld_clear_overlay(self):
         """Remove operational overlay from SLD."""
@@ -1148,7 +1236,7 @@ class MainWindow(QMainWindow):
         self._sld_btn_clear.setEnabled(False)
         self._sld_contingency_combo.blockSignals(True)
         self._sld_contingency_combo.clear()
-        self._sld_contingency_combo.addItem("None", None)
+        self._sld_contingency_combo.addItem(tr("messages.sld_no_contingency"), None)
         self._sld_contingency_combo.setEnabled(False)
         self._sld_contingency_combo.blockSignals(False)
         if self._sld_play_timer.isActive():
@@ -1180,6 +1268,11 @@ class MainWindow(QMainWindow):
 
             # Populate the analysis panel from current editor state
             self._analysis_panel.populate()
+            g = self.model.global_settings
+            self._analysis_panel.set_nk_defaults(
+                g.n1_contingency_depth, g.n1_redistribution_mode,
+                g.n1_pi_screening_threshold,
+            )
 
             # Build analyzers from editor state
             self._analysis_freq_analyzer = None
@@ -1189,19 +1282,13 @@ class MainWindow(QMainWindow):
             try:
                 from esfex.analysis.frequency import (
                     FrequencyAnalyzer,
+                    analyzer_settings,
                     build_gen_freq_params_from_state,
                 )
                 params = build_gen_freq_params_from_state(self.model.state)
-                # Read nominal frequency from the system's buses
-                f_nom = 50.0
-                for bus in self.model.state.buses.values():
-                    if bus.frequency_hz and bus.frequency_hz > 0:
-                        f_nom = bus.frequency_hz
-                        break
-                # Adapt nadir limit to the system frequency
-                nadir_limit = f_nom - 1.0  # 1 Hz below nominal
                 self._analysis_freq_analyzer = FrequencyAnalyzer(
-                    params, f_nom=f_nom, nadir_limit=nadir_limit,
+                    params, **analyzer_settings(self._current_system_config(),
+                                                self.model.state),
                 )
             except Exception:
                 log.debug("Could not build frequency analyzer from state", exc_info=True)
@@ -1293,11 +1380,16 @@ class MainWindow(QMainWindow):
             self.sld_widget.clear_contingency_data()
             self._sld_contingency_combo.blockSignals(True)
             self._sld_contingency_combo.clear()
-            self._sld_contingency_combo.addItem("None", None)
+            self._sld_contingency_combo.addItem(tr("messages.sld_no_contingency"), None)
             self._sld_contingency_combo.setEnabled(False)
             self._sld_contingency_combo.blockSignals(False)
             self._sld_btn_export.setEnabled(False)
             self._sld_btn_clear.setEnabled(False)
+            self._sld_contingency_analyzer = None
+
+            # Results loaded before Analysis was switched on: give the time
+            # controls (disabled in analysis mode) and the overlay back.
+            self._enable_sld_results_controls()
 
             # Restore properties panel
             self._restore_properties_panel()
@@ -1494,26 +1586,65 @@ class MainWindow(QMainWindow):
         snapshot = loader.get_timestep(year, hour)
         self._populate_contingency_combo_from_snapshot(snapshot)
 
+    @staticmethod
+    def _contingency_ratings(analyzer) -> dict:
+        """Line (MW) and transformer (MVA) ratings by element id, for the
+        translated contingency texts. The AC analyzer keeps the branches
+        on its DC fallback."""
+        if not hasattr(analyzer, "lines"):
+            analyzer = getattr(analyzer, "_dc_fallback", None)
+        ratings = {str(ln.line_id): ln.capacity_mw
+                   for ln in getattr(analyzer, "lines", [])}
+        ratings.update({str(t.name): t.rated_power_mva
+                        for t in getattr(analyzer, "transformers", [])})
+        return ratings
+
+    def _retranslate_sld_contingency(self):
+        """Relabel the contingency combo and redo the selected contingency,
+        whose badge text is built here in the language of the time."""
+        combo = getattr(self, "_sld_contingency_combo", None)
+        if combo is None or combo.count() == 0:
+            return
+        from esfex.visualization.sld.graph_builder import contingency_option_label
+
+        analyzer = getattr(self, "_sld_contingency_analyzer", None)
+        ratings = self._contingency_ratings(analyzer) if analyzer is not None else {}
+        combo.blockSignals(True)
+        try:
+            for i in range(combo.count()):
+                ctg = combo.itemData(i)
+                combo.setItemText(i, tr("messages.sld_no_contingency") if ctg is None
+                                  else contingency_option_label(ctg, ratings))
+        finally:
+            combo.blockSignals(False)
+        if combo.currentData() is not None:
+            try:
+                self._on_sld_contingency_changed(combo.currentIndex())
+            except Exception:
+                log.debug("Contingency re-run after a language change failed",
+                          exc_info=True)
+
     def _populate_contingency_combo_from_snapshot(self, snapshot: dict):
         """Populate the contingency combo from a snapshot dict."""
         analyzer = getattr(self, "_sld_contingency_analyzer", None)
         if analyzer is None:
             return
+        from esfex.visualization.sld.graph_builder import contingency_option_label
+
         contingencies = analyzer.get_contingency_list(snapshot)
+        ratings = self._contingency_ratings(analyzer)
 
         # Preserve current selection if possible
         current_text = self._sld_contingency_combo.currentText()
 
         self._sld_contingency_combo.blockSignals(True)
         self._sld_contingency_combo.clear()
-        self._sld_contingency_combo.addItem("None", None)
+        self._sld_contingency_combo.addItem(tr("messages.sld_no_contingency"), None)
         restore_idx = 0
         for i, ctg in enumerate(contingencies):
-            self._sld_contingency_combo.addItem(
-                ctg["description"],
-                ctg,
-            )
-            if ctg["description"] == current_text:
+            label = contingency_option_label(ctg, ratings)
+            self._sld_contingency_combo.addItem(label, ctg)
+            if label == current_text:
                 restore_idx = i + 1
         self._sld_contingency_combo.setCurrentIndex(restore_idx)
         self._sld_contingency_combo.blockSignals(False)
@@ -1553,8 +1684,11 @@ class MainWindow(QMainWindow):
         if analyzer is None:
             return
 
+        from esfex.visualization.sld.graph_builder import contingency_description
+
         ctg_type = ctg_data["type"]
         eid = ctg_data["element_id"]
+        ratings = self._contingency_ratings(analyzer)
 
         # Use integrated N-1 analyzer if available (adds frequency + voltage)
         integrated = getattr(self, "_integrated_n1", None)
@@ -1573,6 +1707,8 @@ class MainWindow(QMainWindow):
                     result_dict["has_frequency_violation"] = assessment.has_frequency_violation
                 if assessment.voltage_violations:
                     result_dict["voltage_violations"] = assessment.voltage_violations
+                result_dict["element_description"] = contingency_description(
+                    result_dict, snapshot, ctg_type, ratings)
                 self.sld_widget.update_contingency_data(json.dumps(result_dict))
                 return
             except Exception:
@@ -1588,76 +1724,80 @@ class MainWindow(QMainWindow):
 
         import dataclasses
         result_dict = dataclasses.asdict(result)
+        result_dict["element_description"] = contingency_description(
+            result_dict, snapshot, ctg_type, ratings)
         self.sld_widget.update_contingency_data(json.dumps(result_dict))
+
+    def _nk_contingency_types(self) -> set[str]:
+        """Element types the N-k runs trip (Global Settings > N-1 Security)."""
+        g = self.model.global_settings
+        types = {"generator", "line"}
+        if g.n1_transformer_contingencies:
+            types.add("transformer")
+        if g.n1_battery_contingencies:
+            types.add("battery")
+        return types
 
     def _on_run_all_n1(self, depth: str, redispatch: str, pi_threshold: float):
         """Run full N-1 or N-1-1 analysis on the current scenario snapshot."""
         analyzer = getattr(self, "_sld_contingency_analyzer", None)
         if analyzer is None:
-            self._analysis_panel.update_nk_summary("No contingency analyzer available.")
+            self._analysis_panel.update_nk_summary(tr("messages.nk_no_analyzer"))
             return
 
+        from esfex.analysis.contingency import run_all_contingencies
         from esfex.analysis.snapshot_builder import build_snapshot_from_scenario
         scenario = self._analysis_panel.get_scenario()
         snapshot = build_snapshot_from_scenario(self.model.state, scenario)
 
         try:
-            if depth == "n1_1" and hasattr(analyzer, "analyze_n1_1"):
-                results = analyzer.analyze_n1_1(
-                    snapshot, redistribution=redispatch
-                )
-                n_ctg = len(results) if results else 0
-                n_violations = sum(
-                    1 for r in (results or []) if not r.is_secure
-                )
-                self._analysis_panel.update_nk_summary(
-                    f"N-1-1: {n_ctg} pairs analyzed, {n_violations} violations"
-                )
+            results = run_all_contingencies(
+                analyzer, snapshot, depth=depth, redistribution=redispatch,
+                types=self._nk_contingency_types(),
+                min_line_loading=self.model.global_settings.n1_critical_line_threshold,
+            )
+            n_violations = sum(1 for r in results if not r.is_secure)
+            if depth == "n1_1":
+                text = tr("messages.nk_summary_n11",
+                          pairs=len(results), violations=n_violations)
             else:
-                results = analyzer.analyze_all_contingencies(
-                    snapshot, redistribution=redispatch
-                )
-                n_ctg = len(results) if results else 0
-                n_violations = sum(
-                    1 for r in (results or []) if not r.is_secure
-                )
-                self._analysis_panel.update_nk_summary(
-                    f"N-1: {n_ctg} contingencies, {n_violations} violations"
-                )
+                text = tr("messages.nk_summary_n1",
+                          count=len(results), violations=n_violations)
+            self._analysis_panel.update_nk_summary(text)
         except Exception as exc:
             log.warning("N-1 analysis failed: %s", exc, exc_info=True)
-            self._analysis_panel.update_nk_summary(f"Error: {exc}")
+            self._analysis_panel.update_nk_summary(tr("messages.nk_error", e=exc))
 
     def _on_run_screening(self, redispatch: str, pi_threshold: float):
         """Run PI-based contingency screening on the current scenario."""
         analyzer = getattr(self, "_sld_contingency_analyzer", None)
         if analyzer is None:
-            self._analysis_panel.update_nk_summary("No contingency analyzer available.")
+            self._analysis_panel.update_nk_summary(tr("messages.nk_no_analyzer"))
             return
 
+        from esfex.analysis.contingency import screen_all_contingencies
         from esfex.analysis.snapshot_builder import build_snapshot_from_scenario
         scenario = self._analysis_panel.get_scenario()
         snapshot = build_snapshot_from_scenario(self.model.state, scenario)
 
         try:
-            if hasattr(analyzer, "screen_contingencies"):
-                ranked = analyzer.screen_contingencies(
-                    snapshot, pi_threshold=pi_threshold
-                )
-                n_total = len(ranked) if ranked else 0
-                n_critical = sum(
-                    1 for r in (ranked or []) if r.pi > pi_threshold
-                ) if pi_threshold > 0 else n_total
-                self._analysis_panel.update_nk_summary(
-                    f"Screening: {n_critical}/{n_total} critical contingencies"
-                )
+            ranked, n_total = screen_all_contingencies(
+                analyzer, snapshot, pi_threshold=pi_threshold,
+                redistribution=redispatch, types=self._nk_contingency_types(),
+                min_line_loading=self.model.global_settings.n1_critical_line_threshold,
+            )
+            if ranked:
+                summary = tr("messages.nk_screening_worst",
+                             critical=len(ranked), total=n_total,
+                             element=ranked[0]["element_id"],
+                             pi=f"{ranked[0]['pi']:.2f}")
             else:
-                self._analysis_panel.update_nk_summary(
-                    "Screening not available (no PTDF/LODF support)"
-                )
+                summary = tr("messages.nk_screening",
+                             critical=len(ranked), total=n_total)
+            self._analysis_panel.update_nk_summary(summary)
         except Exception as exc:
             log.warning("Screening failed: %s", exc, exc_info=True)
-            self._analysis_panel.update_nk_summary(f"Error: {exc}")
+            self._analysis_panel.update_nk_summary(tr("messages.nk_error", e=exc))
 
     def _apply_sld_ops_bar_theme(self, bar: QWidget | None = None):
         """Apply current theme colors to the SLD operational toolbar."""
@@ -1810,7 +1950,7 @@ class MainWindow(QMainWindow):
 
         # Recent Files submenu — populated dynamically each time it's
         # shown so deleted files disappear without needing app restart.
-        self._recent_menu = file_menu.addMenu("Open Recent")
+        self._recent_menu = file_menu.addMenu(tr("menu.open_recent"))
         self._recent_menu.aboutToShow.connect(self._populate_recent_menu)
 
         file_menu.addSeparator()
@@ -1977,6 +2117,7 @@ class MainWindow(QMainWindow):
         # SLD ops bar
         if hasattr(self, '_sld_btn_analysis'):
             self._sld_btn_analysis.setText(tr("analysis_panel.analysis_btn"))
+        self._retranslate_sld_contingency()
 
         # Delegate to child panels
         self.toolbar.retranslateUi()
@@ -2286,23 +2427,43 @@ class MainWindow(QMainWindow):
         return element_id
 
     def _on_system_renamed(self, old_name: str, new_name: str):
-        """Handle system name change from the system settings form."""
+        """Handle system name change from the system settings form.
+
+        The name is a key in several places: ``_all_states``, the element
+        tree, inter-system links, ``systems_to_simulate`` and the loaded
+        base config (``systems`` and ``meta_network``). All of them follow
+        the rename, so the system keeps its links and stays in Validate/Run.
+        """
+        state = self._all_states.get(old_name)
         if new_name in self._all_states and new_name != old_name:
             QMessageBox.warning(
                 self, tr("messages.duplicate_name_title"),
                 tr("messages.duplicate_name", name=new_name),
             )
-            # Revert
-            self._model.state.name = old_name
+            # Revert the name the form already wrote into the state.
+            if state is not None:
+                state.name = old_name
+            self.model.state.name = old_name
+            form = getattr(self, "_system_form", None)
+            if form is not None:
+                form.load_element()
             return
-        # Update _all_states dict
-        state = self._all_states.pop(old_name, None)
-        if state is not None:
-            self._all_states[new_name] = state
+        # Rebuild _all_states in place of the old key (order matters: the
+        # first system is the primary one for new projects).
+        self._all_states = {
+            (new_name if name == old_name else name): st
+            for name, st in self._all_states.items()
+        }
         if self._current_system_name == old_name:
             self._current_system_name = new_name
+        self.model.rename_system_references(old_name, new_name)
+        rename_system_in_config(self._loaded_config, old_name, new_name)
         # Update element tree
         self.element_tree.rename_system(old_name, new_name)
+        self._sync_systems_to_form()
+        self._invalidate_validation()
+        # Map ids of the other systems carry a "<system>/" prefix; re-render.
+        self.model.stateLoaded.emit()
 
     def _update_map_actions_state(self):
         """Enable/disable map-element toolbar actions based on system count."""
@@ -2442,12 +2603,12 @@ class MainWindow(QMainWindow):
         if len(self._all_states) <= 1:
             QMessageBox.warning(
                 self, tr("common.warning"),
-                "Cannot delete the last remaining system.",
+                tr("messages.delete_last_system"),
             )
             return
         reply = QMessageBox.question(
             self, tr("tree_ctx.delete_system"),
-            f"Are you sure you want to delete system '{system_name}'?",
+            tr("messages.delete_system_confirm", name=system_name),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
@@ -2831,7 +2992,7 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             tr("menu.new_scenario"),
-            "Discard current work and create a new empty scenario?",
+            tr("messages.new_scenario_confirm"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -2851,7 +3012,14 @@ class MainWindow(QMainWindow):
         self._loaded_config = None
         self._raw_config_dict = None
         self._config_path = None
+        self._load_base_dir = None
         self._last_output_dir = ""
+        self._last_results_file = ""
+        self._project_results_file = ""
+        self._invalidate_results_dialog_cache()
+        self._close_results_offer()
+        self.toolbar.set_results_enabled(False)
+        self.toolbar.set_sensitivity_enabled(False)
         self._validated_ok = False
         self.toolbar.set_run_enabled(False)
 
@@ -2888,7 +3056,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QFileDialog
 
         path, _ = QFileDialog.getOpenFileName(
-            self, tr("menu.import_config"), "", "YAML Files (*.yaml *.yml)"
+            self, tr("menu.import_config"), "", tr("messages.filter_yaml")
         )
         if path:
             self._load_config_file(path)
@@ -2898,7 +3066,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QFileDialog, QInputDialog
 
         path, _ = QFileDialog.getOpenFileName(
-            self, tr("menu.import_system"), "", "YAML Files (*.yaml *.yml)",
+            self, tr("menu.import_system"), "", tr("messages.filter_yaml"),
         )
         if not path:
             return
@@ -2922,20 +3090,21 @@ class MainWindow(QMainWindow):
             # if it's not the file they meant to import.
             conflicts = [s for s in new_states if s in self._all_states]
             non_conflicts = [s for s in new_states if s not in self._all_states]
-            preview_lines = [f"Import {len(new_states)} system(s) from:\n  {path}\n"]
+            preview_lines = [tr("messages.import_preview_header",
+                                count=len(new_states), path=path) + "\n"]
             if non_conflicts:
-                preview_lines.append("Will be added directly:")
+                preview_lines.append(tr("messages.import_preview_added"))
                 for s in non_conflicts:
                     preview_lines.append(f"  • {s}")
                 preview_lines.append("")
             if conflicts:
-                preview_lines.append("Name conflicts — will prompt for a new name for each:")
+                preview_lines.append(tr("messages.import_preview_conflicts"))
                 for s in conflicts:
                     preview_lines.append(f"  • {s}")
                 preview_lines.append("")
-            preview_lines.append("Proceed?")
+            preview_lines.append(tr("messages.import_preview_proceed"))
             ret = QMessageBox.question(
-                self, "Import preview",
+                self, tr("messages.import_preview_title"),
                 "\n".join(preview_lines),
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
             )
@@ -2979,23 +3148,7 @@ class MainWindow(QMainWindow):
                 for lk in config_to_inter_system_links(config):
                     # Only add links whose both systems exist in the studio
                     if lk.from_system in self._all_states and lk.to_system in self._all_states:
-                        self.model.add_inter_system_link(
-                            link_id=lk.link_id,
-                            link_type=lk.link_type,
-                            from_system=lk.from_system,
-                            to_system=lk.to_system,
-                            from_node=lk.from_node,
-                            to_node=lk.to_node,
-                            capacity_mw=lk.capacity_mw,
-                            investment_cost=lk.investment_cost,
-                            max_investment_mw=lk.max_investment_mw,
-                            loss_factor=lk.loss_factor,
-                            distance_km=lk.distance_km,
-                            cost_per_mw_km=lk.cost_per_mw_km,
-                            waypoints=lk.waypoints,
-                            from_endpoint=lk.from_endpoint,
-                            to_endpoint=lk.to_endpoint,
-                        )
+                        self.model.restore_inter_system_link(lk, keep_id=False)
 
                 QMessageBox.information(
                     self, tr("common.info"),
@@ -3007,7 +3160,7 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
             QMessageBox.critical(
                 self, tr("common.error"),
-                f"Failed to import systems:\n{e}",
+                tr("messages.import_systems_failed", e=e),
             )
 
     def _on_import_geo_asset(self):
@@ -3017,9 +3170,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self, tr("menu.import_geo"),
             "",
-            "Geo Files (*.geojson *.json *.shp *.kml *.kmz *.gpkg);;"
-            "GeoJSON (*.geojson *.json);;Shapefile (*.shp);;"
-            "KML/KMZ (*.kml *.kmz);;GeoPackage (*.gpkg)",
+            tr("messages.filter_geo"),
         )
         if not path:
             return
@@ -3037,8 +3188,7 @@ class MainWindow(QMainWindow):
                 except ImportError:
                     QMessageBox.warning(
                         self, tr("messages.missing_dep_title"),
-                        f"'{ext}' support requires geopandas.\n"
-                        "Install with: pip install geopandas",
+                        tr("messages.geopandas_required", ext=ext),
                     )
                     return
 
@@ -3068,15 +3218,82 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
             QMessageBox.critical(
                 self, tr("common.error"),
-                f"Failed to import geo asset:\n{e}",
+                tr("messages.import_geo_failed", e=e),
             )
 
     def _on_save(self):
         """Save to the current config path (Ctrl+S)."""
+        if self._save_blocked_by_pending_load():
+            return
         if self._config_path:
             self._save_config_file(self._config_path)
         else:
             self._on_export()
+
+    def _set_project_load_pending(self, pending: bool) -> None:
+        """Block (``True``) or re-enable every save while a config handed to
+        the window waits for the map before it is populated."""
+        self._project_load_pending = pending
+        for act in (self._act_save, self._act_export, self._act_export_project):
+            act.setEnabled(not pending)
+
+    def _save_blocked_by_pending_load(self) -> bool:
+        """``True`` (with a status-bar note) while the project is not loaded."""
+        if not self._project_load_pending:
+            return False
+        self.statusBar().showMessage(tr("messages.save_blocked_loading"), 5000)
+        return True
+
+    def _data_base_dir(self) -> Optional[str]:
+        """Directory the relative data paths of the in-memory project resolve
+        against: the folder the config was loaded from (``_load_base_dir``),
+        else the folder of the current config path. It does not follow a Save
+        As to another folder: the in-memory paths keep their original base and
+        the serializer rebases them for each target file."""
+        if self._load_base_dir:
+            return self._load_base_dir
+        if self._config_path:
+            return str(Path(self._config_path).parent)
+        return None
+
+    def _project_is_empty(self) -> bool:
+        """``True`` when the GUI holds nothing a user built: no system, or
+        only systems with at most one node and no generators, storage, lines
+        or technologies (the placeholder ``_ensure_system_exists`` creates)."""
+        states = [st for st in self._all_states.values() if st is not None]
+        if self._current_system_name not in self._all_states:
+            states.append(self.model.state)
+        return not any(
+            len(st.nodes) > 1 or st.generators or st.batteries
+            or st.transmission_lines or st.technologies
+            for st in states
+        )
+
+    @staticmethod
+    def _file_has_systems(path: str) -> bool:
+        """``True`` if ``path`` is a YAML config defining at least one system
+        with content (generators, storage, technologies or several nodes)."""
+        import yaml as _yaml
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = _yaml.safe_load(fh)
+        except (OSError, _yaml.YAMLError):
+            return False
+        systems = data.get("systems") if isinstance(data, dict) else None
+        if not isinstance(systems, dict):
+            return False
+        for sys_dict in systems.values():
+            if isinstance(sys_dict, str):
+                return True   # external system file reference
+            if not isinstance(sys_dict, dict):
+                continue
+            if any(sys_dict.get(k) for k in ("generators", "batteries",
+                                                "technologies")):
+                return True
+            nodes = sys_dict.get("nodes")
+            if isinstance(nodes, dict) and (nodes.get("num_nodes") or 0) > 1:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Unsaved-changes tracking, autosave, close prompt
@@ -3106,15 +3323,16 @@ class MainWindow(QMainWindow):
         """Periodic autosave handler. Writes silently — no dialogs.
 
         Behaviour:
-        * No unsaved changes → no-op.
-        * Has _config_path → write to that path, clear modified flag.
-        * No _config_path → write to ~/.cache/esfex/autosave.yaml
-          (recoverable on next launch).
+        * No unsaved changes, or the project is still loading → no-op.
+        * Otherwise write to ~/.cache/esfex/autosave.yaml (recoverable on
+          next launch). Autosave never writes the user's own file (not even
+          one opened with File > Open or ``studio -c`` / ``-o``) and does
+          not clear the unsaved-changes flag: only File > Save does.
         Does NOT call _save_config_file because the latter runs
         pre-save validation that can show a blocking dialog — autosave
         must never block the user.
         """
-        if not self._modified:
+        if not self._modified or self._project_load_pending:
             return
         self._ensure_system_exists()
         if self._current_system_name:
@@ -3122,14 +3340,9 @@ class MainWindow(QMainWindow):
         if self._loaded_config is None:
             self._loaded_config = self._create_default_config()
 
-        if self._config_path:
-            target = Path(self._config_path)
-            is_cache = False
-        else:
-            cache_dir = Path.home() / ".cache" / "esfex"
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            target = cache_dir / "autosave.yaml"
-            is_cache = True
+        cache_dir = Path.home() / ".cache" / "esfex"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        target = cache_dir / "autosave.yaml"
 
         try:
             gui_state_to_yaml(
@@ -3138,17 +3351,17 @@ class MainWindow(QMainWindow):
                 global_settings=self.model.global_settings,
                 stochastic_scenarios=self.model.stochastic_scenarios,
                 geo_assets=self._geo_assets,
+                data_base_dir=self._data_base_dir(),
+                last_results_file=self._project_results_file or None,
             )
-            if not is_cache:
-                # Wrote to the canonical config path — clean state.
-                self._clear_modified()
-            self.statusBar().showMessage(f"Autosaved to {target}", 3000)
+            self.statusBar().showMessage(
+                tr("messages.autosaved_to", path=target), 3000)
         except Exception:
             import logging
             logging.getLogger(__name__).exception(
                 "Autosave failed; data still in memory",
             )
-            self.statusBar().showMessage("Autosave failed (see log)", 5000)
+            self.statusBar().showMessage(tr("messages.autosave_failed"), 5000)
 
     def _populate_recent_menu(self):
         """Rebuild the File→Open Recent submenu just before it's shown."""
@@ -3156,7 +3369,7 @@ class MainWindow(QMainWindow):
         self._recent_menu.clear()
         recents = get_recent_files()  # already filters non-existent
         if not recents:
-            placeholder = QAction("(no recent files)", self)
+            placeholder = QAction(tr("menu.recent_none"), self)
             placeholder.setEnabled(False)
             self._recent_menu.addAction(placeholder)
             return
@@ -3170,7 +3383,7 @@ class MainWindow(QMainWindow):
             )
             self._recent_menu.addAction(act)
         self._recent_menu.addSeparator()
-        clear_act = QAction("Clear list", self)
+        clear_act = QAction(tr("menu.recent_clear"), self)
         clear_act.triggered.connect(self._clear_recent_files)
         self._recent_menu.addAction(clear_act)
 
@@ -3178,8 +3391,8 @@ class MainWindow(QMainWindow):
         """Load a config from the Recent Files menu (with unsaved check)."""
         if self._modified:
             ret = QMessageBox.question(
-                self, "Unsaved changes",
-                "Open another config? Unsaved changes will be lost.",
+                self, tr("messages.unsaved_title"),
+                tr("messages.unsaved_open_other"),
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
             )
             if ret != QMessageBox.Yes:
@@ -3200,10 +3413,12 @@ class MainWindow(QMainWindow):
         in-flight optimization before closing the window."""
         from PySide6.QtWidgets import QMessageBox
 
-        if self._modified:
+        # A project still waiting to be loaded is never offered for saving:
+        # the user's file on disk is untouched and is what they keep.
+        if self._modified and not self._project_load_pending:
             ret = QMessageBox.question(
-                self, "Unsaved changes",
-                "There are unsaved changes. Save before closing?",
+                self, tr("messages.unsaved_title"),
+                tr("messages.unsaved_save_before_close"),
                 QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
                 QMessageBox.Save,
             )
@@ -3223,10 +3438,8 @@ class MainWindow(QMainWindow):
         run_output = getattr(self, "run_output", None)
         if run_output is not None and run_output.is_running():
             ret = QMessageBox.warning(
-                self, "Optimization in progress",
-                "An optimization run is currently in progress. "
-                "Closing the window will cancel it and lose all unsaved progress.\n\n"
-                "Are you sure you want to close?",
+                self, tr("messages.run_in_progress_title"),
+                tr("messages.run_in_progress_close"),
                 QMessageBox.Cancel | QMessageBox.Close,
                 QMessageBox.Cancel,  # default: keep the run alive
             )
@@ -3242,14 +3455,16 @@ class MainWindow(QMainWindow):
     def _on_export(self):
         from PySide6.QtWidgets import QFileDialog
 
+        if self._save_blocked_by_pending_load():
+            return
         path, _ = QFileDialog.getSaveFileName(
-            self, tr("menu.export_as"), "", "YAML Files (*.yaml *.yml)"
+            self, tr("menu.export_as"), "", tr("messages.filter_yaml")
         )
         if path:
             # Ensure .yaml extension
             if not path.endswith((".yaml", ".yml")):
                 path += ".yaml"
-            self._config_path = path
+            # _save_config_file sets _config_path once the file is written.
             self._save_config_file(path)
 
     def _on_export_project(self):
@@ -3263,6 +3478,8 @@ class MainWindow(QMainWindow):
         # export_project runs on a worker thread (_ProjectExportWorker).
         from esfex.visualization.data.project_bundle import PROJECT_SUFFIX
 
+        if self._save_blocked_by_pending_load():
+            return
         # Persist current editing state, like _save_config_file does.
         self._ensure_system_exists()
         if self._current_system_name:
@@ -3276,15 +3493,20 @@ class MainWindow(QMainWindow):
         )
         path, _ = QFileDialog.getSaveFileName(
             self, tr("menu.export_project"), default_name,
-            f"ESFEX Project (*{PROJECT_SUFFIX})",
+            tr("messages.filter_project", suffix=PROJECT_SUFFIX),
         )
         if not path:
             return
         if not path.endswith(PROJECT_SUFFIX):
             path += PROJECT_SUFFIX
+        include_results = self._ask_include_results()
+        if include_results is None:
+            return
+        results_file = self._existing_project_results() if include_results else None
 
-        src_base = (str(Path(self._config_path).parent)
-                    if self._config_path else None)
+        # Relative data paths resolve against the folder the project was
+        # loaded from, not the save target (``studio -c a/cfg.yaml -o b/out``).
+        src_base = self._data_base_dir()
         progress = self._make_progress_dialog(
             tr("messages.export_project_title"),
             tr("messages.exporting_project_msg", path=Path(path).name))
@@ -3305,6 +3527,7 @@ class MainWindow(QMainWindow):
                     project_name=Path(path).stem,
                     src_base=src_base,
                     geo_assets=self._geo_assets,
+                    results_file=results_file,
                 ), self)
             worker.done.connect(lambda r: result.update(report=r))
             worker.failed.connect(lambda m: result.update(error=m))
@@ -3326,6 +3549,8 @@ class MainWindow(QMainWindow):
         report = result["report"]
 
         msg = tr("messages.export_project_done", n=len(report.bundled), path=path)
+        if report.results:
+            msg += "\n\n" + tr("messages.export_project_results", path=report.results)
         if report.missing:
             msg += "\n\n" + tr(
                 "messages.export_project_missing",
@@ -3342,7 +3567,7 @@ class MainWindow(QMainWindow):
 
         path, _ = QFileDialog.getOpenFileName(
             self, tr("menu.import_project"), "",
-            f"ESFEX Project (*{PROJECT_SUFFIX})",
+            tr("messages.filter_project", suffix=PROJECT_SUFFIX),
         )
         if not path:
             return
@@ -3382,18 +3607,135 @@ class MainWindow(QMainWindow):
             tr("messages.import_project_done", path=str(dest_dir)))
 
     # ------------------------------------------------------------------
+    # Project results (output folder, remembered results file)
+    # ------------------------------------------------------------------
+
+    def _existing_project_results(self) -> Optional[str]:
+        """The project's remembered results file, or ``None`` when it
+        remembers none or the file is gone."""
+        p = self._project_results_file
+        return p if p and Path(p).is_file() else None
+
+    def _remember_results_file(self, path) -> None:
+        """Make ``path`` the project's results file. The project is marked
+        modified when the file changes: it is saved with the project."""
+        path = str(Path(path).resolve()) if path else ""
+        if path != self._project_results_file:
+            self._project_results_file = path
+            self._mark_modified()
+
+    def _ask_include_results(self) -> Optional[bool]:
+        """Ask whether Export Project bundles the results file (off by
+        default, the file can be GBs). ``False`` without asking when the
+        project has no results; ``None`` when the user cancels."""
+        from PySide6.QtWidgets import QCheckBox
+
+        from esfex.visualization.data.project_results import format_size
+
+        results = self._existing_project_results()
+        if results is None:
+            return False
+        p = Path(results)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(tr("menu.export_project"))
+        box.setText(tr("messages.export_results_question"))
+        check = QCheckBox(tr("messages.export_include_results",
+                             name=p.name, size=format_size(p.stat().st_size)))
+        check.setChecked(False)
+        box.setCheckBox(check)
+        box.setStandardButtons(QMessageBox.StandardButton.Ok
+                               | QMessageBox.StandardButton.Cancel)
+        if box.exec() != QMessageBox.StandardButton.Ok:
+            return None
+        return check.isChecked()
+
+    def _restore_project_results(self, raw_dict, base_dir) -> None:
+        """Point the results views at the project after a load: its
+        remembered results file when that still exists (Results enabled, the
+        file is not loaded), else its run output folder. A missing file is
+        forgotten silently."""
+        from esfex.visualization.data.project_results import (
+            project_output_dir, remembered_results,
+        )
+
+        self._invalidate_results_dialog_cache()
+        self._close_results_offer()
+        found = remembered_results(raw_dict, base_dir)
+        self._project_results_file = str(found) if found else ""
+        if found is not None:
+            self._last_output_dir = str(found.parent)
+            self._last_results_file = str(found)
+        else:
+            self._last_output_dir = str(project_output_dir(self._config_path))
+            self._last_results_file = ""
+        self.toolbar.set_results_enabled(found is not None)
+        self.toolbar.set_sensitivity_enabled(found is not None)
+
+    def _offer_project_results(self) -> None:
+        """Offer, without blocking, to open the remembered results file.
+        Nothing is loaded unless the user accepts: the file can be GBs."""
+        from esfex.visualization.data.project_results import format_size
+
+        results = self._existing_project_results()
+        if results is None:
+            return
+        p = Path(results)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(tr("messages.project_results_title"))
+        box.setText(tr("messages.project_results_offer", name=p.name,
+                       size=format_size(p.stat().st_size)))
+        open_btn = box.addButton(tr("messages.project_results_open"),
+                                 QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(tr("messages.project_results_later"),
+                      QMessageBox.ButtonRole.RejectRole)
+        box.setModal(False)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.buttonClicked.connect(
+            lambda btn: self._open_project_results() if btn is open_btn else None)
+        self._close_results_offer()
+        self._results_offer = box
+        box.show()
+
+    def _close_results_offer(self) -> None:
+        """Close the open-results offer of a previous project, if still shown."""
+        box = getattr(self, "_results_offer", None)
+        self._results_offer = None
+        if box is not None:
+            try:
+                box.close()
+            except RuntimeError:  # already deleted (WA_DeleteOnClose)
+                pass
+
+    def _open_project_results(self) -> None:
+        """Open the remembered results file in the results viewer."""
+        results = self._existing_project_results()
+        if results is None:
+            return
+        self._last_output_dir = str(Path(results).parent)
+        self._last_results_file = results
+        self._results_panel.set_output_dir(self._last_output_dir)
+        self._show_results()
+
+    # ------------------------------------------------------------------
     # Map bridge slots
     # ------------------------------------------------------------------
 
     def _on_map_ready(self):
         """Map initialised -- load config if one was provided, or rebuild after crash."""
-        if self._loaded_config is not None:
-            self.statusBar().showMessage("Loading configuration...")
-            QTimer.singleShot(0, self._deferred_populate)
-        elif getattr(self.map_widget, '_crash_recovered', False):
-            # Map was reloaded after WebEngine render process crash — rebuild
+        crashed = getattr(self.map_widget, '_crash_recovered', False)
+        if crashed:
             self.map_widget._crash_recovered = False
-            self.statusBar().showMessage("Map recovered from crash. Rebuilding...")
+        if self._loaded_config is not None and (not crashed or self._project_load_pending):
+            # First load (also when the map crashed before it was populated).
+            self.statusBar().showMessage(tr("messages.loading_config"))
+            QTimer.singleShot(0, self._deferred_populate)
+        elif crashed:
+            # Map was reloaded after a WebEngine render process crash: redraw
+            # the project as it is in memory. Repopulating from
+            # _loaded_config would drop every edit made since loading.
+            self.statusBar().showMessage(tr("messages.map_recovered"))
             QTimer.singleShot(50, self._on_state_loaded)
         else:
             # Honor `general.startup` preference. Default "empty" preserves
@@ -3410,22 +3752,32 @@ class MainWindow(QMainWindow):
                 recents = get_recent_files()
                 if recents:
                     last = recents[0]
-                    self.statusBar().showMessage(f"Reopening {last}…")
+                    self.statusBar().showMessage(tr("messages.reopening", path=last))
                     QTimer.singleShot(
                         0, lambda p=last: self._load_config_file(p),
                     )
 
     def _deferred_populate(self):
         """Run ``_populate_from_config`` after the first paint."""
-        self._populate_from_config(
-            self._loaded_config, raw_dict=self._raw_config_dict,
-            base_dir=(str(Path(self._config_path).parent)
-                      if self._config_path else None),
-        )
-        self.console.update_namespace(
-            config=self._loaded_config, state=self.model.state,
-        )
-        self.statusBar().clearMessage()
+        try:
+            self._populate_from_config(
+                self._loaded_config, raw_dict=self._raw_config_dict,
+                base_dir=self._data_base_dir(),
+            )
+            self.console.update_namespace(
+                config=self._loaded_config, state=self.model.state,
+            )
+            self.statusBar().clearMessage()
+            # Remembered results resolve against the folder the file was
+            # read from (``studio -c in/cfg.yaml -o out/cfg.yaml``).
+            self._restore_project_results(
+                self._raw_config_dict, self._data_base_dir())
+            self._offer_project_results()
+        finally:
+            # Saving is allowed again even if populating failed: the
+            # empty-project guard in _save_config_file still stops a
+            # placeholder from overwriting the user's file.
+            self._set_project_load_pending(False)
 
     def _on_line_drawn(self, geojson_str: str):
         data = json.loads(geojson_str)
@@ -5691,7 +6043,7 @@ class MainWindow(QMainWindow):
         self._clipboard = {"type": element_type, "attrs": attrs}
         src_name = getattr(obj, "name", element_id)
         self.statusBar().showMessage(
-            f"Copied attributes from {element_type} '{src_name}'", 3000,
+            tr("messages.copied_attrs", type=element_type, name=src_name), 3000,
         )
 
     def _on_tree_paste_requested(self, element_type: str, element_id: str):
@@ -5699,7 +6051,7 @@ class MainWindow(QMainWindow):
         if not self._clipboard or self._clipboard["type"] != element_type:
             QMessageBox.warning(
                 self, tr("tree_ctx.paste_attributes"),
-                "Clipboard is empty or contains a different element type.",
+                tr("messages.clipboard_mismatch"),
             )
             return
 
@@ -5717,7 +6069,7 @@ class MainWindow(QMainWindow):
 
         target_name = getattr(obj, "name", element_id)
         self.statusBar().showMessage(
-            f"Pasted attributes onto {element_type} '{target_name}'", 3000,
+            tr("messages.pasted_attrs", type=element_type, name=target_name), 3000,
         )
 
     def _on_marker_context_action(self, action: str, element_type: str, element_id: str):
@@ -6788,8 +7140,7 @@ class MainWindow(QMainWindow):
         if from_type not in _allowed or to_type not in _allowed:
             QMessageBox.warning(
                 self, tr("messages.invalid_route_title"),
-                "Fuel transport routes must connect nodes, fuel entry "
-                "or fuel storage points.",
+                tr("messages.fuel_route_endpoints"),
             )
             return
 
@@ -6834,9 +7185,9 @@ class MainWindow(QMainWindow):
             )
             if link_id:
                 self.statusBar().showMessage(
-                    f"Inter-system fuel route {link_id} created "
-                    f"({from_sys}/{from_node} → {to_sys}/{to_node}). "
-                    "Edit fuel / capacity in the properties panel.",
+                    tr("messages.islink_fuel_route_created", id=link_id,
+                       from_sys=from_sys, from_node=from_node,
+                       to_sys=to_sys, to_node=to_node),
                     8000,
                 )
             return
@@ -6982,9 +7333,9 @@ class MainWindow(QMainWindow):
                 self._auto_update_islink_length(link_id)
                 self._propagate_islink_bus_properties(link_id)
                 self.statusBar().showMessage(
-                    f"Inter-system link {link_id} created "
-                    f"({from_sys}/{from_node} ↔ {to_sys}/{to_node}). "
-                    "Edit its distance_km / cost in the properties panel.",
+                    tr("messages.islink_created", id=link_id,
+                       from_sys=from_sys, from_node=from_node,
+                       to_sys=to_sys, to_node=to_node),
                     8000,
                 )
             return
@@ -7109,37 +7460,9 @@ class MainWindow(QMainWindow):
         self.model.clear_inter_system_links()
         self.element_tree.clear_inter_system_links()
         for lk in config_to_inter_system_links(config):
-            self.model.add_inter_system_link(
-                link_id=lk.link_id,
-                link_type=lk.link_type,
-                from_system=lk.from_system,
-                to_system=lk.to_system,
-                from_node=lk.from_node,
-                to_node=lk.to_node,
-                capacity_mw=lk.capacity_mw,
-                investment_cost=lk.investment_cost,
-                max_investment_mw=lk.max_investment_mw,
-                loss_factor=lk.loss_factor,
-                distance_km=lk.distance_km,
-                cost_per_mw_km=lk.cost_per_mw_km,
-                # Restore GUI geometry + LineForm-parity electrical
-                # metadata, all saved in SystemLinkConfig.* so the
-                # polyline and the properties form round-trip cleanly.
-                waypoints=lk.waypoints,
-                from_endpoint=lk.from_endpoint,
-                to_endpoint=lk.to_endpoint,
-                voltage_kv=lk.voltage_kv,
-                line_type=lk.line_type,
-                length_km=lk.length_km,
-                base_impedance=lk.base_impedance,
-                reactance_per_km=lk.reactance_per_km,
-                susceptance_pu=lk.susceptance_pu,
-                num_circuits=lk.num_circuits,
-                frequency_hz=lk.frequency_hz,
-                current_type=lk.current_type,
-                decorative=lk.decorative,
-                style=lk.style,
-            )
+            # Every parsed field (geometry, impedance, LineForm-parity
+            # metadata, style) is restored.
+            self.model.restore_inter_system_link(lk)
 
         self._update_map_actions_state()
         self._restore_geo_assets(raw_dict)
@@ -7316,17 +7639,16 @@ class MainWindow(QMainWindow):
 
             # ── Apply on the GUI thread (fast relative to the parse) ──
             try:
-                progress.setLabelText("Building GUI model…")
+                progress.setLabelText(tr("messages.building_gui_model"))
                 self._loaded_config = config
                 self._raw_config_dict = raw_dict
                 self._config_path = path
-                # Mirror the CLI's default (``output or Path("./results")``,
-                # cli.py:218) so the panel looks where the runner actually
-                # writes.
-                self._last_output_dir = "results"
-                # A new config implies a new run pool — drop any cached
-                # Results dialog tied to the previous config.
-                self._invalidate_results_dialog_cache()
+                self._load_base_dir = base_dir
+                # Runs write to <project folder>/results; the project's
+                # remembered results file (if it still exists) re-enables
+                # Results. Also drops any cached Results dialog of the
+                # previous project.
+                self._restore_project_results(raw_dict, base_dir)
 
                 self._populate_from_config(
                     config, raw_dict=raw_dict, base_dir=base_dir, states=states,
@@ -7358,24 +7680,30 @@ class MainWindow(QMainWindow):
                 logging.getLogger(__name__).exception("Auto-validation post-load failed")
                 errors, warnings = [], []
             if errors or warnings:
-                parts = []
-                if errors:
-                    parts.append(f"{len(errors)} error(s)")
-                if warnings:
-                    parts.append(f"{len(warnings)} warning(s)")
                 # Hide the progress dialog before stacking the modal warning.
                 progress.hide()
                 QMessageBox.warning(
                     self, tr("common.warning"),
-                    f"Loaded {path}\n\n"
-                    f"Validation found {', '.join(parts)}. "
-                    "Click 'Validate' for details."
+                    tr("messages.loaded_validation_found", path=path,
+                       found=_validation_counts(len(errors), len(warnings))),
                 )
         finally:
             progress.close()
+        # Reached only when the load succeeded (failures return above).
+        self._offer_project_results()
 
     def _save_config_file(self, path: str):
         """Export current GUI state to YAML."""
+        if self._save_blocked_by_pending_load():
+            return
+        # Never let an empty project (no system, or only the placeholder
+        # _ensure_system_exists creates) overwrite a file that defines systems.
+        if (self._project_is_empty() and Path(path).is_file()
+                and self._file_has_systems(path)):
+            QMessageBox.warning(
+                self, tr("common.warning"),
+                tr("messages.save_refused_empty_project", path=path))
+            return
         try:
             # Ensure a system exists and sync current editing state
             self._ensure_system_exists()
@@ -7395,15 +7723,10 @@ class MainWindow(QMainWindow):
                 logging.getLogger(__name__).exception("Auto-validation pre-save failed")
                 errors, warnings = [], []
             if errors:
-                parts = [f"{len(errors)} error(s)"]
-                if warnings:
-                    parts.append(f"{len(warnings)} warning(s)")
                 ret = QMessageBox.question(
                     self, tr("common.warning"),
-                    f"Validation found {', '.join(parts)}.\n\n"
-                    "Saving will persist the current state regardless. "
-                    "Click 'Validate' for details before deciding.\n\n"
-                    "Save anyway?",
+                    tr("messages.save_validation_found",
+                       found=_validation_counts(len(errors), len(warnings))),
                     QMessageBox.Yes | QMessageBox.No,
                     QMessageBox.No,
                 )
@@ -7420,7 +7743,9 @@ class MainWindow(QMainWindow):
                 worker = _ConfigSaveWorker(
                     self._all_states, self._loaded_config, path,
                     self.model.inter_system_links, self.model.global_settings,
-                    self.model.stochastic_scenarios, self._geo_assets, self)
+                    self.model.stochastic_scenarios, self._geo_assets, self,
+                    data_base_dir=self._data_base_dir(),
+                    last_results_file=self._project_results_file or None)
                 err: dict = {}
                 worker.failed.connect(lambda m: err.update(msg=m))
                 loop = QEventLoop()
@@ -7434,6 +7759,11 @@ class MainWindow(QMainWindow):
             finally:
                 progress.close()
             self._config_path = path
+            self._last_saved_path = path
+            # The saved file no longer holds the loaded file's unknown keys.
+            for _st in self._all_states.values():
+                if _st is not None:
+                    _st.unknown_config_keys = []
             # State on disk now matches in-memory state.
             self._clear_modified()
             self._update_window_title()
@@ -7563,14 +7893,21 @@ class MainWindow(QMainWindow):
         if self._current_system_name:
             self._all_states[self._current_system_name] = self.model.state
 
-        # Use previously saved output directory, or fall back to the
-        # CLI's default ``./results`` (cli.py:218) so the panel and the
-        # runner agree on the location regardless of where the config
-        # file lives.
-        if not hasattr(self, "_last_output_dir") or not self._last_output_dir:
-            self._last_output_dir = "results"
+        # Runs write to <project folder>/results (an unsaved project: the
+        # ESFEX cache dir), never to the CWD's ``results`` (the CLI default):
+        # the project finds its results again whatever directory the Studio
+        # is started from.
+        import time
 
-        output_dir = self._last_output_dir
+        from esfex.visualization.data.project_results import project_output_dir
+
+        output_dir = str(project_output_dir(self._config_path))
+        msg_key = ("messages.run_output_dir" if self._config_path
+                   else "messages.run_output_dir_unsaved")
+        self.statusBar().showMessage(tr(msg_key, path=output_dir))
+        logging.getLogger(__name__).info("Run output folder: %s", output_dir)
+        self._run_output_dir = output_dir
+        self._run_started_at = time.time()
 
         # Save config to a temporary YAML file
         try:
@@ -7585,11 +7922,12 @@ class MainWindow(QMainWindow):
                 inter_system_links=self.model.inter_system_links,
                 global_settings=self.model.global_settings,
                 stochastic_scenarios=self.model.stochastic_scenarios,
+                data_base_dir=self._data_base_dir(),
             )
         except Exception as e:
             QMessageBox.critical(
                 self, tr("common.error"),
-                f"Failed to save configuration for simulation:\n{e}",
+                tr("messages.save_for_sim_failed", e=e),
             )
             return
 
@@ -7656,9 +7994,9 @@ class MainWindow(QMainWindow):
     def _on_run_started_ui(self):
         """Show the Stop bar when a simulation run begins."""
         self._stop_escalated = False
-        self._stop_btn.setText("■  Stop")
+        self._stop_btn.setText(tr("messages.stop_run"))
         self._stop_btn.setEnabled(True)
-        self._run_status_label.setText("Running…")
+        self._run_status_label.setText(tr("messages.run_running"))
         self._run_stop_bar.setVisible(True)
 
     def _on_run_finished_ui(self, *_):
@@ -7699,14 +8037,12 @@ class MainWindow(QMainWindow):
         if not self._stop_escalated:
             run_output.interrupt()
             self._stop_escalated = True
-            self._stop_btn.setText("■  Force kill")
-            self._run_status_label.setText(
-                "Interrupt sent — press again to force-kill"
-            )
+            self._stop_btn.setText(tr("messages.force_kill"))
+            self._run_status_label.setText(tr("messages.run_interrupt_sent"))
         else:
             run_output.stop(force=True)
             self._stop_btn.setEnabled(False)
-            self._run_status_label.setText("Force kill sent…")
+            self._run_status_label.setText(tr("messages.run_force_kill_sent"))
 
     def _on_subprocess_finished(self, exit_code: int):
         """Enable the Results and Sensitivity buttons when a simulation completes."""
@@ -7715,6 +8051,7 @@ class MainWindow(QMainWindow):
             self.toolbar.set_sensitivity_enabled(True)
             self._run_completed = True
             self.toolbar.set_run_enabled(False)
+            self._remember_run_results()
             # Pre-set output dir on results panel so it's ready
             output_dir = getattr(self, "_last_output_dir", "")
             if output_dir:
@@ -7726,19 +8063,36 @@ class MainWindow(QMainWindow):
             # Re-enable Run so the user can retry after fixing issues
             self.toolbar.set_run_enabled(True)
 
+    def _remember_run_results(self):
+        """After a successful run, point the results views at the run's
+        output folder and remember the results file it wrote."""
+        from esfex.visualization.data.project_results import newest_results_file
+
+        run_dir = getattr(self, "_run_output_dir", "")
+        if not run_dir:
+            return
+        self._last_output_dir = run_dir
+        # 2 s of slack for file systems with coarse modification times.
+        since = getattr(self, "_run_started_at", None)
+        found = newest_results_file(run_dir, since=since - 2 if since else None)
+        if found is not None:
+            self._last_results_file = str(found)
+            self._remember_results_file(found)
+
     def _on_load_results(self):
         """Open a file picker to load previous HDF5 results."""
         from PySide6.QtWidgets import QFileDialog
 
         path, _ = QFileDialog.getOpenFileName(
             self, tr("menu.load_results"), str(Path.home()),
-            "HDF5 Files (*.h5 *.hdf5);;All Files (*)",
+            tr("messages.filter_hdf5"),
         )
         if not path:
             return
         d = str(Path(path).parent)
         self._last_output_dir = d
         self._last_results_file = path
+        self._remember_results_file(path)
         self.toolbar.set_results_enabled(True)
         self.toolbar.set_sensitivity_enabled(True)
         # Point the map results panel at the specific file
@@ -7758,7 +8112,7 @@ class MainWindow(QMainWindow):
         if not output_dir:
             QMessageBox.warning(
                 self, tr("common.warning"),
-                "No simulation output directory is set. Run a simulation first.",
+                tr("messages.no_output_dir"),
             )
             return
         self._show_results()
@@ -7839,7 +8193,7 @@ class MainWindow(QMainWindow):
         if not output_dir:
             QMessageBox.warning(
                 self, tr("common.warning"),
-                "Run a simulation first to generate LP files for analysis.",
+                tr("messages.no_lp_files"),
             )
             return
 
@@ -7856,7 +8210,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QFileDialog
 
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import GeoJSON", "", "GeoJSON Files (*.geojson *.json)"
+            self, tr("messages.import_geojson_title"), "", tr("messages.filter_geojson")
         )
         if not path:
             return
@@ -7871,16 +8225,16 @@ class MainWindow(QMainWindow):
 
             # Show results
             lines = [
-                f"Nodes added: {result.nodes_added}",
-                f"Lines added: {result.lines_added}",
-                f"Zones added: {result.zones_added}",
+                tr("messages.geojson_nodes_added", n=result.nodes_added),
+                tr("messages.geojson_lines_added", n=result.lines_added),
+                tr("messages.geojson_zones_added", n=result.zones_added),
             ]
             if result.warnings:
-                lines.append(f"\nWarnings ({len(result.warnings)}):")
+                lines.append("\n" + tr("messages.geojson_warnings", n=len(result.warnings)))
                 for w in result.warnings:
                     lines.append(f"  - {w}")
             if result.errors:
-                lines.append(f"\nErrors ({len(result.errors)}):")
+                lines.append("\n" + tr("messages.geojson_errors", n=len(result.errors)))
                 for e in result.errors:
                     lines.append(f"  - {e}")
 
@@ -7893,19 +8247,14 @@ class MainWindow(QMainWindow):
                 errors = [i for i in issues if i.severity == "error"]
                 warnings = [i for i in issues if i.severity == "warning"]
                 if errors or warnings:
-                    parts = []
-                    if errors:
-                        parts.append(f"{len(errors)} error(s)")
-                    if warnings:
-                        parts.append(f"{len(warnings)} warning(s)")
                     QMessageBox.warning(
                         self, tr("common.warning"),
-                        f"Validation found {', '.join(parts)}. "
-                        "Click 'Validate' for details."
+                        tr("messages.validation_found",
+                           found=_validation_counts(len(errors), len(warnings))),
                     )
         except Exception as e:
             import traceback
             traceback.print_exc()
             QMessageBox.critical(
-                self, tr("common.error"), f"Failed to import:\n{e}"
+                self, tr("common.error"), tr("messages.import_failed", e=e)
             )

@@ -571,20 +571,22 @@ class TestAnalyze:
         np.testing.assert_array_equal(result.S1_conf["cost"], np.zeros(2))
         np.testing.assert_array_equal(result.ST_conf["cost"], np.zeros(2))
 
-    def test_analyze_inf_values_replaced(self):
-        """Inf values in evaluations are replaced before SALib call."""
+    def test_analyze_failed_evaluations_give_no_indices(self):
+        """A non-finite evaluation (failed run, infeasible LP) leaves the KPI
+        without indices: the Saltelli design cannot drop it, and the old
+        stand-in (10 × the largest value) biased the indices."""
         params = _make_parameters(2)
         engine = SensitivityEngine(
-            mode="lp", parameters=params, kpi_names=["cost"],
+            mode="lp", parameters=params, kpi_names=["cost", "load"],
             n_base_samples=8,
         )
 
-        n_eval = 8 * (2 * 2 + 2)
+        n_eval = 8 * (2 + 2)
         samples = np.random.rand(n_eval, 2)
-        evals = list(np.random.rand(n_eval) * 100)
-        evals[0] = float("inf")
-        evals[5] = float("-inf")
-        evaluations = {"cost": evals}
+        cost = list(np.random.rand(n_eval) * 100)
+        cost[0] = float("inf")
+        cost[3] = float("nan")
+        evaluations = {"cost": cost, "load": list(np.random.rand(n_eval))}
 
         mock_si = {
             "S1": np.array([0.5, 0.5]),
@@ -598,46 +600,23 @@ class TestAnalyze:
                                          "SALib.analyze.sobol": mock_sobol}):
             result = engine._analyze(samples, evaluations, n_eval)
 
-        # Should succeed without errors (inf replaced)
-        assert "cost" in result.S1
+        assert result.n_failed == {"cost": 2, "load": 0}
+        for idx in (result.S1, result.ST, result.S1_conf, result.ST_conf):
+            assert np.isnan(idx["cost"]).all()
+        # Only the complete KPI is analysed
+        assert mock_sobol.analyze.call_count == 1
+        np.testing.assert_array_equal(result.S1["load"], np.array([0.5, 0.5]))
 
-    def test_analyze_nan_values_replaced(self):
-        """NaN values in evaluations are replaced before SALib call."""
+    def test_analyze_all_nan_gives_no_indices(self):
+        """All-NaN evaluations (e.g. a KPI the runs never produce) are NaN,
+        not zero indices that would read as 'insensitive'."""
         params = _make_parameters(2)
         engine = SensitivityEngine(
             mode="lp", parameters=params, kpi_names=["cost"],
             n_base_samples=8,
         )
 
-        n_eval = 8 * (2 * 2 + 2)
-        samples = np.random.rand(n_eval, 2)
-        evals = list(np.random.rand(n_eval) * 100)
-        evals[3] = float("nan")
-        evaluations = {"cost": evals}
-
-        mock_si = {
-            "S1": np.array([0.5, 0.5]),
-            "ST": np.array([0.6, 0.6]),
-            "S1_conf": np.array([0.01, 0.01]),
-            "ST_conf": np.array([0.02, 0.02]),
-        }
-        mock_parent, mock_sobol = self._mock_sobol_analyze(mock_si)
-
-        with patch.dict("sys.modules", {"SALib.analyze": mock_parent,
-                                         "SALib.analyze.sobol": mock_sobol}):
-            result = engine._analyze(samples, evaluations, n_eval)
-
-        assert "cost" in result.S1
-
-    def test_analyze_all_nan_gives_zeros(self):
-        """All NaN evaluations produce zero Sobol indices (zero variance)."""
-        params = _make_parameters(2)
-        engine = SensitivityEngine(
-            mode="lp", parameters=params, kpi_names=["cost"],
-            n_base_samples=8,
-        )
-
-        n_eval = 8 * (2 * 2 + 2)
+        n_eval = 8 * (2 + 2)
         samples = np.random.rand(n_eval, 2)
         evaluations = {"cost": [float("nan")] * n_eval}
 
@@ -647,10 +626,9 @@ class TestAnalyze:
                                          "SALib.analyze.sobol": mock_sobol}):
             result = engine._analyze(samples, evaluations, n_eval)
 
-        # All nan → finite_mask all False → max_finite fallback 1e12
-        # All replaced with same value → zero variance → zeros
         mock_sobol.analyze.assert_not_called()
-        np.testing.assert_array_equal(result.S1["cost"], np.zeros(2))
+        assert result.n_failed["cost"] == n_eval
+        assert np.isnan(result.S1["cost"]).all()
 
     def test_analyze_multiple_kpis_mixed_variance(self):
         """One KPI with variance, another constant: both handled correctly."""
@@ -720,8 +698,10 @@ class TestConstants:
             assert bounds[0] < bounds[1]
 
     def test_config_parameters_count(self):
-        """CONFIG_PARAMETERS has 9 entries."""
-        assert len(CONFIG_PARAMETERS) == 9
+        """CONFIG_PARAMETERS has 8 entries; fuel_price_growth has no config
+        field to scale and is not offered."""
+        assert len(CONFIG_PARAMETERS) == 8
+        assert "fuel_price_growth" not in {k for k, _, _ in CONFIG_PARAMETERS}
 
 
 # ---------------------------------------------------------------------------
@@ -894,16 +874,59 @@ class TestApplyConfigMultipliers:
         bat = result["systems"]["main"]["batteries"][0]
         assert bat["invest_cost_capacity"] == [400.0, 360.0]
 
-    def test_demand_growth_multiplied(self):
-        """demand_growth multiplier scales demand.growth_rate."""
+    def test_demand_growth_scales_demand_level(self):
+        """demand_growth scales demand_scale (it used to look for a
+        demand.growth_rate key the schema does not have)."""
         base = _make_base_config()
         params = [SensitivityParameter(name="Demand", key="demand_growth",
                                        category="config")]
-        sample = np.array([1.3])
+        result = _apply_config_multipliers(base, params, np.array([1.3]))
+        assert result["systems"]["main"]["demand_scale"] == pytest.approx(1.3)
+        base["systems"]["main"]["demand_scale"] = 1.1
+        result = _apply_config_multipliers(base, params, np.array([1.3]))
+        assert result["systems"]["main"]["demand_scale"] == pytest.approx(1.43)
 
-        result = _apply_config_multipliers(base, params, sample)
-        growth = result["systems"]["main"]["demand"]["growth_rate"]
-        assert growth == pytest.approx(0.02 * 1.3)
+    def test_transmission_cost_multiplied(self):
+        base = _make_base_config()
+        base["systems"]["main"]["nodes"] = {"transference_invest_cost": [1e5, 2e5]}
+        base["systems"]["main"]["development_zones"] = [
+            {"name": "z", "line_cost_per_mw_km": 1500.0, "transformer_cost_per_mw": 5e4}]
+        base["meta_network"] = {"systems_links": [{"investment_cost_per_MW": [3e5]}]}
+        params = [SensitivityParameter(name="T", key="invest_cost_transmission",
+                                       category="config")]
+        result = _apply_config_multipliers(base, params, np.array([2.0]))
+        main = result["systems"]["main"]
+        assert main["nodes"]["transference_invest_cost"] == [2e5, 4e5]
+        assert main["development_zones"][0]["line_cost_per_mw_km"] == 3000.0
+        assert main["development_zones"][0]["transformer_cost_per_mw"] == 1e5
+        assert result["meta_network"]["systems_links"][0]["investment_cost_per_MW"] == [6e5]
+
+    def test_maintenance_cost_multiplied(self):
+        base = _make_base_config()
+        main = base["systems"]["main"]
+        main["generators"][0]["maintenance_cost"] = [10.0]
+        main["batteries"][0]["maintenance_cost"] = [2.0]
+        main["technologies"] = {"pv": {"type": "solar", "maintenance_cost": [4.0]}}
+        main["battery_technologies"] = {"li": {"maintenance_cost": [1.0]}}
+        params = [SensitivityParameter(name="M", key="maintenance_cost", category="config")]
+        result = _apply_config_multipliers(base, params, np.array([1.5]))
+        main = result["systems"]["main"]
+        assert main["generators"][0]["maintenance_cost"] == [15.0]
+        assert main["batteries"][0]["maintenance_cost"] == [3.0]
+        assert main["technologies"]["pv"]["maintenance_cost"] == [6.0]
+        assert main["battery_technologies"]["li"]["maintenance_cost"] == [1.5]
+
+    def test_carbon_price_multiplied(self):
+        """co2_cost is scaled whatever its key case; absent, the schema
+        default is scaled."""
+        from esfex.config.schema import PenaltiesConfig
+        base = _make_base_config()
+        base["systems"]["other"] = {"penalties": {"CO2_cost": 40.0}}
+        params = [SensitivityParameter(name="C", key="carbon_price", category="config")]
+        result = _apply_config_multipliers(base, params, np.array([2.5]))
+        assert result["systems"]["other"]["penalties"] == {"CO2_cost": 100.0}
+        assert result["systems"]["main"]["penalties"]["co2_cost"] == pytest.approx(
+            PenaltiesConfig().co2_cost * 2.5)
 
     def test_multiple_multipliers_applied(self):
         """Multiple parameters are applied simultaneously."""
@@ -923,19 +946,15 @@ class TestApplyConfigMultipliers:
         gas = result["systems"]["main"]["generators"][2]
         assert gas["fuel_cost"] == pytest.approx(100.0)
 
-        growth = result["systems"]["main"]["demand"]["growth_rate"]
-        assert growth == pytest.approx(0.02 * 0.8)
+        assert result["systems"]["main"]["demand_scale"] == pytest.approx(0.8)
 
-    def test_no_matching_multipliers_unchanged(self):
-        """Parameters with keys absent from config leave it unchanged."""
-        base = _make_base_config()
-        params = [SensitivityParameter(name="X", key="nonexistent_key",
-                                       category="config")]
-        sample = np.array([5.0])
-
-        result = _apply_config_multipliers(base, params, sample)
-        solar = result["systems"]["main"]["generators"][0]
-        assert solar["invest_cost"] == 1000.0
+    @pytest.mark.parametrize("key", ["nonexistent_key", "fuel_price_growth"])
+    def test_unmapped_key_is_rejected(self, key):
+        """A key that scales nothing used to be accepted silently, giving a
+        parameter with zero indices that looked like a real result."""
+        params = [SensitivityParameter(name="X", key=key, category="config")]
+        with pytest.raises(ValueError, match=key):
+            _apply_config_multipliers(_make_base_config(), params, np.array([5.0]))
 
     def test_empty_parameters_unchanged(self):
         """Empty parameter list returns config unchanged (but deep copied)."""
@@ -987,21 +1006,13 @@ class TestApplyConfigMultipliers:
         result = _apply_config_multipliers(base, params, sample)
         assert result["systems"]["main"]["batteries"] == "invalid"
 
-    def test_demand_not_dict_skipped(self):
-        """If demand config is not a dict, demand_growth is skipped."""
-        base = {
-            "systems": {
-                "main": {
-                    "demand": "not_a_dict",
-                },
-            },
-        }
-        params = [SensitivityParameter(name="D", key="demand_growth",
+    def test_nodes_not_dict_skipped(self):
+        """If nodes is not a dict, the transmission multiplier skips it."""
+        base = {"systems": {"main": {"nodes": "not_a_dict"}}}
+        params = [SensitivityParameter(name="T", key="invest_cost_transmission",
                                        category="config")]
-        sample = np.array([1.5])
-
-        result = _apply_config_multipliers(base, params, sample)
-        assert result["systems"]["main"]["demand"] == "not_a_dict"
+        result = _apply_config_multipliers(base, params, np.array([1.5]))
+        assert result["systems"]["main"]["nodes"] == "not_a_dict"
 
     def test_system_value_not_dict_skipped(self):
         """If a system's value is not a dict, it is skipped."""
@@ -1085,10 +1096,9 @@ class TestExtractKpisFromResults:
         assert kpis["total_cost"] == pytest.approx(3000.0)
 
     def test_single_file_extractable_kpis(self, tmp_path):
-        """total_cost, load_shedding (from loss_of_load) and curtailment
-        (from detailed_results year groups) come out of a single file.
-        inv_gen/inv_bat are NOT sourced from the H5 (runner doesn't export
-        a scalar MW-invested summary) and stay NaN."""
+        """total_cost, load_shedding (from loss_of_load), curtailment and the
+        master's investments (year-group attributes) come out of a single
+        file. The investment KPIs used to be always NaN in config mode."""
         _write_results_h5(str(tmp_path), "results_main.h5", {
             "total_cost": [1000.0],
             "loss_of_load": [5.0],
@@ -1096,31 +1106,45 @@ class TestExtractKpisFromResults:
         filepath = os.path.join(str(tmp_path), "results_main.h5")
         with h5py.File(filepath, "a") as f:
             det = f.create_group("detailed_results")
-            y = det.create_group("year_2025_threshold_0")
-            y.create_dataset("curtailment", data=np.array([10.0, 20.0]))
+            for year, (tech, bat_p, bat_e) in {2025: (40.0, 5.0, 20.0),
+                                                2026: (10.0, 0.0, 0.0)}.items():
+                y = det.create_group(f"year_{year}_threshold_0")
+                y.create_dataset("curtailment", data=np.array([10.0, 20.0]))
+                y.attrs["investment_tech_investment_power_0_1"] = tech
+                if bat_p:
+                    y.attrs["investment_bat_tech_investment_power_0_0"] = bat_p
+                    y.attrs["investment_bat_tech_investment_capacity_0_0"] = bat_e
+                y.attrs["investment_transfer_investment_0_1"] = 99.0
 
         kpis = _extract_kpis_from_results(str(tmp_path))
         assert kpis["total_cost"] == pytest.approx(1000.0)
         assert kpis["load_shedding"] == pytest.approx(5.0)
-        assert kpis["curtailment"] == pytest.approx(30.0)
-        assert np.isnan(kpis["inv_gen_total"])
-        assert np.isnan(kpis["inv_bat_total"])
+        assert kpis["curtailment"] == pytest.approx(60.0)
+        assert kpis["inv_gen_total"] == pytest.approx(50.0)   # MW over both years
+        assert kpis["inv_bat_total"] == pytest.approx(5.0)    # MW, not MWh
 
-    def test_multiple_files_summed(self, tmp_path):
-        """total_cost across multiple results files is summed."""
-        _write_results_h5(str(tmp_path), "results_north.h5", {
-            "total_cost": [1000.0],
-        })
-        _write_results_h5(str(tmp_path), "results_south.h5", {
-            "total_cost": [2000.0],
-        })
+    def test_no_investment_is_zero(self, tmp_path):
+        _write_results_h5(str(tmp_path), "results_main.h5", {"total_cost": [1.0]})
+        with h5py.File(os.path.join(str(tmp_path), "results_main.h5"), "a") as f:
+            f.create_group("detailed_results").create_group("year_2025_threshold_0")
         kpis = _extract_kpis_from_results(str(tmp_path))
-        assert kpis["total_cost"] == pytest.approx(3000.0)
+        assert kpis["inv_gen_total"] == 0.0
+        assert kpis["inv_bat_total"] == 0.0
+
+    def test_only_newest_file_is_read(self, tmp_path):
+        """A run writes one file; a reused run directory also holds the files
+        of earlier analyses, which used to be summed in."""
+        _write_results_h5(str(tmp_path), "Sys_01012026_0900.h5", {"total_cost": [1000.0]})
+        _write_results_h5(str(tmp_path), "Sys_02012026_0900.h5", {"total_cost": [2000.0]})
+        os.utime(tmp_path / "Sys_01012026_0900.h5", (1000, 1000))
+        os.utime(tmp_path / "Sys_02012026_0900.h5", (2000, 2000))
+        kpis = _extract_kpis_from_results(str(tmp_path))
+        assert kpis["total_cost"] == pytest.approx(2000.0)
 
     def test_missing_dataset_keeps_nan(self, tmp_path):
         """When summary_results has total_cost only, load_shedding stays NaN;
-        when detailed_results is absent, curtailment stays NaN; inv_gen/inv_bat
-        are never extracted from the H5."""
+        when detailed_results is absent, curtailment and the investment KPIs
+        stay NaN."""
         _write_results_h5(str(tmp_path), "results_sys.h5", {
             "total_cost": [500.0],
         })
@@ -1162,7 +1186,7 @@ class TestExtractKpisFromResults:
         kpis = _extract_kpis_from_results(str(tmp_path))
         assert kpis["total_cost"] == pytest.approx(0.0)
         assert kpis["load_shedding"] == pytest.approx(0.0)
-        # inv_gen_total / inv_bat_total / curtailment are not in summary_results
+        # No detailed_results: curtailment and investments are unknown
         assert np.isnan(kpis["inv_gen_total"])
         assert np.isnan(kpis["inv_bat_total"])
         assert np.isnan(kpis["curtailment"])
@@ -1194,6 +1218,34 @@ class TestRunSimulationAndExtract:
             kpis = _run_simulation_and_extract(config_path, output_dir)
 
         assert kpis["total_cost"] == pytest.approx(5000.0)
+
+    def test_years_passed_to_run(self, tmp_path):
+        """Each run simulated the `esfex run` default of 25 years; the
+        engine's `years` is now passed on."""
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = ""
+        with patch("esfex.sensitivity.engine.subprocess.run",
+                   return_value=mock_result) as run:
+            _run_simulation_and_extract("c.yaml", str(tmp_path), years=3)
+            assert run.call_args.args[0][-2:] == ["--years", "3"]
+            _run_simulation_and_extract("c.yaml", str(tmp_path))
+            assert "--years" not in run.call_args.args[0]
+
+    def test_engine_passes_years(self, tmp_path):
+        config_path = tmp_path / "base.yaml"
+        config_path.write_text("systems: {}\n")
+        engine = SensitivityEngine(
+            mode="config",
+            parameters=[SensitivityParameter(name="F", key="fuel_cost", category="config")],
+            kpi_names=["total_cost"], n_base_samples=1, years=2)
+        with patch("esfex.sensitivity.engine._run_simulation_and_extract",
+                   return_value={"total_cost": 1.0}) as run, \
+             patch.object(SensitivityEngine, "generate_samples",
+                          return_value=np.ones((3, 1))), \
+             patch.object(SensitivityEngine, "_analyze"):
+            engine.run_config_analysis(str(config_path), str(tmp_path / "out"))
+        assert [c.args[2] for c in run.call_args_list] == [2, 2, 2]
 
     def test_failure_returns_nan(self, tmp_path):
         """Non-zero returncode produces all-NaN KPIs."""
@@ -1499,3 +1551,40 @@ class TestRunConfigAnalysis:
             )
 
         assert mock_run.call_count == n_eval
+
+
+# ---------------------------------------------------------------------------
+# Scripting API: esfex.sensitivity()
+# ---------------------------------------------------------------------------
+
+
+class TestScriptingSensitivity:
+    """esfex.sensitivity() built SensitivityParameter without its required
+    ``key`` (TypeError) and, with no parameters, an empty analysis."""
+
+    def _run(self, **kw):
+        from esfex.visualization.scripting_api import ESFEXAPI
+        captured = {}
+
+        def fake(engine, *a, **k):
+            captured["engine"] = engine
+
+        with patch.object(SensitivityEngine, "run_config_analysis", fake):
+            ESFEXAPI.sensitivity("c.yaml", **kw)
+        return captured["engine"]
+
+    def test_default_uses_all_config_parameters(self):
+        engine = self._run()
+        assert [p.key for p in engine.parameters] == [k for k, _, _ in CONFIG_PARAMETERS]
+        assert engine.years is None
+
+    def test_named_parameters_and_years(self):
+        engine = self._run(parameters=[{"name": "fuel_cost", "upper": 4.0}], years=3)
+        (p,) = engine.parameters
+        assert (p.key, p.name, p.category) == ("fuel_cost", "Fuel Cost", "config")
+        assert (p.lower_bound, p.upper_bound) == (0.5, 4.0)
+        assert engine.years == 3
+
+    def test_unknown_parameter_is_rejected(self):
+        with pytest.raises(ValueError, match="nope"):
+            self._run(parameters=[{"name": "nope"}])

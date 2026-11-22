@@ -17,7 +17,6 @@ from esfex.bridge.converters import (
     COST_UNSCALE,
     convert_index_julia_to_py,
     convert_index_py_to_julia,
-    convert_master_problem_result,
     convert_power_system_result,
     convert_scenario,
     convert_temporal_config,
@@ -25,7 +24,6 @@ from esfex.bridge.converters import (
     convert_transformer_data,
     convert_acdc_converter_data,
     convert_freq_converter_data,
-    convert_inter_system_link,
     convert_generator_config,
     convert_battery_config,
     julia_to_py_array,
@@ -443,8 +441,8 @@ class TestConvertScenario:
         with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_scenario(scenario)
 
-        sm_call = mock_esfex.ScenarioMultipliers.call_args[0]
-        for arg in sm_call:
+        sm_call = mock_esfex.ScenarioMultipliers.call_args.kwargs
+        for arg in sm_call.values():
             assert arg == 1.0
 
     def test_missing_multipliers_key_uses_defaults(self, mock_esfex):
@@ -479,17 +477,10 @@ class TestConvertScenario:
         with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_scenario(scenario)
 
-        sm_call = mock_esfex.ScenarioMultipliers.call_args[0]
-        assert sm_call[0] == 0.5   # invest_cost_renewables
-        assert sm_call[1] == 1.5   # invest_cost_conventional
-        assert sm_call[2] == 2.0   # fuel_cost
-        assert sm_call[3] == 1.1   # maintenance_cost
-        assert sm_call[4] == 0.8   # invest_cost_storage
-        assert sm_call[5] == 1.3   # invest_cost_transmission
-        assert sm_call[6] == 0.95  # discount_rate
-        assert sm_call[7] == 1.2   # demand_growth
-        assert sm_call[8] == 1.4   # fuel_price_growth
-        assert sm_call[9] == 3.0   # carbon_price
+        # Passed by name (the Julia struct has a keyword constructor)
+        sm_call = mock_esfex.ScenarioMultipliers.call_args.kwargs
+        for key, value in scenario["multipliers"].items():
+            assert sm_call[key] == value
 
     def test_probability_is_float(self, mock_esfex):
         scenario = {"name": "test", "probability": 1}
@@ -500,7 +491,9 @@ class TestConvertScenario:
         call_args = mock_esfex.Scenario.call_args[0]
         assert isinstance(call_args[1], float)
 
-    def test_ten_multiplier_arguments(self, mock_esfex):
+    def test_every_multiplier_field_is_passed(self, mock_esfex):
+        from esfex.config.schema import ScenarioMultipliers
+
         scenario = {
             "name": "test",
             "probability": 1.0,
@@ -510,8 +503,8 @@ class TestConvertScenario:
         with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
             convert_scenario(scenario)
 
-        sm_call = mock_esfex.ScenarioMultipliers.call_args[0]
-        assert len(sm_call) == 10
+        sm_call = mock_esfex.ScenarioMultipliers.call_args.kwargs
+        assert set(sm_call) == set(ScenarioMultipliers.model_fields)
 
 
 # ---------------------------------------------------------------------------
@@ -553,11 +546,7 @@ class TestConvertPowerSystemResult:
 
         r.gen_status = None
         r.gen_startup = None
-        r.gen_investment = None
-        r.bat_investment_power = None
-        r.bat_investment_capacity = None
         r.power_flow_by_line = None
-        r.transfer_investment = None
         r.bat_spillage = None
         r.ev_charging = None
         r.ev_v2g = None
@@ -570,7 +559,6 @@ class TestConvertPowerSystemResult:
         r.reservoir_level = None
         r.reservoir_spillage = None
         r.reservoir_pump = None
-        r.reservoir_invest_capacity = None
 
         # N-1 security
         r.n1_gen_reserve_duals = None
@@ -580,6 +568,7 @@ class TestConvertPowerSystemResult:
 
         # Cost breakdown
         r.cost_breakdown = None
+        r.line_losses = None
 
         mock_pf = MagicMock()
         mock_pf.items.return_value = [
@@ -667,19 +656,15 @@ class TestConvertPowerSystemResult:
         result = convert_power_system_result(r)
         assert "gen_startup" in result
 
-    def test_optional_gen_investment_included(self):
+    def test_dispatch_investment_fields_are_not_read(self):
+        # The dispatch builds nothing (development runs give it the master's
+        # builds as existing capacity): its result has no investment fields
         r = self._make_mock_result()
-        r.gen_investment = np.array([[50.0]])
         result = convert_power_system_result(r)
-        assert "gen_investment" in result
-
-    def test_optional_bat_investment_fields(self):
-        r = self._make_mock_result()
-        r.bat_investment_power = np.array([[10.0]])
-        r.bat_investment_capacity = np.array([[100.0]])
-        result = convert_power_system_result(r)
-        assert "bat_investment_power" in result
-        assert "bat_investment_capacity" in result
+        for key in ("gen_investment", "bat_investment_power",
+                    "bat_investment_capacity", "transfer_investment",
+                    "reservoir_invest_capacity"):
+            assert key not in result
 
     def test_optional_power_flow_by_line(self):
         r = self._make_mock_result()
@@ -687,15 +672,6 @@ class TestConvertPowerSystemResult:
         result = convert_power_system_result(r)
         assert "power_flow_by_line" in result
         assert len(result["power_flow_by_line"]) == 1
-
-    def test_optional_transfer_investment(self):
-        r = self._make_mock_result()
-        mock_ti = MagicMock()
-        mock_ti.items.return_value = [((1, 2), 500.0)]
-        r.transfer_investment = mock_ti
-        result = convert_power_system_result(r)
-        assert (0, 1) in result["transfer_investment"]
-        assert result["transfer_investment"][(0, 1)] == 500.0
 
     def test_optional_bat_spillage(self):
         r = self._make_mock_result()
@@ -728,6 +704,13 @@ class TestConvertPowerSystemResult:
         r.transfer_margin = mock_tm
         result = convert_power_system_result(r)
         assert (0, 1) in result["transfer_margin"]
+
+    def test_line_losses(self):
+        r = self._make_mock_result()
+        assert "line_losses" not in convert_power_system_result(r)
+        r.line_losses = np.array([[1.5, 2.0], [1.5, 2.0]])   # [bus x hour]
+        result = convert_power_system_result(r)
+        np.testing.assert_allclose(result["line_losses"], [[1.5, 2.0], [1.5, 2.0]])
 
     def test_all_mandatory_keys_present(self):
         r = self._make_mock_result()
@@ -765,25 +748,22 @@ class TestConvertPowerSystemResult:
         cb.soc_violation_cost = 0.0
         cb.transfer_margin_cost = 0.0
         cb.v2g_compensation = -500.0
-        cb.flexible_demand_benefit = -200.0
-        cb.investment_cost = 100000.0
         cb.electrolyzer_cost = 0.0
         cb.converter_cost = 0.0
         cb.spillage_cost = 50.0
-        cb.delay_retirement_cost = 3000.0
         cb.reservoir_spillage_cost = 0.0
         cb.demand_shift_cost = 0.0
         cb.rooftop_curtailment_cost = 0.0
-        cb.npv_penalty_cost = 0.0
-        cb.reservoir_invest_cost = 0.0
         cb.pe_supply_cost = 0.0
         cb.pe_loss_cost = 0.0
         cb.pe_excess_cost = 0.0
         cb.pe_transport_cost = 0.0
         cb.pe_investment_cost = 0.0
-        cb.pe_coupling_slack_cost = 0.0
         cb.pe_electrolyzer_cost = 0.0
         cb.n1_security_shortfall_cost = 0.0
+        cb.line_flow_cost = 0.0
+        cb.operating_budget_excess = 0.0
+        cb.operating_budget_penalty = 0.0
         cb.total = 179450.0
         return cb
 
@@ -810,15 +790,15 @@ class TestConvertPowerSystemResult:
             "load_shedding_cost", "curtailment_cost", "reserve_static_cost",
             "reserve_dynamic_cost", "co2_emission_cost", "fre_penetration_cost",
             "inertia_cost", "soc_violation_cost", "transfer_margin_cost",
-            "v2g_compensation", "flexible_demand_benefit", "investment_cost",
+            "v2g_compensation",
             "electrolyzer_cost", "converter_cost", "spillage_cost",
-            "delay_retirement_cost", "reservoir_spillage_cost",
+            "reservoir_spillage_cost",
             "demand_shift_cost", "rooftop_curtailment_cost",
-            "npv_penalty_cost", "reservoir_invest_cost",
             "pe_supply_cost", "pe_loss_cost", "pe_excess_cost",
             "pe_transport_cost", "pe_investment_cost",
-            "pe_coupling_slack_cost", "pe_electrolyzer_cost",
-            "n1_security_shortfall_cost",
+            "pe_electrolyzer_cost",
+            "n1_security_shortfall_cost", "line_flow_cost",
+            "operating_budget_excess", "operating_budget_penalty",
             "total",
         }
         assert set(cb.keys()) == expected_keys
@@ -841,185 +821,11 @@ class TestConvertPowerSystemResult:
         assert cb["total"] == 179450.0 * COST_UNSCALE
 
     def test_cost_breakdown_negative_values_preserved(self):
-        """Negative values (credits like V2G, flexible demand) must be kept."""
+        """Negative values (credits like V2G) must be kept."""
         r = self._make_mock_result()
         r.cost_breakdown = self._make_mock_cost_breakdown()
         result = convert_power_system_result(r)
         assert result["cost_breakdown"]["v2g_compensation"] < 0
-        assert result["cost_breakdown"]["flexible_demand_benefit"] < 0
-
-
-# ---------------------------------------------------------------------------
-# convert_master_problem_result
-# ---------------------------------------------------------------------------
-
-
-class TestConvertMasterProblemResult:
-    """Tests for convert_master_problem_result()."""
-
-    def _make_mock_result(self, years):
-        """Create a mock Julia MasterProblemResult."""
-        r = MagicMock()
-        r.status = "OPTIMAL"
-        r.objective = 9876543.21
-        r.solve_time = 120.0
-
-        num_years = len(years)
-
-        gen_inv = {}
-        for y_idx in range(1, num_years + 1):
-            year_dict = MagicMock()
-            year_dict.keys.return_value = [1]
-            year_dict.__getitem__ = lambda self, k: np.array([50.0, 100.0])
-            gen_inv[y_idx] = year_dict
-        r.gen_investment = gen_inv
-
-        bat_pow = {}
-        bat_cap = {}
-        for y_idx in range(1, num_years + 1):
-            pow_dict = MagicMock()
-            pow_dict.keys.return_value = [1]
-            pow_dict.__getitem__ = lambda self, k: np.array([10.0])
-            bat_pow[y_idx] = pow_dict
-
-            cap_dict = MagicMock()
-            cap_dict.keys.return_value = [1]
-            cap_dict.__getitem__ = lambda self, k: np.array([100.0])
-            bat_cap[y_idx] = cap_dict
-        r.bat_power_investment = bat_pow
-        r.bat_capacity_investment = bat_cap
-
-        trans = {}
-        for y_idx in range(1, num_years + 1):
-            trans_dict = MagicMock()
-            trans_dict.items.return_value = [((1, 2), 200.0)]
-            trans[y_idx] = trans_dict
-        r.transfer_investment = trans
-
-        gen_life = {}
-        for y_idx in range(1, num_years + 1):
-            life_dict = MagicMock()
-            life_dict.keys.return_value = [1]
-            life_dict.__getitem__ = lambda self, k: np.array([1.0])
-            gen_life[y_idx] = life_dict
-        r.gen_life_extension = gen_life
-
-        bat_life = {}
-        for y_idx in range(1, num_years + 1):
-            blife_dict = MagicMock()
-            blife_dict.keys.return_value = [1]
-            blife_dict.__getitem__ = lambda self, k: np.array([0.0])
-            bat_life[y_idx] = blife_dict
-        r.bat_life_extension = bat_life
-
-        r.total_investment_by_year = np.array([1e6] * num_years)
-        r.total_operational_cost_by_year = np.array([5e5] * num_years)
-        r.re_penetration_by_year = np.array([0.3] * num_years)
-
-        cumul_gen = {}
-        for y_idx in range(1, num_years + 1):
-            cg = MagicMock()
-            cg.keys.return_value = [1]
-            cg.__getitem__ = lambda self, k: np.array([500.0])
-            cumul_gen[y_idx] = cg
-        r.cumulative_gen_capacity = cumul_gen
-
-        cumul_bat = {}
-        for y_idx in range(1, num_years + 1):
-            cb = MagicMock()
-            cb.keys.return_value = [1]
-            cb.__getitem__ = lambda self, k: np.array([200.0])
-            cumul_bat[y_idx] = cb
-        r.cumulative_bat_capacity = cumul_bat
-
-        return r
-
-    def test_status_field(self):
-        years = [2025, 2030]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert result["status"] == "OPTIMAL"
-
-    def test_objective_field(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        # Julia stores costs in M$; converter unscales to $.
-        assert result["objective"] == 9876543.21 * COST_UNSCALE
-
-    def test_solve_time_field(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert result["solve_time"] == 120.0
-
-    def test_years_field(self):
-        years = [2025, 2030, 2035]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert result["years"] == [2025, 2030, 2035]
-
-    def test_gen_investment_structure(self):
-        years = [2025, 2030]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert 2025 in result["gen_investment"]
-        assert 2030 in result["gen_investment"]
-        assert 1 in result["gen_investment"][2025]
-
-    def test_bat_investment_structure(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert "bat_power_investment" in result
-        assert "bat_capacity_investment" in result
-        assert 2025 in result["bat_power_investment"]
-
-    def test_transfer_investment_index_conversion(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        ti = result["transfer_investment"][2025]
-        assert (0, 1) in ti
-        assert ti[(0, 1)] == 200.0
-
-    def test_life_extension_fields(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert "gen_life_extension" in result
-        assert "bat_life_extension" in result
-
-    def test_summary_metrics(self):
-        years = [2025, 2030]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert isinstance(result["total_investment_by_year"], np.ndarray)
-        assert isinstance(result["total_operational_cost_by_year"], np.ndarray)
-        assert isinstance(result["re_penetration_by_year"], np.ndarray)
-
-    def test_cumulative_capacity_fields(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        assert "cumulative_gen_capacity" in result
-        assert "cumulative_bat_capacity" in result
-        assert 2025 in result["cumulative_gen_capacity"]
-
-    def test_all_expected_keys(self):
-        years = [2025]
-        r = self._make_mock_result(years)
-        result = convert_master_problem_result(r, years)
-        expected = [
-            "status", "objective", "solve_time", "years",
-            "gen_investment", "bat_power_investment", "bat_capacity_investment",
-            "transfer_investment", "gen_life_extension", "bat_life_extension",
-            "total_investment_by_year", "total_operational_cost_by_year",
-            "re_penetration_by_year", "cumulative_gen_capacity",
-            "cumulative_bat_capacity",
-        ]
-        for key in expected:
-            assert key in result, f"Missing key: {key}"
 
 
 # ---------------------------------------------------------------------------
@@ -1182,7 +988,6 @@ class TestConvertTransmissionLineData:
 
     def _make_dc_config(self):
         dc = MagicMock()
-        dc.base_impedance = 100.0
         dc.reactance_per_km = 0.0003
         dc.voltage_level_kv = 220.0
         return dc
@@ -1230,7 +1035,8 @@ class TestConvertTransmissionLineData:
         assert call_args[0] == "my_line"
 
     def test_fallback_reactance_from_length(self, mock_esfex):
-        """When reactance_pu is 0 or None, compute from length and dc_config."""
+        """When reactance_pu is 0 or None, compute from length on the line's
+        Z_base = V² / S_base (220 kV, 100 MVA → 484 Ω)."""
         line = self._make_line(reactance_pu=0, length_km=200.0)
         dc = self._make_dc_config()
 
@@ -1238,7 +1044,7 @@ class TestConvertTransmissionLineData:
             convert_transmission_line_data(line, dc)
 
         call_args = mock_esfex.TransmissionLineData.call_args[0]
-        expected_reactance = (200.0 * 0.0003) / 100.0
+        expected_reactance = (200.0 * 0.0003) / (220.0**2 / 100.0)
         assert call_args[4] == pytest.approx(expected_reactance)
 
     def test_capacity_passed(self, mock_esfex):
@@ -1340,92 +1146,6 @@ class TestConvertTransformerData:
 
         call_args = mock_esfex.TransformerData.call_args[0]
         assert call_args[0] == "HV_trafo"
-
-
-# ---------------------------------------------------------------------------
-# convert_inter_system_link
-# ---------------------------------------------------------------------------
-
-
-class TestConvertInterSystemLink:
-    """Tests for convert_inter_system_link()."""
-
-    def test_creates_julia_struct(self, mock_esfex):
-        link = {
-            "from_system": "sys_a",
-            "to_system": "sys_b",
-            "from_node": 0,
-            "to_node": 1,
-        }
-
-        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
-            convert_inter_system_link(link)
-
-        mock_esfex.InterSystemLink.assert_called_once()
-
-    def test_system_names_passed(self, mock_esfex):
-        link = {
-            "from_system": "alpha",
-            "to_system": "beta",
-            "from_node": 0,
-            "to_node": 0,
-        }
-
-        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
-            convert_inter_system_link(link)
-
-        call_args = mock_esfex.InterSystemLink.call_args[0]
-        assert call_args[0] == "alpha"
-        assert call_args[1] == "beta"
-
-    def test_index_conversion_from_node(self, mock_esfex):
-        link = {
-            "from_system": "a",
-            "to_system": "b",
-            "from_node": 2,
-            "to_node": 5,
-        }
-
-        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
-            convert_inter_system_link(link)
-
-        call_args = mock_esfex.InterSystemLink.call_args[0]
-        assert call_args[2] == 3  # 2+1
-        assert call_args[3] == 6  # 5+1
-
-    def test_uses_from_bus_over_from_node(self, mock_esfex):
-        link = {
-            "from_system": "a",
-            "to_system": "b",
-            "from_node": 0,
-            "to_node": 0,
-            "from_bus": 3,
-            "to_bus": 7,
-        }
-
-        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
-            convert_inter_system_link(link)
-
-        call_args = mock_esfex.InterSystemLink.call_args[0]
-        assert call_args[2] == 4  # 3+1
-        assert call_args[3] == 8  # 7+1
-
-    def test_default_values(self, mock_esfex):
-        link = {
-            "from_system": "a",
-            "to_system": "b",
-            "from_node": 0,
-            "to_node": 0,
-        }
-
-        with patch(_PATCH_GET_ESFEX, return_value=mock_esfex):
-            convert_inter_system_link(link)
-
-        call_args = mock_esfex.InterSystemLink.call_args[0]
-        assert call_args[4] == 0.0                  # existing_capacity_mw
-        assert call_args[5] == 0.0                  # max_investment_mw
-        # investment_cost_per_mw default is $1e6, scaled to M$ before Julia.
-        assert call_args[6] == 1e6 * COST_SCALE
 
 
 # ---------------------------------------------------------------------------
@@ -2014,7 +1734,7 @@ class TestBuildGenCostCurvesDict:
         mock_outer.__setitem__.assert_not_called()
 
     def test_flat_curve_skipped(self):
-        """Generator with flat curve (1 segment) -> empty outer dict."""
+        """Flat curve at the unit's fuel_cost (1 segment) -> empty outer dict."""
         mock_jl = MagicMock()
         mock_outer = MagicMock()
         mock_inner = MagicMock()
@@ -2055,6 +1775,31 @@ class TestBuildGenCostCurvesDict:
         assert result is mock_outer
         # Outer dict should not have any generator entry (flat curve skipped)
         mock_outer.__setitem__.assert_not_called()
+
+    def test_flat_curve_with_its_own_price_is_kept(self):
+        """A flat curve whose flat_price differs from fuel_cost prices the
+        unit: it reaches Julia as one segment (it used to be dropped)."""
+        from types import SimpleNamespace
+
+        mock_jl = MagicMock()
+        mock_outer = MagicMock()
+
+        def seval_side_effect(expr):
+            if "Dict{Int, Dict{Int, Vector" in expr:
+                return mock_outer
+            return MagicMock()
+
+        mock_jl.seval.side_effect = seval_side_effect
+        flat_curve = CostCurveConfig(curve_type="flat", flat_price=70.0)
+        gen = SimpleNamespace(fuel_cost_curve=[flat_curve], fuel_cost=[100.0])
+        with (
+            patch(_PATCH_GET_JULIA, return_value=mock_jl),
+            patch(_PATCH_GET_ESFEX, return_value=MagicMock()),
+        ):
+            build_gen_cost_curves_dict(generators=[("gen_0", gen)], gen_configs=[],
+                                       num_buses=1)
+        mock_outer.__setitem__.assert_called_once()
+        assert mock_outer.__setitem__.call_args[0][0] == 1
 
     def test_multi_segment_curve(self):
         """Generator with multi-segment curve -> outer dict has entry."""

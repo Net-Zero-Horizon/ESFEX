@@ -12,16 +12,20 @@ Two methods: GUI dialog or command line.
 
 ### Installing from the GUI
 
-Open **Plugins > Manage Plugins...**. The dialog shows all discovered plugins with name, version, category, author, and enable/disable checkbox.
+Open **Plugins > Manage Plugins...**. The dialog shows all discovered plugins with name, version, category, author, enable/disable checkbox and whether the plugin is trusted.
 
 - **From ZIP** -- Click **Install from ZIP...**, select the archive file. The plugin is extracted into your user plugins directory and loaded immediately. If a plugin with the same directory name already exists, the dialog asks whether to overwrite it.
-- **From Git** -- Click **Install from Git...**, paste the repository URL. The repo is cloned (shallow, depth 1) and the plugin loads immediately. Only `https://` and `git://` URLs are accepted for security reasons.
+- **From Git** -- Click **Install from Git...**, paste the repository URL. The repo is cloned (shallow, depth 1) and the plugin loads immediately. Only `https://` and `git://` URLs are accepted. If the host is not one of github.com, gitlab.com, bitbucket.org, codeberg.org or git.sr.ht, the dialog asks you to confirm that you trust it before cloning.
 
-No restart required. The plugin manager hot-loads new plugins, registers GUI extensions (tree categories, forms, toolbar actions, menu items, result variables, map layers, translations), and makes them available immediately.
+A plugin installed through the dialog (or `esfex plugin install`) is recorded as trusted; see [Trusted Plugins](#trusted-plugins).
+
+No restart required. The plugin manager hot-loads new plugins and registers their GUI extensions (see [GUI Extension Hooks](#gui-extension-hooks)).
 
 ### Installing Manually
 
-Place a plugin directory into any scan location (see [Where Plugins Live](#where-plugins-live)). Discovered on next application start or when opening the Manage Plugins dialog.
+Place a plugin directory into a scan location (see [Where Plugins Live](#where-plugins-live)). It is discovered at the next start of the Studio.
+
+A manually copied plugin is loaded only while no plugin has been installed through the dialog or the CLI. After the first such install, plugins whose files are not in the trusted list are skipped with a warning in the log until you trust them (see [Trusted Plugins](#trusted-plugins)).
 
 For example, to install a plugin called `weather_forecast` manually:
 
@@ -33,7 +37,7 @@ cp -r weather_forecast/ ~/.esfex/plugins/weather_forecast
 git clone --depth 1 https://github.com/user/esfex-weather ~/.esfex/plugins/esfex-weather
 ```
 
-After placing files manually, restart the editor or open **Plugins > Manage Plugins...** to trigger discovery.
+After placing files manually, restart the Studio.
 
 
 ---
@@ -65,7 +69,7 @@ If no plugins are discovered, the table shows "No plugins found."
 | **Install from ZIP...** | Opens a file chooser filtered to `.zip` files. Extracts and validates the plugin. |
 | **Install from Git...** | Opens a text input dialog for the Git repository URL. Clones and validates the plugin. |
 | **Uninstall** | Removes the selected plugin directory after confirmation. Only enabled when a row is selected. |
-| **Open Folder** | Opens the user plugins directory (`~/.esfex/plugins/`) in your system file manager. |
+| **Open Plugins Folder** | Opens the user plugins directory (`~/.esfex/plugins/`) in your system file manager. |
 
 ### OK / Cancel
 
@@ -79,18 +83,19 @@ If no plugins are discovered, the table shows "No plugins found."
 
 Toggle the checkbox next to any plugin, then click **OK**.
 
-- **Enabling**: Hot-loaded immediately. GUI extensions (menu items, toolbar buttons, tree categories, forms, map layers) appear without restart.
+- **Enabling**: Hot-loaded immediately. Its GUI extensions appear without restart.
 - **Disabling**: Marked as disabled in the state file. Because loaded Python modules cannot be fully unloaded at runtime, a restart is required. The dialog displays a notification.
 
 State persisted in `~/.esfex/plugins.json`:
 
 ```json
 {
-  "disabled": ["weather_forecast", "example_plugin"]
+  "disabled": ["weather_forecast", "example_plugin"],
+  "trusted_hashes": {"weather_forecast": "3f9a..."}
 }
 ```
 
-Plugins not listed in `disabled` are enabled by default. Deleting this file re-enables all plugins.
+Plugins not listed in `disabled` are enabled by default. Deleting this file re-enables all plugins and clears the trusted list.
 
 
 ---
@@ -101,7 +106,7 @@ Plugins not listed in `disabled` are enabled by default. Deleting this file re-e
 Select a plugin and click **Uninstall**. Upon confirmation:
 
 1. The plugin directory is permanently deleted from `~/.esfex/plugins/`.
-2. The plugin is removed from the disabled list (if it was disabled).
+2. The plugin is removed from the disabled list (if it was disabled) and from the trusted list.
 3. The table refreshes to reflect the removal.
 
 Plugin data in `~/.esfex/plugin_data/{name}/` is not removed. Delete manually to remove all traces.
@@ -112,15 +117,25 @@ Plugin data in `~/.esfex/plugin_data/{name}/` is not removed. Delete manually to
 
 ## Where Plugins Live
 
-Three scan locations in priority order:
+Two scan locations, in priority order:
 
 | Priority | Location | Purpose |
 |----------|----------|---------|
-| 1 | `~/.esfex/plugins/` | Per-user plugins. This is where GUI-installed plugins are placed. |
-| 2 | `.esfex/plugins/` | Project-local plugins in the current working directory. Useful for plugins that are specific to a single project and should be versioned alongside the project files. |
-| 3 | `$ESFEX_PLUGIN_PATH` | Colon-separated (`:` on Linux/macOS, `;` on Windows) list of additional directories to scan. Useful for shared network drives or CI environments. |
+| 1 | `~/.esfex/plugins/` | Per-user plugins. This is where installed plugins are placed. |
+| 2 | `$ESFEX_PLUGIN_PATH` | List of additional directories, separated by `:` on Linux/macOS and `;` on Windows. Useful for shared network drives or CI environments. |
 
-If two plugins share the same name, higher-priority location takes precedence. Duplicates are logged.
+If two plugins share the same name, the higher-priority location takes precedence. Duplicates are logged.
+
+Project-local plugins in `<project>/.esfex/plugins/` are **not** scanned. Loading them automatically would run code shipped inside any project you open, so the plugin manager skips them unless the caller explicitly opts in (`include_project_dir=True`), and neither the Studio nor the CLI does. When a simulation config sits next to such a folder, the log records that it was skipped.
+
+### Trusted Plugins
+
+`~/.esfex/plugins.json` keeps a `trusted_hashes` list: a SHA-256 hash of the files in each plugin directory, recorded when the plugin is installed through the dialog or `esfex plugin install`, or when you trust it. Python bytecode (`__pycache__/`, `.pyc`) and `.git/` are not hashed; plugins are always imported from their source, so cached bytecode is never run.
+
+- While the list is empty (no plugin has been installed that way yet), every discovered, enabled plugin is loaded.
+- Once it holds at least one entry, a plugin is loaded only if its current hash matches the recorded one. Plugins copied in by hand, or edited after installation, are skipped with a warning in the log, and the dialog's **Trusted** column shows "No".
+
+To approve such a plugin, select it in **Plugins > Manage Plugins...** and click **Trust**, or run `esfex plugin trust <name>`. This records the plugin's current files; it then loads (in the Studio right away, if enabled). A trusted plugin runs with full access to your files and processes, so trust only code you know.
 
 
 ---
@@ -206,8 +221,8 @@ class WeatherForecastPlugin(ESFEXPlugin):
 
     def get_menu_items(self, menu_bar, main_window):
         """Add a Fetch Weather menu item under the Plugins menu."""
-        plugins_menu = menu_bar.findChild(type(menu_bar), "plugins_menu")
-        # ... add actions ...
+        action = main_window._plugins_menu.addAction("Fetch Weather")
+        action.triggered.connect(self._fetch_weather)
 
 
 def create_plugin(context: PluginContext) -> WeatherForecastPlugin:
@@ -219,7 +234,11 @@ def create_plugin(context: PluginContext) -> WeatherForecastPlugin:
 
 ## Plugin Configuration
 
-Plugins define a Pydantic schema validated against the `plugins.{name}` YAML section. Override `get_config_schema()`:
+The top-level `plugins:` section of the YAML configuration is kept as a free-form dictionary (`config.plugins`). A plugin reads its own entry from the config it receives in its hooks or from `self.context.config`.
+
+To have the section checked, return a Pydantic model from `get_config_schema()`. When a simulation starts, the `plugins.{name}` section (if present) is validated against it, and an invalid section stops the run with an error naming it. The Studio checks it too when it starts with a config file, and logs a warning instead. The section stays a dict in `config.plugins`.
+
+`on_config_loaded(config)` is then called with the validated configuration, once per run (before `pre_simulation()`) and when the Studio starts with a config file; `self.context.config` is set to the same config just before. It is not called for a plugin whose section is invalid.
 
 ```python
 from pydantic import BaseModel
@@ -234,8 +253,7 @@ class WeatherForecastPlugin(ESFEXPlugin):
         return WeatherConfig
 
     def on_config_loaded(self, config):
-        plugin_cfg = config.plugins.get("weather_forecast", {})
-        self.settings = WeatherConfig(**plugin_cfg)
+        self.settings = WeatherConfig(**config.plugins.get("weather_forecast", {}))
 ```
 
 In the YAML configuration file:
@@ -263,7 +281,8 @@ Override only needed hooks -- all have no-op defaults.
 | Hook | When Called | Purpose |
 |------|------------|---------|
 | `setup()` | After instantiation | One-time initialization |
-| `teardown()` | Application shutdown | Release resources, close connections |
+| `on_config_loaded()` | A run starts, or the Studio starts with a config file | `config`; see [Plugin Configuration](#plugin-configuration) |
+| `teardown()` | End of a simulation run (`Orchestrator.run`) | Release resources, close connections |
 
 ### Simulation Hooks
 
@@ -281,16 +300,18 @@ Override only needed hooks -- all have no-op defaults.
 
 | Hook | Returns | Purpose |
 |------|---------|---------|
-| `get_tree_categories()` | `list[dict]` | Add categories to the element tree panel |
-| `get_forms(model)` | `list[tuple[str, QWidget]]` | Register property forms for custom element types |
-| `get_toolbar_actions(toolbar, window)` | `list[QAction]` | Add buttons to the main toolbar |
-| `get_menu_items(menu_bar, window)` | `None` | Add items to the menu bar |
+| `get_tree_categories()` | `list[dict]` | Add categories (`{"key", "label", "element_type"}`) to every system in the element tree |
+| `get_forms(model)` | `list[tuple[str, QWidget]]` | Register property forms for custom element types (`model` is the Studio's data model) |
+| `get_toolbar_actions(toolbar, window)` | `list[QAction]` | Add buttons to the main toolbar (returned actions are added if the plugin did not add them) |
+| `get_menu_items(menu_bar, window)` | `None` | Add items to the menu bar (`window._plugins_menu` is the **Plugins** menu) |
 | `get_result_variables()` | `list[tuple[str, str, str, str]]` | Register result variables: `(display_name, hdf5_key, aggregation, viz_type)` |
 | `get_map_layers(map_widget)` | `None` | Add custom overlay layers to the Leaflet map |
 | `get_translations()` | `dict[str, dict]` | Provide `{lang: {key: value}}` translation strings |
 | `get_julia_modules()` | `list[Path]` | Return `.jl` files to `include()` at runtime as overlays |
-| `get_cli_commands()` | `list[typer.Typer]` | Register CLI sub-commands under `esfex {name} ...` |
-| `get_config_schema()` | `type[BaseModel]` | Pydantic model for plugin configuration validation |
+| `get_cli_commands()` | `list[typer.Typer]` | Register CLI sub-commands under `esfex {name} ...` (see [Plugin Commands](#plugin-commands)) |
+| `get_config_schema()` | `type[BaseModel]` | Pydantic model validating the `plugins.{name}` section (see [Plugin Configuration](#plugin-configuration)) |
+
+A plugin tree category starts empty: ESFEX does not store elements of plugin types. Add them with `window.element_tree.add_plugin_element(key, element_id, label)` (current system); selecting one shows the form registered for the category's `element_type` and calls its `load_element(element_id)`. They are not saved with the project. `map_widget` may still be loading when `get_map_layers()` runs; run your JavaScript (the Leaflet map is the global `map`) from its `loadFinished` signal, which also fires when the map reloads.
 
 A common use of `get_julia_modules()` is registering a custom optimization
 constraint type via `ESFEX.register_constraint_hook!` — see
@@ -311,12 +332,25 @@ Active plugins register menu items under the **Plugins** menu (below "Manage Plu
 esfex plugin list
 esfex plugin install --git https://github.com/user/esfex-weather
 esfex plugin install --zip weather_plugin.zip
+esfex plugin trust weather_forecast     # approve a hand-copied or edited plugin
 esfex plugin enable weather_forecast
 esfex plugin disable weather_forecast
 esfex plugin uninstall weather_forecast
 ```
 
-Mirrors GUI dialog functionality. Useful for headless servers, CI pipelines, or scripted deployments.
+Mirrors the dialog functionality. Useful for headless servers, CI pipelines, or scripted deployments. `--name/-n` sets the target directory name for a Git install.
+
+`--git` accepts the hosts listed under [Installing from the GUI](#installing-from-the-gui). For any other host, add `--trust-host` to confirm that you trust it (the dialog asks the same question):
+
+```bash
+esfex plugin install --git https://git.example.org/team/esfex-weather.git --trust-host
+```
+
+There is no `--force`: to reinstall, uninstall first.
+
+### Plugin Commands
+
+Plugins can add their own commands (`get_cli_commands()`), run as `esfex <plugin name> <command> ...`; `esfex --help` lists them. When `esfex` starts with a command that is not built in (or with `--help`), it loads the enabled, trusted plugins (see [Trusted Plugins](#trusted-plugins)) and mounts their commands. Built-in commands such as `esfex run` do not load plugins at that point. A plugin that fails to load, returns something that is not a Typer app, or is named like a built-in command is skipped with a message on the console; the other commands keep working.
 
 
 ---
@@ -328,8 +362,12 @@ Mirrors GUI dialog functionality. Useful for headless servers, CI pipelines, or 
 
 - Verify the directory contains both `plugin.json` and `__init__.py`.
 - Check that `name` in `plugin.json` uses only alphanumeric characters, underscores, and hyphens.
-- Confirm the plugin is in one of the three scan locations. Run `esfex plugin list` to verify.
+- Confirm the plugin is in `~/.esfex/plugins/` or in a directory listed in `$ESFEX_PLUGIN_PATH`. Project-local `.esfex/plugins/` folders are not scanned. Run `esfex plugin list` to verify.
 - Check the log for warnings (`"missing plugin.json or __init__.py"`, `"unsafe characters"`).
+
+### Plugin Discovered but Not Loaded
+
+If the log says the plugin's hash "does not match the trusted hash on record", it was skipped by the trusted list. See [Trusted Plugins](#trusted-plugins).
 
 ### Plugin Fails to Load
 
@@ -341,6 +379,7 @@ Mirrors GUI dialog functionality. Useful for headless servers, CI pipelines, or 
 
 - Confirm the plugin is enabled (checkbox checked, or not in `disabled` list).
 - Check that `gui_mode` is `True` in the plugin context (set automatically in GUI mode).
+- A plugin tree category is empty until the plugin adds elements to it (see [GUI Extension Hooks](#gui-extension-hooks)).
 - Verify hook methods return correct types (e.g., `get_forms()` must return `list[(str, QWidget)]`).
 
 ### Disabling a Plugin Does Not Take Effect
@@ -369,6 +408,9 @@ rm ~/.esfex/plugins.json
 - **Name sanitization**: Plugin directory names must match `^[A-Za-z0-9][A-Za-z0-9_-]*$`. Names containing path separators, dots, or other special characters are rejected.
 - **Git hook prevention**: When cloning a plugin from Git, hooks are disabled by pointing `core.hooksPath` to an empty temporary directory. This prevents malicious pre-checkout or post-checkout hooks from executing arbitrary code.
 - **URL scheme restriction**: Only `https://` and `git://` Git URLs are accepted. Local file paths, `ssh://`, and other schemes are blocked to prevent unintended local file access.
+- **Host confirmation**: Git hosts outside github.com, gitlab.com, bitbucket.org, codeberg.org and git.sr.ht need an explicit confirmation in the dialog, or `--trust-host` on the command line.
+- **No project-local plugins**: `<project>/.esfex/plugins/` is not scanned, so opening someone else's project does not run its code.
+- **Trusted hashes**: once a plugin has been installed through the dialog or CLI, only plugins whose SHA-256 hash is on record are loaded (see [Trusted Plugins](#trusted-plugins)).
 - **Overwrite confirmation**: Installing a plugin over an existing one requires explicit confirmation (a dialog in the GUI, or the `force` parameter in the API).
 - **Audit logging**: Every plugin installation and load operation logs a SHA-256 hash of the plugin directory contents. This provides an audit trail for verifying plugin integrity.
 - **Isolated execution**: Each plugin hook invocation is wrapped in a try/except block. A broken or malicious plugin that raises an exception will log an error but never crash the core application or affect other plugins.

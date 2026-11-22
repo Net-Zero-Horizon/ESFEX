@@ -38,12 +38,29 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from esfex.visualization.i18n import tr
 from esfex.visualization.workflows.otec_studio import optimize as opt
 from esfex.visualization.workflows.otec_studio import regional as reg
 from esfex.visualization.workflows.otec_studio.project import StudioConfig
 from esfex.visualization.workflows.otec_studio.workers import RegionalWorker
 
 logger = logging.getLogger(__name__)
+
+# Fallback when OTEX cannot list its regions. These are OTEX region ids (passed
+# back to run_regional_optimization as typed), so they are not translated.
+_FALLBACK_REGIONS = ("Cuba", "Jamaica", "Fiji", "Mauritius")
+
+# Result columns shown in the table → translation key of their header.
+_TABLE_COLUMNS = {
+    "id": "otec_studio.reg_col_id",
+    "latitude": "otec_studio.reg_col_latitude",
+    "longitude": "otec_studio.reg_col_longitude",
+    "lcoe_min": "otec_studio.reg_col_lcoe_min",
+    "p_net_kW": "otec_studio.reg_col_p_net",
+    "depth_CW_opt": "otec_studio.reg_col_depth_cw",
+    "capex_total_MUSD": "otec_studio.reg_col_capex",
+    "feasible": "otec_studio.reg_col_feasible",
+}
 
 
 class RegionalPanel(QWidget):
@@ -63,9 +80,9 @@ class RegionalPanel(QWidget):
     def _build_ui(self):
         root = QVBoxLayout(self)
 
-        ctrl = QGroupBox("Regional batch optimization  —  network, slow")
+        ctrl = QGroupBox(tr("otec_studio.reg_group"))
         cl = QHBoxLayout(ctrl)
-        cl.addWidget(QLabel("Region:"))
+        cl.addWidget(QLabel(tr("otec_studio.reg_region")))
         self._region = QComboBox()
         self._region.setEditable(True)
         try:
@@ -74,10 +91,10 @@ class RegionalPanel(QWidget):
             if idx >= 0:
                 self._region.setCurrentIndex(idx)
         except Exception:
-            self._region.addItems(["Cuba", "Jamaica", "Fiji", "Mauritius"])
+            self._region.addItems(list(_FALLBACK_REGIONS))
         cl.addWidget(self._region, 1)
 
-        cl.addWidget(QLabel("Cap CAPEX:"))
+        cl.addWidget(QLabel(tr("otec_studio.reg_cap_capex")))
         self._cap_on = QCheckBox()
         cl.addWidget(self._cap_on)
         self._cap_capex = QDoubleSpinBox()
@@ -88,7 +105,7 @@ class RegionalPanel(QWidget):
         self._cap_on.toggled.connect(self._cap_capex.setEnabled)
         cl.addWidget(self._cap_capex)
 
-        self._btn = QPushButton("Run regional")
+        self._btn = QPushButton(tr("otec_studio.reg_run"))
         self._btn.setStyleSheet(
             "background-color: #2980b9; color: white; font-weight: bold; padding: 6px;")
         self._btn.clicked.connect(self._run)
@@ -96,23 +113,22 @@ class RegionalPanel(QWidget):
         root.addWidget(ctrl)
 
         opts = QHBoxLayout()
-        self._feasible_only = QCheckBox("Feasible only")
+        self._feasible_only = QCheckBox(tr("otec_studio.reg_feasible_only"))
         self._feasible_only.setChecked(True)
         self._feasible_only.toggled.connect(self._redraw)
         opts.addWidget(self._feasible_only)
-        self._btn_export = QPushButton("Export CSV")
+        self._btn_export = QPushButton(tr("otec_studio.export_csv"))
         self._btn_export.setEnabled(False)
         self._btn_export.clicked.connect(self._export)
         opts.addWidget(self._btn_export)
         # Ported from OTEC Analysis: cluster feasible sites into dev zones.
-        self._btn_zones = QPushButton("Cluster zones")
-        self._btn_zones.setToolTip(
-            "DBSCAN-cluster feasible sites into development zones (polygons)")
+        self._btn_zones = QPushButton(tr("otec_studio.reg_cluster_zones"))
+        self._btn_zones.setToolTip(tr("otec_studio.reg_cluster_zones_tip"))
         self._btn_zones.setEnabled(False)
         self._btn_zones.clicked.connect(self._cluster_zones)
         opts.addWidget(self._btn_zones)
         opts.addStretch()
-        self._summary = QLabel("Run a region to see results.")
+        self._summary = QLabel(tr("otec_studio.reg_run_hint"))
         opts.addWidget(self._summary, 1)
         root.addLayout(opts)
 
@@ -160,7 +176,7 @@ class RegionalPanel(QWidget):
                 max_capex_MUSD=self._cap_capex.value())
         self._btn.setEnabled(False)
         self._progress.setVisible(True)
-        self._summary.setText("Running regional optimization (network, slow)…")
+        self._summary.setText(tr("otec_studio.reg_running"))
         self._worker = RegionalWorker(self._region.currentText(), kwargs)
         self._worker.finished.connect(self._on_done)
         self._worker.error.connect(self._on_error)
@@ -180,8 +196,8 @@ class RegionalPanel(QWidget):
         self._progress.setVisible(False)
         self._btn.setEnabled(True)
         self._summary.setText(
-            f"<span style='color:#e67e22;'>Regional run unavailable "
-            f"(offline / no credentials): {msg}</span>")
+            "<span style='color:#e67e22;'>"
+            + tr("otec_studio.reg_unavailable", error=msg) + "</span>")
 
     # ------------------------------------------------------------------
     # Display
@@ -200,13 +216,17 @@ class RegionalPanel(QWidget):
         cap = (f"{s['total_capacity_MW']:,.0f} MW"
                if s["total_capacity_MW"] is not None else "—")
         best = s["best_site"]
-        best_txt = (f"best {best['lcoe']:.3f} @({best['latitude']:.1f},"
-                    f"{best['longitude']:.1f})" if best else "—")
+        best_txt = (tr("otec_studio.reg_best_site", lcoe=f"{best['lcoe']:.3f}",
+                       lat=f"{best['latitude']:.1f}",
+                       lon=f"{best['longitude']:.1f}") if best else "—")
         self._summary.setText(
-            f"<b>{s['n_feasible']}/{s['n_total']}</b> feasible · "
-            f"LCOE {s['lcoe_min']:.3f}–{s['lcoe_max']:.3f} (med "
-            f"{s['lcoe_median']:.3f}) · capacity {cap} · {best_txt}"
-            if s["n_feasible"] else f"0/{s['n_total']} feasible.")
+            tr("otec_studio.reg_summary", feasible=s["n_feasible"],
+               total=s["n_total"], lcoe_min=f"{s['lcoe_min']:.3f}",
+               lcoe_max=f"{s['lcoe_max']:.3f}",
+               lcoe_median=f"{s['lcoe_median']:.3f}", capacity=cap,
+               best=best_txt)
+            if s["n_feasible"]
+            else tr("otec_studio.reg_none_feasible", total=s["n_total"]))
         self._draw_map()
         self._fill_table()
 
@@ -233,9 +253,10 @@ class RegionalPanel(QWidget):
                     ax.plot(xs, ys, color="#c0392b", lw=1.2, zorder=2)
                 except (AttributeError, NotImplementedError):
                     pass  # multipolygon / non-polygon geometry: skip outline
-        ax.set_xlabel("Longitude")
-        ax.set_ylabel("Latitude")
-        ax.set_title("Optimal LCOE by site", fontsize=11, fontweight="bold")
+        ax.set_xlabel(tr("otec_studio.reg_col_longitude"))
+        ax.set_ylabel(tr("otec_studio.reg_col_latitude"))
+        ax.set_title(tr("otec_studio.reg_map_title"), fontsize=11,
+                     fontweight="bold")
         ax.grid(alpha=0.3)
         self._canvas.draw()
 
@@ -243,11 +264,9 @@ class RegionalPanel(QWidget):
         df = self._view_frame()
         if df is None:
             return
-        cols = [c for c in (
-            "id", "latitude", "longitude", "lcoe_min", "p_net_kW",
-            "depth_CW_opt", "capex_total_MUSD", "feasible") if c in df.columns]
+        cols = [c for c in _TABLE_COLUMNS if c in df.columns]
         self._table.setColumnCount(len(cols))
-        self._table.setHorizontalHeaderLabels(cols)
+        self._table.setHorizontalHeaderLabels([tr(_TABLE_COLUMNS[c]) for c in cols])
         self._table.setRowCount(len(df))
         for r in range(len(df)):
             for c, key in enumerate(cols):
@@ -263,26 +282,32 @@ class RegionalPanel(QWidget):
             return
         from esfex.visualization.workflows.otec_studio import engineering as eng
         s = reg.summarize_regional(self._df)
+        # Every feasible site is eligible: the threshold is the highest LCOE
+        # of the run, on purpose (the scenario's lcoe_threshold has no widget
+        # in the Studio and its 0.15 $/kWh default would drop most OTEC
+        # sites). The buffer follows the scenario (zone_buffer_km).
         thr = (s["lcoe_max"] if s["lcoe_max"] is not None else 1.0)
         try:
             self._zones = eng.zones_from_regional(
-                self._df, lcoe_threshold=thr, buffer_km=10.0)
+                self._df, lcoe_threshold=thr,
+                buffer_km=float(self._config().zone_buffer_km or 10.0))
         except Exception as exc:  # noqa: BLE001
             self._summary.setText(
-                f"<span style='color:#e67e22;'>Zone clustering failed: "
-                f"{exc}</span>")
+                "<span style='color:#e67e22;'>"
+                + tr("otec_studio.reg_zones_failed", error=exc) + "</span>")
             return
         n = len(self._zones)
         self._draw_map()  # redraw with zone overlay
         self._summary.setText(
-            self._summary.text() + f"  ·  <b>{n} development zone(s)</b>")
+            self._summary.text() + "  ·  "
+            + tr("otec_studio.reg_zones_count", count=n))
 
     def _export(self):
         if self._df is None:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export regional results", "otec_regional.csv",
-            "CSV (*.csv);;HDF5 (*.h5)")
+            self, tr("otec_studio.reg_export_title"), "otec_regional.csv",
+            tr("otec_studio.reg_export_filter"))
         if not path:
             return
         try:
@@ -290,6 +315,7 @@ class RegionalPanel(QWidget):
                 self._df.to_hdf(path, key="regional", mode="w")
             else:
                 self._df.to_csv(path, index=False)
-            QMessageBox.information(self, "Export", f"Saved to {path}")
+            QMessageBox.information(self, tr("otec_studio.export_title"),
+                                    tr("otec_studio.saved_to", path=path))
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Export failed", str(exc))
+            QMessageBox.critical(self, tr("otec_studio.export_failed"), str(exc))

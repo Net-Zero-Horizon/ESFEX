@@ -117,10 +117,10 @@ class NativeACBridge:
         """Lazy-load the Julia ESFEX module."""
         if self._jl is not None:
             return
-        from juliacall import Main as jl
-        # Ensure the ESFEX module is loaded
-        jl.seval('using ESFEX')
-        self._jl = jl
+        # get_julia() activates the ESFEX Julia project and loads the module; a
+        # bare `using ESFEX` only worked if something else had loaded it first.
+        from esfex.bridge.julia_setup import get_julia
+        self._jl = get_julia()
 
     # ── Network building ──
 
@@ -314,21 +314,23 @@ class NativeACBridge:
             q_gen,
             list(self._p_load_mw),
             list(self._q_load_mvar),
-            active_line_from or [0],   # Julia needs non-empty vectors
-            active_line_to or [0],
-            active_line_r or [0.0],
-            active_line_x or [0.0],
-            active_line_b or [0.0],
-            active_line_cap or [0.0],
-            active_line_ids or [""],
-            self._trafo_from or [0],
-            self._trafo_to or [0],
-            self._trafo_r_pu or [0.0],
-            self._trafo_x_pu or [0.0],
-            self._trafo_tap or [0.0],
-            self._trafo_rated_mva or [0.0],
-            self._trafo_impedance_pu or [0.0],
-            self._trafo_names or [""],
+            # Empty lists convert to empty typed vectors. A [0] placeholder
+            # became a phantom branch at bus 0 (BoundsError in the Y-bus).
+            active_line_from,
+            active_line_to,
+            active_line_r,
+            active_line_x,
+            active_line_b,
+            active_line_cap,
+            active_line_ids,
+            self._trafo_from,
+            self._trafo_to,
+            self._trafo_r_pu,
+            self._trafo_x_pu,
+            self._trafo_tap,
+            self._trafo_rated_mva,
+            self._trafo_impedance_pu,
+            self._trafo_names,
         )
 
         # Handle empty network edge case
@@ -365,13 +367,14 @@ class NativeACBridge:
 
         # Bus results
         for i, bus_id in enumerate(self._bus_ids):
-            vm = float(jl_result.voltage_magnitude[i + 1])  # Julia 1-indexed
-            va_rad = float(jl_result.voltage_angle[i + 1])
+            # juliacall wraps Julia vectors with Python (0-based) indexing.
+            vm = float(jl_result.voltage_magnitude[i])
+            va_rad = float(jl_result.voltage_angle[i])
             va_deg = math.degrees(va_rad)
             result.bus_vm_pu[bus_id] = round(vm, 4)
             result.bus_va_deg[bus_id] = round(va_deg, 2)
-            result.bus_p_mw[bus_id] = round(float(jl_result.p_injection[i + 1]), 2)
-            result.bus_q_mvar[bus_id] = round(float(jl_result.q_injection[i + 1]), 2)
+            result.bus_p_mw[bus_id] = round(float(jl_result.p_injection[i]), 2)
+            result.bus_q_mvar[bus_id] = round(float(jl_result.q_injection[i]), 2)
 
             if vm < v_min or vm > v_max:
                 result.voltage_violations.append({
@@ -385,10 +388,9 @@ class NativeACBridge:
         n_active = len(line_ids)
         for k, lid in enumerate(line_ids):
             edge_id = f"edge_{lid}"
-            jk = k + 1  # Julia 1-indexed
-            p_from = float(jl_result.p_flow_from[jk])
-            q_from = float(jl_result.q_flow_from[jk])
-            p_loss = float(jl_result.p_losses[jk])
+            p_from = float(jl_result.p_flow_from[k])
+            q_from = float(jl_result.q_flow_from[k])
+            p_loss = float(jl_result.p_losses[k])
             total_losses += p_loss
 
             result.line_p_from_mw[edge_id] = round(p_from, 2)
@@ -406,8 +408,8 @@ class NativeACBridge:
         # Transformer results (appended after lines in Julia output)
         for k, tname in enumerate(self._trafo_names):
             edge_id = f"edge_{tname}"
-            jk = n_active + k + 1
-            if jk <= len(jl_result.p_flow_from):
+            jk = n_active + k
+            if jk < len(jl_result.p_flow_from):
                 p_from = float(jl_result.p_flow_from[jk])
                 q_from = float(jl_result.q_flow_from[jk])
                 p_loss = float(jl_result.p_losses[jk])
@@ -529,6 +531,20 @@ class NativeACBridge:
     def get_network(self) -> Any:
         """Return a truthy value if network is built (compatibility)."""
         return self._network_built or None
+
+    def gen_in_service(self, gen_id: str) -> bool:
+        """Whether a dispatchable generator is in service in the current network."""
+        return gen_id in self._gen_id_to_pp and self._gen_in_service.get(gen_id, True)
+
+    def shift_gen_output(self, gen_id: str, delta_mw: float) -> None:
+        """Add ``delta_mw`` to a generator's output."""
+        if gen_id not in self._original_gen_outputs:
+            return
+        self._original_gen_outputs[gen_id] += delta_mw
+        if self._gen_in_service.get(gen_id, True):
+            idx = self._bus_id_to_idx.get(self._gen_id_to_bus[gen_id])
+            if idx is not None:
+                self._p_gen_mw[idx] += delta_mw
 
     # ── Mappings for ACContingencyAnalyzer compatibility ──
 

@@ -24,23 +24,23 @@ function refresh() {
         let data = null;
         try { data = JSON.parse(rawJson); }
         catch (e) {
-            showStatus("Bad payload: " + e.message, true);
+            showStatus(_t("web.common.bad_payload", { error: e.message }), true);
             return;
         }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false);
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false);
             return;
         }
         if (!data.years || !data.years.length
             || !data.values_mwh || !data.values_mwh.length) {
-            showStatus("No battery data", false);
+            showStatus(_t("web.charts.battery_heatmap.no_data"), false);
             return;
         }
         try {
             renderHeatmap(data);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error(e);
         }
     });
@@ -118,9 +118,7 @@ function renderHeatmap(data) {
             y: 0.78, yanchor: "middle",
         },
         xaxis: "x", yaxis: "y",
-        hovertemplate:
-            "<b>%{y} %{x}</b><br>" +
-            "Discharge: %{z:,.1f} MWh<extra></extra>",
+        hovertemplate: _t("web.charts.battery_heatmap.hover_heatmap"),
     });
 
     // ── Subplot b) — Annual Arbitrage P&L ──
@@ -129,12 +127,12 @@ function renderHeatmap(data) {
         traces.push({
             type: "bar",
             x: years, y: data.discharge_revenue_musd,
-            name: "Discharge revenue",
+            name: _t("web.charts.battery_heatmap.trace_revenue"),
             marker: { color: "#1F8FBF",
                       line: { color: "#FFFFFF", width: 0.5 } },
             xaxis: "x2", yaxis: "y2",
             offsetgroup: "arb",
-            hovertemplate: "%{x}: %{y:,.2f} M$<extra>Revenue</extra>",
+            hovertemplate: _t("web.charts.battery_heatmap.hover_revenue"),
         });
     }
     if (data.charge_cost_musd && data.charge_cost_musd.length) {
@@ -142,25 +140,25 @@ function renderHeatmap(data) {
         traces.push({
             type: "bar",
             x: years, y: neg,
-            name: "Charge cost",
+            name: _t("web.charts.battery_heatmap.trace_cost"),
             marker: { color: "#7D3C98",
                       line: { color: "#FFFFFF", width: 0.5 } },
             xaxis: "x2", yaxis: "y2",
             offsetgroup: "arb",
             customdata: data.charge_cost_musd,
-            hovertemplate: "%{x}: %{customdata:,.2f} M$<extra>Cost</extra>",
+            hovertemplate: _t("web.charts.battery_heatmap.hover_cost"),
         });
     }
     if (data.margin_dollar_per_mwh && data.margin_dollar_per_mwh.length) {
         traces.push({
             type: "scatter", mode: "lines+markers",
             x: years, y: data.margin_dollar_per_mwh,
-            name: "Net margin",
+            name: _t("web.charts.battery_heatmap.trace_margin"),
             line: { color: "#2C3E50", width: 2.5 },
             marker: { color: "#2C3E50", size: 7,
                       line: { color: "#FFFFFF", width: 1 } },
             xaxis: "x2", yaxis: "y3",
-            hovertemplate: "%{x}: %{y:,.2f} $/MWh<extra>Margin</extra>",
+            hovertemplate: _t("web.charts.battery_heatmap.hover_margin"),
         });
     }
 
@@ -172,11 +170,11 @@ function renderHeatmap(data) {
         showlegend: true,
         barmode: "relative",
         annotations: [
-            { text: "<b>a) Monthly Battery Discharge</b>",
+            { text: "<b>" + _t("web.charts.battery_heatmap.title_a") + "</b>",
               x: 0.455, xref: "paper", xanchor: "center",
               y: 1.00, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
-            { text: "<b>b) Annual Arbitrage P&L</b>",
+            { text: "<b>" + _t("web.charts.battery_heatmap.title_b") + "</b>",
               x: 0.455, xref: "paper", xanchor: "center",
               y: 0.46, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
@@ -203,33 +201,33 @@ function renderHeatmap(data) {
         xaxis: {
             domain: [0, 0.91], anchor: "y",
             type: "category", tickangle: -45,
-            title: "<b>Year</b>",
+            title: "<b>" + _t("web.charts.battery_heatmap.axis_year") + "</b>",
             automargin: false,
         },
         yaxis: {
             domain: [0.54, 0.98], anchor: "x",
             type: "category",
-            title: "<b>Month</b>",
+            title: "<b>" + _t("web.charts.battery_heatmap.axis_month") + "</b>",
             automargin: false,
         },
         // Subplot b: arbitrage bars + margin line (bottom half)
         xaxis2: {
             domain: [0, 0.91], anchor: "y2",
             type: "category", tickangle: -45,
-            title: "<b>Year</b>",
+            title: "<b>" + _t("web.charts.battery_heatmap.axis_year") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
             automargin: false,
         },
         yaxis2: {
             domain: [0.0, 0.44], anchor: "x2",
-            title: "<b>Annual P&L (M$)</b>",
+            title: "<b>" + _t("web.charts.battery_heatmap.axis_pnl") + "</b>",
             gridcolor: "rgba(0,0,0,0.08)",
             automargin: false,
         },
         yaxis3: {
             domain: [0.0, 0.44], anchor: "x2",
             overlaying: "y2", side: "right",
-            title: { text: "<b>Margin ($/MWh disch.)</b>",
+            title: { text: "<b>" + _t("web.charts.battery_heatmap.axis_margin") + "</b>",
                      font: { color: "#2C3E50", size: 10 } },
             showgrid: false,
             automargin: false,

@@ -26,22 +26,22 @@ function refresh() {
         let data = null;
         try { data = JSON.parse(rawJson); }
         catch (e) {
-            showStatus("Bad payload: " + e.message, true);
+            showStatus(_t("web.common.bad_payload", { error: e.message }), true);
             return;
         }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false);
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false);
             return;
         }
         if (!data.x_labels || data.x_labels.length === 0) {
-            showStatus("No battery data", false);
+            showStatus(_t("web.charts.battery_operation.no_data"), false);
             return;
         }
         try {
             renderOperation(data);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error(e);
         }
     });
@@ -65,10 +65,10 @@ function renderOperation(data) {
     if (data.charge_gwh && data.charge_gwh.length) {
         traces.push({
             x: x, y: data.charge_gwh,
-            type: "bar", name: "Charge",
+            type: "bar", name: _t("web.charts.battery_operation.charge"),
             marker: { color: "#9B59B6", opacity: 0.85 },
             offsetgroup: "ops",
-            hovertemplate: "%{x}: %{y:,.2f} GWh<extra>Charge</extra>",
+            hovertemplate: "%{x}: %{y:,.2f} GWh<extra>" + _t("web.charts.battery_operation.charge") + "</extra>",
         });
     }
 
@@ -77,11 +77,11 @@ function renderOperation(data) {
         const neg = data.discharge_gwh.map(v => -Math.abs(v || 0));
         traces.push({
             x: x, y: neg,
-            type: "bar", name: "Discharge",
+            type: "bar", name: _t("web.charts.battery_operation.discharge"),
             marker: { color: "#3498DB", opacity: 0.85 },
             offsetgroup: "ops",
             customdata: data.discharge_gwh,
-            hovertemplate: "%{x}: %{customdata:,.2f} GWh<extra>Discharge</extra>",
+            hovertemplate: "%{x}: %{customdata:,.2f} GWh<extra>" + _t("web.charts.battery_operation.discharge") + "</extra>",
         });
     }
 
@@ -92,38 +92,38 @@ function renderOperation(data) {
         const neg = data.spillage_gwh.map(v => -Math.abs(v || 0));
         traces.push({
             x: x, y: neg,
-            type: "bar", name: "Losses (Spillage)",
+            type: "bar", name: _t("web.charts.battery_operation.losses_spillage"),
             marker: { color: "#E74C3C", opacity: 0.75 },
             offsetgroup: "ops",
             customdata: data.spillage_gwh,
-            hovertemplate: "%{x}: %{customdata:,.2f} GWh<extra>Losses</extra>",
+            hovertemplate: "%{x}: %{customdata:,.2f} GWh<extra>" + _t("web.charts.battery_operation.extra_losses") + "</extra>",
         });
     }
 
-    const resCap = data.resolution.charAt(0).toUpperCase() + data.resolution.slice(1);
-    const title = `Battery Operation — Year ${data.year} (${data.resolution})`;
+    // Resolution ids sent by BatteryOperationChart: hourly / daily /
+    // monthly / yearly; anything else is shown capitalised.
+    const RES_TITLE = {
+        hourly: _t("web.charts.battery_operation.res_hourly"), daily: _t("web.charts.battery_operation.res_daily"),
+        monthly: _t("web.charts.battery_operation.res_monthly"), yearly: _t("web.charts.battery_operation.res_yearly"),
+    };
+    const resCap = RES_TITLE[data.resolution]
+        || (data.resolution.charAt(0).toUpperCase() + data.resolution.slice(1));
 
     const layout = {
-        // Wider top margin to host title + horizontal legend stack.
-        margin: { t: 90, r: 30, b: 60, l: 70 },
+        // Top margin hosts the horizontal legend above the plot.
+        margin: { t: 60, r: 30, b: 60, l: 70 },
         barmode: "relative",
         showlegend: true,
-        annotations: [
-            { text: "<b>" + title + "</b>",
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.14, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
-        ],
         shapes: [
             { type: "line", xref: "x domain", yref: "y",
               x0: 0, x1: 1, y0: 0, y1: 0,
               line: { color: "#000000", width: 1 } },
         ],
-        // Horizontal legend just below the title, above the plot.
+        // Horizontal legend above the plot.
         legend: {
             orientation: "h",
             x: 0.5, xanchor: "center",
-            y: 1.06, yanchor: "bottom",
+            y: 1.02, yanchor: "bottom",
             font: { size: 10 },
             tracegroupgap: 12,
             bgcolor: "rgba(255,255,255,0.85)",
@@ -136,7 +136,7 @@ function renderOperation(data) {
             tickangle: -45,
         },
         yaxis: {
-            title: "<b>Energy (GWh)</b>",
+            title: "<b>" + _t("web.charts.battery_operation.axis_energy") + "</b>",
         },
     };
 

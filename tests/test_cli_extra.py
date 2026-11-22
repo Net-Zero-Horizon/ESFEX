@@ -205,6 +205,60 @@ class TestStudio:
             )
         assert result.exit_code == 0
         assert "saved" in result.output.lower()
+        # -o reaches the Studio (it used to be dropped).
+        fake_vis.launch_studio.assert_called_once_with(
+            config=str(tmp_path / "in.yaml"), blocking=True,
+            output=str(tmp_path / "out.yaml"))
+
+    def test_launch_studio_passes_output_and_reloads_saved_file(
+            self, tmp_path, monkeypatch):
+        """launch_studio hands ``output`` to the window and returns the
+        configuration reloaded from the file the user saved."""
+        pytest.importorskip("PySide6")
+        import esfex.visualization as vis
+        import esfex.visualization.app as vis_app
+
+        window = SimpleNamespace(_last_saved_path=None)
+        calls = {}
+
+        def fake_run_studio(config=None, system=None, output=None):
+            calls.update(config=config, output=output)
+            return window
+
+        app_obj = MagicMock()
+        app_obj.exec.side_effect = lambda: setattr(
+            window, "_last_saved_path", str(tmp_path / "out.yaml"))
+        monkeypatch.setattr(vis_app, "_get_or_create_app", lambda: app_obj)
+        monkeypatch.setattr(vis_app, "run_studio", fake_run_studio)
+        with patch("esfex.config.loader.load_config", return_value="CFG") as load:
+            result = vis.launch_studio("in.yaml", output=tmp_path / "out.yaml")
+        assert calls == {"config": "in.yaml", "output": str(tmp_path / "out.yaml")}
+        load.assert_called_once_with(str(tmp_path / "out.yaml"))
+        assert result == "CFG"
+
+        app_obj.exec.side_effect = None
+        window._last_saved_path = None
+        assert vis.launch_studio("in.yaml") is None
+
+    def test_saved_invalid_config_is_reported_not_raised(self, tmp_path, monkeypatch):
+        """"Save anyway" on a configuration with errors: the file is
+        written, reloading it fails after the window closes. The CLI used to
+        end in a traceback."""
+        pytest.importorskip("PySide6")
+        import esfex.visualization.app as vis_app
+
+        saved = tmp_path / "bad.yaml"
+        saved.write_text("meta_network:\n  systems: [Nowhere]\nsystems: {}\n")
+        window = SimpleNamespace(_last_saved_path=str(saved))
+        monkeypatch.setattr(vis_app, "_get_or_create_app", lambda: MagicMock())
+        monkeypatch.setattr(vis_app, "run_studio", lambda **kw: window)
+        result = runner.invoke(app, ["studio", "-o", str(saved)])
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        out = "".join(re.sub(r"\x1b\[[0-9;]*m", "", result.output).split())
+        assert f"savedto{saved}" in out
+        assert "doesnotvalidate" in out
+        assert "esfexvalidate-c" in out
 
     def test_not_saved(self):
         fake_vis = SimpleNamespace(launch_studio=MagicMock(return_value=False))
@@ -461,6 +515,42 @@ class TestTrainDemandModel:
         # progress_cb is passed and callable; invoke it to cover on_progress
         kwargs = fake_mod.train_demand_model.call_args.kwargs
         kwargs["progress_cb"](50, "halfway")
+        assert kwargs["n_cv_folds"] == 3
+        assert kwargs["dataset_dir"] is None and kwargs["output_path"] is None
+
+    def test_options_reach_training(self, tmp_path):
+        fake_mod = SimpleNamespace(train_demand_model=MagicMock(return_value="model"))
+        with patch.dict(sys.modules, {"esfex.models.demand_training": fake_mod}):
+            result = runner.invoke(app, [
+                "train-demand-model", "--folds", "2",
+                "--cache-dir", str(tmp_path), "-o", str(tmp_path / "m.xgb")])
+        assert result.exit_code == 0, result.output
+        kwargs = fake_mod.train_demand_model.call_args.kwargs
+        # Only keywords train_demand_model really uses (no swallowed ones).
+        assert set(kwargs) == {"dataset_dir", "output_path",
+                               "n_cv_folds", "progress_cb"}
+        assert kwargs["n_cv_folds"] == 2
+        assert kwargs["dataset_dir"] == tmp_path
+        assert kwargs["output_path"] == tmp_path / "m.xgb"
+
+    @pytest.mark.parametrize("args", [
+        ["--countries", "10"], ["--year-start", "2000"], ["--year-end", "2020"],
+        ["--engine", "xgboost"], ["--engine", "tft"], ["-e", "tft"],
+    ])
+    def test_removed_or_invalid_options_are_rejected(self, args):
+        fake_mod = SimpleNamespace(train_demand_model=MagicMock(return_value="model"))
+        with patch.dict(sys.modules, {"esfex.models.demand_training": fake_mod}):
+            result = runner.invoke(app, ["train-demand-model", *args])
+        assert result.exit_code == 2
+        fake_mod.train_demand_model.assert_not_called()
+
+    def test_training_rejects_unknown_keywords(self, tmp_path):
+        from esfex.models.demand_training import train_demand_model
+
+        with pytest.raises(TypeError, match="n_countries"):
+            train_demand_model(dataset_dir=tmp_path, n_countries=200)
+        with pytest.raises(TypeError, match="engine"):
+            train_demand_model(engine="tft", dataset_dir=tmp_path)
 
     def test_import_error(self):
         fake_mod = SimpleNamespace(
@@ -530,6 +620,8 @@ class TestRegisterPluginCli:
 
 class TestEntrypoint:
     def test_entrypoint_invokes_app(self):
-        with patch.object(cli, "app") as fake_app:
+        with patch.object(cli, "app") as fake_app, \
+                patch.object(cli, "_register_plugin_cli") as register:
             cli._entrypoint()
+        register.assert_called_once()
         fake_app.assert_called_once()

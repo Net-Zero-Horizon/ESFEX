@@ -7,22 +7,26 @@ delegating to Julia implementations.
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import numpy as np
 
 from esfex.utils.temporal import HOURS_STD_YEAR, aggregate_to_resolution
+from esfex.utils.per_unit import system_s_base
 from esfex.config.schema import (
     BatteryConfig,
     GeneratorConfig,
     N1SecurityConfig,
     NodeConfig,
-    PenaltiesConfig,
     ESFEXConfig,
     SolverConfig,
     SystemConfig,
     TemporalConfig,
+    fuel_price_factor,
 )
+
+if TYPE_CHECKING:
+    from esfex.topology import ReductionMap, ResultExpander
 from esfex.bridge.converters import (
     COST_SCALE,
     COST_UNSCALE,
@@ -31,15 +35,22 @@ from esfex.bridge.converters import (
     build_outage_mask_by_id,
     build_outage_mask_matrix,
     compile_outage_factor,
+    unit_outage_factors,
+    absolute_start_hour,
+    battery_availability_key,
+    battery_technology_availability_key,
     fuel_source_outage_windows,
+    outage_window_spans,
+    outage_window_tuple,
     convert_battery_config,
     convert_battery_technology_config,
     convert_generator_config,
-    convert_index_py_to_julia,
     convert_network_config,
     convert_power_system_result,
     convert_technology_config,
     convert_temporal_config,
+    expand_node_to_bus_array,
+    expand_node_to_bus_matrix,
     py_to_julia_matrix,
     py_to_julia_vector,
     py_to_julia_int_vector,
@@ -47,31 +58,96 @@ from esfex.bridge.converters import (
     scale_cost_list,
 )
 from esfex.bridge.julia_setup import get_julia, get_esfex_module
-from esfex.io.demand import load_availability_profile
+from esfex.io.demand import load_availability_profile, load_inflow_profile
 
 
 logger = logging.getLogger(__name__)
 
 
+# Warnings that would repeat for every rolling window (and every master
+# solve) are logged once per run: the runner calls reset_run_warnings() when
+# a run starts.
+_RUN_WARNINGS: set = set()
+
+
+def reset_run_warnings() -> None:
+    """Forget the warnings logged so far, so a new run logs them again."""
+    _RUN_WARNINGS.clear()
+
+
+def _warn_once(key, msg: str, *args) -> None:
+    """``logger.warning(msg, *args)`` the first time ``key`` is seen in a run."""
+    if key in _RUN_WARNINGS:
+        return
+    _RUN_WARNINGS.add(key)
+    logger.warning(msg, *args)
+
+
 # Values of a controlling combo (HiGHS "solver_method", Gurobi "method") that
-# mean "let the solver decide" — no specific algorithm is pinned, so no
-# algorithm-specific option should be forced.
+# mean "let the solver decide" — no specific algorithm is pinned.
 _METHOD_AUTO_SENTINELS = frozenset({"choose", "auto"})
+
+# Solvers that reject an option of an algorithm that is not selected (some
+# HiGHS builds raise UnsupportedAttribute for `pdlp_scaling`): there a
+# method-specific option is forwarded only when its method is pinned. Gurobi,
+# CPLEX and Xpress accept every parameter whatever the algorithm, and their
+# automatic method can run barrier, so under it an option is forwarded when
+# its `enabled_when` lists the automatic choice.
+_STRICT_METHOD_GATING = frozenset({"highs"})
+
+
+def _solver_option_labels(catalog: list[dict]) -> tuple[dict, dict, dict]:
+    """``(key → attr, key → default label, key → {str(value): label})`` of a
+    solver's option catalog: the GUI saves a combo under its attr with the
+    integer value (Gurobi ``Method: 2``), the gates name its labels."""
+    key_to_attr: dict[str, str] = {}
+    ctrl_default: dict[str, str] = {}
+    value_label: dict[str, dict[str, str]] = {}
+    for opt in catalog:
+        key, attr = opt.get("key"), opt.get("attr", opt.get("key"))
+        if key and attr and key != attr:
+            key_to_attr[key] = attr
+        if key:
+            ctrl_default[key] = str(opt.get("default", "choose"))
+            if opt.get("values") is not None and opt.get("choices") is not None:
+                value_label[key] = {str(v): str(c) for v, c in
+                                    zip(opt["values"], opt["choices"])}
+    return key_to_attr, ctrl_default, value_label
+
+
+def _active_method(options: dict, ctrl_key: str, catalog: list[dict]) -> str:
+    """Label of the controlling combo ``ctrl_key`` in ``options`` (saved
+    under its key or attr, as a label or as its integer value), or its
+    default."""
+    key_to_attr, ctrl_default, value_label = _solver_option_labels(catalog)
+    ctrl_attr = key_to_attr.get(ctrl_key, ctrl_key)
+    for kk in (ctrl_key, ctrl_attr):
+        if kk in options and options[kk] is not None:
+            val = str(options[kk])
+            return value_label.get(ctrl_key, {}).get(val, val)
+    return ctrl_default.get(ctrl_key, "choose")
 
 
 def _method_gated_drops(options: dict, solver_name: str = "highs") -> set[str]:
     """Identifiers of solver options to drop because they are method-specific
-    but the controlling combo is on auto/'choose' (or a different method).
+    and the controlling combo selects a method they do not apply to.
 
     Some options (e.g. HiGHS ``pdlp_scaling``) only apply when an LP-method
     combo (``solver_method``) is set to a specific algorithm. The GUI collects
     them under ``solver_method='choose'`` too (their ``enabled_when`` lists
     ``choose``), so a saved config carries them even when no method is pinned.
-    Forwarding such an option makes the solver reject an inapplicable
-    parameter — on some HiGHS builds ``pdlp_scaling`` raises
-    ``UnsupportedAttribute`` and aborts the *entire* model build. Only forward
-    a method-gated option when its controller is explicitly set to a matching,
-    non-auto method.
+    Forwarding such an option makes HiGHS reject an inapplicable parameter —
+    on some builds ``pdlp_scaling`` raises ``UnsupportedAttribute`` and aborts
+    the *entire* model build — so for HiGHS (``_STRICT_METHOD_GATING``) a
+    method-gated option is forwarded only when its controller is explicitly
+    set to a matching, non-auto method. The other solvers accept any
+    parameter: an option is dropped only when the method selected is one it
+    does not list (Gurobi ``Crossover`` with primal simplex), and kept under
+    the automatic method when its gate lists it (Gurobi ``Crossover`` and
+    ``BarConvTol`` with ``Method`` -1: the concurrent optimizer runs barrier).
+
+    The controller may be saved as its label (``"barrier"``) or, as the
+    Studio writes it, as its integer value (``Method: 2``).
 
     Pure (no Julia) so it can be unit-tested directly.
     """
@@ -83,22 +159,7 @@ def _method_gated_drops(options: dict, solver_name: str = "highs") -> set[str]:
         return drops
 
     catalog = SOLVER_OPTIONS.get(active, [])
-    # key ↔ attr map and each controlling combo's default, for this solver.
-    key_to_attr: dict[str, str] = {}
-    ctrl_default: dict[str, str] = {}
-    for opt in catalog:
-        key, attr = opt.get("key"), opt.get("attr", opt.get("key"))
-        if key and attr and key != attr:
-            key_to_attr[key] = attr
-        if key:
-            ctrl_default[key] = str(opt.get("default", "choose"))
-
-    def _active_ctrl(ctrl_key: str) -> str:
-        ctrl_attr = key_to_attr.get(ctrl_key, ctrl_key)
-        for kk in (ctrl_key, ctrl_attr):
-            if kk in options and options[kk] is not None:
-                return str(options[kk])
-        return ctrl_default.get(ctrl_key, "choose")
+    strict = active in _STRICT_METHOD_GATING
 
     for opt in catalog:
         gate = opt.get("enabled_when")
@@ -107,8 +168,9 @@ def _method_gated_drops(options: dict, solver_name: str = "highs") -> set[str]:
         applies = True
         for ctrl_key, allowed in gate.items():
             allowed_set = {str(a) for a in allowed}
-            active_val = _active_ctrl(ctrl_key)
-            if active_val in _METHOD_AUTO_SENTINELS or active_val not in allowed_set:
+            active_val = _active_method(options, ctrl_key, catalog)
+            if (strict and active_val in _METHOD_AUTO_SENTINELS) \
+                    or active_val not in allowed_set:
                 applies = False
                 break
         if not applies:
@@ -118,6 +180,160 @@ def _method_gated_drops(options: dict, solver_name: str = "highs") -> set[str]:
             if any(i in options for i in idents):
                 drops.update(idents)
     return drops
+
+
+def _barrier_options_under_auto_method(options: dict, solver_name: str) -> bool:
+    """True when Gurobi's ``Method`` is automatic and ``Crossover`` is off.
+
+    Turning crossover off asks for a barrier solve, but on an LP the
+    automatic method runs the concurrent optimizer: barrier shares the
+    threads with simplex and the setting only matters if barrier finishes
+    first. The caller logs a recommendation to select barrier.
+    """
+    if solver_name.lower() != "gurobi":
+        return False
+    try:
+        from esfex.config.solver import SOLVER_OPTIONS
+    except Exception:
+        return False
+    catalog = SOLVER_OPTIONS.get("gurobi", [])
+    if "Crossover" not in options and "crossover" not in options:
+        return False
+    return (_active_method(options, "method", catalog) == "auto"
+            and _active_method(options, "crossover", catalog) == "off")
+
+
+# Termination statuses of a solver stopped by a resource limit
+_LIMIT_STATUSES = ("TIME_LIMIT", "NODE_LIMIT", "ITERATION_LIMIT",
+                   "SOLUTION_LIMIT", "OBJECTIVE_LIMIT", "OTHER_LIMIT",
+                   "MEMORY_LIMIT")
+
+
+def _is_limit_status(status_str: str) -> bool:
+    return any(lim in status_str for lim in _LIMIT_STATUSES)
+
+
+def _accept_limit_incumbent(jl, model_var: str, status_str: str,
+                            primal_status: str, what: str, advice: str) -> bool:
+    """Accept the FEASIBLE point a solver holds when it stopped at a limit.
+
+    True when ``status_str`` is a resource limit (time, nodes, iterations…)
+    and the primal status is ``FEASIBLE_POINT`` (not ``INFEASIBLE_POINT``):
+    the point is a valid plan or dispatch, only not proven optimal. Logs a
+    WARNING with the objective, the solver's bound and the gap when the
+    solver gives them, then ``advice``. ``model_var`` is the Julia global
+    holding the model.
+    """
+    if primal_status.split(".")[-1] != "FEASIBLE_POINT" or not _is_limit_status(status_str):
+        return False
+    try:
+        obj = float(jl.seval(f"objective_value({model_var})"))
+        bound = float(jl.seval(f"objective_bound({model_var})"))
+        if not np.isfinite(bound):
+            raise ValueError("no bound")
+        gap = abs(obj - bound) / (abs(obj) + 1e-9)
+        logger.warning(
+            "%s stopped at %s with a FEASIBLE point — accepting it "
+            "(objective=%.6g, bound=%.6g, gap=%.2f%%). It is valid but not "
+            "proven optimal; %s",
+            what, status_str, obj, bound, gap * 100.0, advice,
+        )
+    except Exception:
+        logger.warning(
+            "%s stopped at %s with a FEASIBLE point — accepting it "
+            "(optimality gap unknown). It is valid but not proven optimal; %s",
+            what, status_str, advice,
+        )
+    return True
+
+
+# A loss-repair gap above this share is logged at INFO (below, at DEBUG)
+LOSS_REPAIR_GAP_INFO = 1e-3
+
+
+def loss_repair_bounds(jl_model) -> Optional[dict]:
+    """The bounds of the last line-loss repair of a solved Julia model
+    (``ESFEX.loss_repair_bounds``), costs in $: ``lower_bound`` (the first
+    solve, with the PWL loss model: lines may lose more than the PWL loss of
+    their flow, a relaxation of the model with exact PWL losses),
+    ``objective`` (the repaired solve: an upper bound of it), ``gap`` =
+    (objective − lower_bound) / |objective|, ``rounds``, ``linearised`` and
+    ``released`` (line-steps). ``None`` for a model without PWL losses, an
+    unoptimal first solve, or any bridge error."""
+    try:
+        bounds = get_esfex_module().loss_repair_bounds(jl_model)
+        if bounds is None:
+            return None
+        out = {str(k): float(v) for k, v in bounds.items()}
+    except Exception as exc:  # diagnostics only: never fail a solve on them
+        logger.debug(f"No line-loss repair bounds: {exc}")
+        return None
+    for key in ("lower_bound", "objective"):
+        out[key] *= COST_UNSCALE
+    for key in ("rounds", "linearised", "released"):
+        out[key] = int(out[key])
+    return out
+
+
+def log_loss_repair_bounds(what: str, bounds: Optional[dict]) -> None:
+    """Log a solve's loss-repair bounds (:func:`loss_repair_bounds`): at
+    INFO when the gap exceeds ``LOSS_REPAIR_GAP_INFO``, else at DEBUG."""
+    if not bounds or bounds["rounds"] == 0:
+        return
+    level = logging.INFO if bounds["gap"] > LOSS_REPAIR_GAP_INFO else logging.DEBUG
+    logger.log(
+        level,
+        f"{what} line losses: PWL solve ${bounds['lower_bound']:,.0f} (lower bound, "
+        f"lines may lose beyond their flows' losses), repaired "
+        f"${bounds['objective']:,.0f} (gap {bounds['gap']:.2%}; "
+        f"{bounds['rounds']} repair round(s), {bounds['linearised']} line-step(s) "
+        f"held in one direction, {bounds['released']} released)")
+
+
+def _nodes_without_load_bus(buses, num_nodes: int) -> list[int]:
+    """Nodes (0-indexed) whose demand no bus of the dispatch carries.
+
+    The dispatch puts a node's demand on its ``load`` and ``mixed`` buses,
+    each taking its ``demand_fraction``; a node with no such bus (no bus at
+    all, or only ``connection`` buses) has its demand in no power balance.
+    """
+    carried = np.zeros(num_nodes)
+    for b in buses:
+        if getattr(b, "role", "load") in ("load", "mixed") and 0 <= b.parent_node < num_nodes:
+            carried[b.parent_node] += max(float(b.demand_fraction), 0.0)
+    return [n for n in range(num_nodes) if carried[n] <= 1e-9]
+
+
+def master_solver_options(esfex_config: Any) -> dict:
+    """The solver options of every master solve: ``solver.options`` with
+    ``master_problem.solver_options`` merged over them.
+
+    A master key replaces the same option of ``solver.options`` however it
+    is written there (the Studio key ``method`` or the solver's ``Method``).
+    """
+    if esfex_config is None:
+        return {}
+    solver = getattr(esfex_config, "solver", None)
+    options = dict(getattr(solver, "options", None) or {})
+    mp = getattr(esfex_config, "master_problem", None)
+    override = dict(getattr(mp, "solver_options", None) or {})
+    if not override:
+        return options
+    attr_of: dict[str, str] = {}
+    try:
+        from esfex.config.solver import SOLVER_OPTIONS
+        for opt in SOLVER_OPTIONS.get(str(getattr(solver, "name", "highs")).lower(), []):
+            attr = opt.get("attr", opt.get("key"))
+            for ident in (opt.get("key"), attr):
+                if ident:
+                    attr_of[ident] = attr
+    except Exception:
+        pass
+    replaced = {attr_of.get(str(k), str(k)) for k in override}
+    options = {k: v for k, v in options.items()
+               if attr_of.get(str(k), str(k)) not in replaced}
+    options.update(override)
+    return options
 
 
 def _solver_options_to_julia(options: dict, solver_name: str = "highs") -> Any:
@@ -176,6 +392,15 @@ def _solver_options_to_julia(options: dict, solver_name: str = "highs") -> Any:
     # Method-specific options whose controlling combo is on auto/'choose' (or a
     # different method) must not be forwarded — see _method_gated_drops.
     method_drops = _method_gated_drops(options, active)
+    if _barrier_options_under_auto_method(options, active):
+        _warn_once(
+            ("solver_option_concurrent", active),
+            "Gurobi Method is automatic with Crossover off: on an LP Gurobi runs "
+            "its concurrent optimizer, where barrier shares the threads with "
+            "simplex and Crossover only applies if barrier finishes first. For "
+            "a large LP such as the master problem, select method: barrier "
+            "(Method 2).",
+        )
 
     jl_dict = jl.seval("Dict{String, Any}()")
     for k, v in options.items():
@@ -185,7 +410,8 @@ def _solver_options_to_julia(options: dict, solver_name: str = "highs") -> Any:
         # Drop method-inapplicable options (e.g. PDLP flags while LP method is
         # left on "choose") before they reach — and are rejected by — the solver.
         if key_str in method_drops or attr_str in method_drops:
-            logger.warning(
+            _warn_once(
+                ("solver_option_method", active, key_str),
                 "Dropping solver option %r: it only applies to a specific "
                 "LP/QP method that is not currently selected.",
                 key_str,
@@ -196,7 +422,8 @@ def _solver_options_to_julia(options: dict, solver_name: str = "highs") -> Any:
         # valid solver parameters that simply aren't surfaced in the GUI.
         owners = attr_owners.get(attr_str) or attr_owners.get(key_str)
         if owners and active not in owners:
-            logger.warning(
+            _warn_once(
+                ("solver_option_owner", active, key_str),
                 "Dropping solver option %r: attribute belongs to %s, "
                 "active solver is %r",
                 key_str, "/".join(sorted(owners)), active,
@@ -233,6 +460,27 @@ def _investment_axes(tech_idx, year_idx):
     }
 
 
+def _lookup_axis_entry(kind, m, entry):
+    """1-based index of ``entry`` on a named axis, or None if unknown.
+
+    Names match as strings, so a YAML ``1`` finds the key ``"1"`` and
+    ``"2030"`` finds the year 2030. On a unit or technology axis an integer
+    that names no key is a 1-based position, like on the numeric axes.
+    """
+    for key in (entry, str(entry)):
+        if key in m:
+            return m[key]
+    if kind == "year":
+        try:
+            return m.get(int(entry))
+        except (TypeError, ValueError):
+            return None
+    if isinstance(entry, (int, np.integer)) and not isinstance(entry, bool) \
+            and 1 <= int(entry) <= len(m):
+        return int(entry)
+    return None
+
+
 def _resolve_one(cc, name_axes) -> dict:
     """Resolve a single constraint into a plain spec with 1-based Julia indices
     (``"all"`` → -1). Raises ValueError on an unknown name."""
@@ -250,12 +498,13 @@ def _resolve_one(cc, name_axes) -> dict:
                 resolved.append(-1)
             elif pos in axes:
                 kind, m = axes[pos]
-                if entry not in m:
+                idx = _lookup_axis_entry(kind, m, entry)
+                if idx is None:
                     raise ValueError(
                         f"custom constraint '{cc.name}': unknown {kind} "
                         f"'{entry}' for variable '{t.variable}'"
                     )
-                resolved.append(m[entry])
+                resolved.append(idx)
             else:
                 resolved.append(int(entry))
         terms.append({"variable": t.variable, "index": resolved,
@@ -312,50 +561,32 @@ def _custom_constraints_to_julia(specs: list[dict], jl) -> Any:
     return jl_vec
 
 
-def _dict_to_jl_tuple_dict(py_dict: dict) -> Any:
-    """Convert {(g,b): float} Python dict to Julia Dict{Tuple{Int,Int}, Float64}.
-
-    Accepts keys as tuples (g, b) or strings "g_b".
-    """
-    jl = get_julia()
-    if not py_dict:
-        return jl.seval("Dict{Tuple{Int64,Int64}, Float64}()")
-    pairs = []
-    for key, val in py_dict.items():
-        if isinstance(key, tuple):
-            g, b = int(key[0]), int(key[1])
-        else:
-            parts = str(key).split("_")
-            g, b = int(parts[0]), int(parts[1])
-        pairs.append(f"({g}, {b}) => {float(val)}")
-    return jl.seval(f"Dict{{Tuple{{Int64,Int64}}, Float64}}({', '.join(pairs)})")
-
-
-def _scale_dict_values(py_dict: dict) -> dict:
-    """Scale all values in a {key: float} dict by COST_SCALE ($ -> M$)."""
-    if not py_dict:
-        return py_dict
-    return {k: v * COST_SCALE for k, v in py_dict.items()}
-
-
-def _dict_to_jl_tuple_bool_dict(py_dict: dict) -> Any:
-    """Convert {(g,b): bool} Python dict to Julia Dict{Tuple{Int,Int}, Bool}."""
-    jl = get_julia()
-    if not py_dict:
-        return jl.seval("Dict{Tuple{Int64,Int64}, Bool}()")
-    pairs = []
-    for key, val in py_dict.items():
-        if isinstance(key, tuple):
-            g, b = int(key[0]), int(key[1])
-        else:
-            parts = str(key).split("_")
-            g, b = int(parts[0]), int(parts[1])
-        pairs.append(f"({g}, {b}) => {'true' if val else 'false'}")
-    return jl.seval(f"Dict{{Tuple{{Int64,Int64}}, Bool}}({', '.join(pairs)})")
-
-
 # ─── Renewable fuel types (no transport cost adjustment) ───
 _RENEWABLE_FUELS = {"Sun", "Wind", "Water", "OTEC", "None"}
+
+
+def _rated_efficiency(eff, rated=None, default: float = 0.35) -> float:
+    """Efficiency at rated power of a unit whose fields are per node: the
+    mean over the nodes where it has rated power, weighted by that power (over
+    the nodes with an efficiency when no rated power is given).
+
+    The plain mean over every node counted the nodes without the unit, whose
+    efficiency is 0: a unit at one of 136 nodes came out 136 times less
+    efficient and burnt 136 times the fuel. ``default`` when no node has an
+    efficiency.
+    """
+    if eff is None:
+        return default
+    if np.isscalar(eff):
+        return float(eff) if float(eff) > 1e-6 else default
+    eff = [float(e or 0.0) for e in eff]
+    rated = [float(r or 0.0) for r in (rated or [])]
+    pairs = [(e, rated[i]) for i, e in enumerate(eff)
+             if e > 1e-6 and i < len(rated) and rated[i] > 0]
+    if pairs:
+        return sum(e * r for e, r in pairs) / sum(r for _, r in pairs)
+    positive = [e for e in eff if e > 1e-6]
+    return sum(positive) / len(positive) if positive else default
 
 
 def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -419,6 +650,18 @@ def _build_gen_q_limits(sys) -> "Any":
     return jl.seval(f"Dict{{Int64, Vector{{Float64}}}}({', '.join(pairs)})")
 
 
+def _fuel_price_growth(sys) -> "Any":
+    """``price_growth_rate`` of each fuel of the ``fuels`` block that grows,
+    as the Julia ``Dict{String, Float64}`` the master input takes."""
+    jl = get_julia()
+    rates = jl.seval("Dict{String, Float64}()")
+    setindex = jl.seval("setindex!")
+    for key, fuel in (getattr(sys, "fuels", None) or {}).items():
+        if fuel.price_growth_rate:
+            setindex(rates, float(fuel.price_growth_rate), str(key))
+    return rates
+
+
 def _build_gen_q_limits_min(sys) -> "Any":
     """Build generator reactive power Q_min limits dict for Julia."""
     jl = get_julia()
@@ -468,6 +711,111 @@ def _pwl_segments_from_config_master(dc_config) -> int:
         return 0
 
 
+# Per-bus fields of a virtual unit that hold capacity: summed when buses merge
+_PER_BUS_CAPACITY_FIELDS = ("rated_power", "MaxChargePower", "MaxDischargePower", "capacity")
+
+
+def _per_bus_unit_on_model_buses(
+    vdata: Dict[str, Any],
+    reduction_map: Optional["ReductionMap"],
+    original_buses: list,
+) -> Dict[str, Any]:
+    """Lay a per-bus virtual unit out on a reduced dispatch network's buses.
+
+    Units built from master investments (``_is_per_bus``) carry arrays over
+    the system's own buses; with ``network_reduction`` the dispatch is built
+    on the reduced network, whose bus ``k`` is original bus
+    ``retained_original_indices[k]``, so the arrays are re-indexed (they were
+    read as reduced-bus arrays, which put capacity on the wrong buses, even
+    at another node). Capacity on an eliminated bus moves to the retained bus
+    of the same node with the largest ``demand_fraction``; the other per-bus
+    fields take the retained buses' values. Other units pass through.
+    """
+    rm = reduction_map
+    n_orig = len(original_buses)
+    rp = vdata.get("rated_power") or vdata.get("capacity") or []
+    if (rm is None or not vdata.get("_is_per_bus") or not rm.n_original_buses
+            or rm.n_original_buses != n_orig or len(rp) != n_orig):
+        return vdata
+    retained = list(rm.retained_original_indices)
+    reduced_of = {o: r for r, o in enumerate(retained)}
+    # Eliminated bus → reduced bus that takes its capacity
+    target: Dict[int, Optional[int]] = {}
+    for o in range(n_orig):
+        if o in reduced_of:
+            continue
+        node = original_buses[o].parent_node
+        same_node = [r for r, ob in enumerate(retained)
+                     if original_buses[ob].parent_node == node]
+        target[o] = max(same_node, default=None, key=lambda r: float(
+            getattr(original_buses[retained[r]], "demand_fraction", 0.0) or 0.0))
+
+    out = dict(vdata)
+    for field_name, values in vdata.items():
+        if not isinstance(values, list) or len(values) != n_orig:
+            continue
+        if field_name in _PER_BUS_CAPACITY_FIELDS:
+            reduced = [float(values[o]) for o in retained]
+            for o, r in target.items():
+                v = float(values[o] or 0.0)
+                if v == 0.0:
+                    continue
+                if r is None:
+                    logger.warning(
+                        "%s: %.3g of %s on eliminated bus %s has no retained bus "
+                        "in its node; dropped from the reduced dispatch",
+                        vdata.get("name"), v, field_name, original_buses[o].bus_id)
+                else:
+                    reduced[r] += v
+            out[field_name] = reduced
+        elif field_name == "num_units":
+            # The units of the buses whose capacity a retained bus takes
+            units = [0] * len(retained)
+            for o in range(n_orig):
+                r = reduced_of.get(o, target.get(o))
+                if r is not None and float(rp[o] or 0.0) > 0:
+                    units[r] += int(values[o])
+            out[field_name] = [max(1, u) for u in units]
+        else:
+            out[field_name] = [values[o] for o in retained]
+    return out
+
+
+def _add_unattached_load_shed(result: Dict[str, Any], demand, nodes, jl_input,
+                              keep_steps: Optional[int] = None) -> None:
+    """Report the demand of nodes without a load bus as unserved load.
+
+    That demand sits in no power balance (see ``_nodes_without_load_bus``),
+    so the model can neither serve nor shed it. It is added to the result as
+    ``unattached_load_shed`` [node, step] (MW), to ``load_shed_total`` (MWh)
+    and, at the model's loss-of-load penalty, to the load-shedding cost, the
+    cost total and the objective (only the committed ``keep_steps`` count
+    in the totals, as for the rest of the window).
+    """
+    if not nodes or demand is None:
+        return
+    from esfex.bridge.converters import COST_UNSCALE
+    dem = np.asarray(demand, dtype=float)               # [step, node]
+    n_steps, n_nodes = dem.shape
+    unserved = np.zeros((n_nodes, n_steps))
+    for n in nodes:
+        if n < n_nodes:
+            unserved[n] = np.clip(dem[:, n], 0.0, None)
+    result["unattached_load_shed"] = unserved
+    kept = n_steps if keep_steps is None or not 0 < int(keep_steps) < n_steps else int(keep_steps)
+    tres = max(1.0, float(jl_input.temporal.resolution_hours))
+    energy = float(unserved[:, :kept].sum()) * tres
+    if energy <= 0:
+        return
+    cost = energy * float(jl_input.loss_of_load_penalty) * COST_UNSCALE
+    result["load_shed_total"] = float(result.get("load_shed_total", 0.0)) + energy
+    result["objective"] = float(result.get("objective", 0.0)) + cost
+    cbd = result.get("cost_breakdown")
+    if cbd is not None:
+        cbd["load_shedding_cost"] = cbd.get("load_shedding_cost", 0.0) + cost
+        cbd["total"] = cbd.get("total", 0.0) + cost
+
+
 def _expand_powersystem_result(
     result: Dict[str, Any],
     expander: "ResultExpander",
@@ -491,7 +839,9 @@ def _expand_powersystem_result(
     for key in (
         "gen_output", "curtailment",
         "gen_status", "gen_startup",
-        "bat_charge", "bat_discharge", "bat_soc",
+        "bat_charge", "bat_discharge", "bat_soc", "bat_spillage",
+        "reservoir_level", "reservoir_spillage", "reservoir_pump",
+        "electrolyzer_power", "electrolyzer_h2",
     ):
         arr = result.get(key)
         if arr is None:
@@ -511,6 +861,13 @@ def _expand_powersystem_result(
                 a, axis=0,
                 copy_from_neighbour=True,  # leaves inherit, series interpolates
             )
+    # Line losses [bus x hour]: a quantity, kept on the retained buses
+    arr = result.get("line_losses")
+    if arr is not None:
+        a = _np.asarray(arr)
+        if a.ndim == 2 and a.shape[0] == rm.n_reduced_buses:
+            result["line_losses"] = expander.expand_bus_array(
+                a, axis=0, copy_from_neighbour=False)
 
     # ── Per-line flows ──
     # Julia's ``power_flow_by_line`` concatenates transmission lines +
@@ -667,174 +1024,125 @@ def _resolve_element_bus_mapping(
     return gen_bus_per_node, bat_bus_per_node
 
 
-def _compute_geographic_fuel_adjustments(
-    sys_config: "SystemConfig",
-) -> Dict[str, List[float]]:
-    """Compute fuel_cost adjustments based on geographic distance to nearest fuel storage.
+# Units already warned about free life extension, so the master of every
+# myopic year does not repeat the warning: (system, kind, unit key).
+_FREE_EXTENSION_WARNED: set = set()
 
-    For each fuel-consuming generator with known geographic position, find the
-    nearest fuel storage containing that fuel and adjust ``fuel_cost`` to account
-    for distance-based transport costs and losses.
+
+def life_extension_invest_costs(sys) -> tuple[dict, dict]:
+    """Investment costs that price the life extension of existing units.
+
+    The master charges a life-extended MW ``invest_cost x
+    life_extension_cost_factor`` per year. Existing units often carry an
+    ``invest_cost`` of 0 (the Studio default), which made extension free.
+    Where a unit's ``invest_cost`` is 0 at a node where it has capacity (the
+    other nodes are ignored), the candidate it would be replaced with
+    supplies the cost: for a generator, the technology with
+    the same fuel and type (the one named by its ``technology`` field
+    first, else the first in config order); for a battery, the battery
+    technology named by its ``technology`` field, else the first battery
+    technology. In a merged multi-system run (keys ``{system}__{key}``) the
+    candidate comes from the unit's own system, whose costs sit at the
+    unit's own nodes. Without a candidate, or where the candidate's cost is 0
+    at a node the unit occupies, the extension stays free and a warning is
+    logged once per unit.
 
     Returns:
-        dict mapping gen_key → adjusted ``fuel_cost`` array (only keys that need
-        adjustment are included).
+        ``(gen_costs, bat_costs)``: per-node ``invest_cost`` lists for the
+        generator / battery keys that changed.
     """
-    layout = sys_config.gui_layout
-    if not layout:
-        return {}
-    gen_positions = layout.get("generators", {})
-    storage_positions = layout.get("fuel_storages", {})
-    if not gen_positions or not storage_positions:
-        return {}
+    def _fill(own, candidate):
+        out = list(own)
+        for n, c in enumerate(out):
+            if c <= 0 and candidate:
+                out[n] = float(candidate[n] if n < len(candidate) else candidate[-1])
+        return out
 
-    # --- Build fuel supply map: fuel_name → [(storage_id, lat, lng, node)] ---
-    storage_facilities = sys_config.fuel_infrastructure.storage_facilities
-    fuel_supply: Dict[str, List[tuple]] = {}
-    for sid, sdata in storage_facilities.items():
-        if sid not in storage_positions:
+    def _warn(kind, key, nodes=None):
+        tag = (getattr(sys, "name", ""), kind, key)
+        if tag not in _FREE_EXTENSION_WARNED:
+            _FREE_EXTENSION_WARNED.add(tag)
+            if nodes:
+                logger.warning(
+                    "%s %r has invest_cost 0 at node(s) %s and its candidate %s has "
+                    "none there either: extending its life there is free in the "
+                    "master problem.", kind, key, nodes,
+                    "technology" if kind == "Generator" else "battery technology")
+                return
+            logger.warning(
+                "%s %r has invest_cost 0 and no candidate %s to take it "
+                "from: extending its life is free in the master problem.",
+                kind, key,
+                "technology with the same fuel and type" if kind == "Generator"
+                else "battery technology")
+
+    def _own_system(key, unit, catalogue):
+        """Candidates from the unit's own system and the system's prefix.
+
+        A merged unit has key ``{system}__{key}`` and name ``{system}/...``;
+        its system's candidates are keyed ``{system}__...`` and their
+        per-node lists are 0 at the other systems' nodes.
+        """
+        system = key.split("__", 1)[0] if "__" in key else None
+        if system is None or not str(getattr(unit, "name", "")).startswith(system + "/"):
+            return list(catalogue.items()), ""
+        prefix = system + "__"
+        return [(k, c) for k, c in catalogue.items() if k.startswith(prefix)], prefix
+
+    def _names(k, cand, prefix):
+        """A candidate's key and name, also without the merge prefix."""
+        names = {k, cand.name}
+        if prefix:
+            names |= {k[len(prefix):], str(cand.name).split("/", 1)[-1]}
+        return names
+
+    def _still_free(costs, rated):
+        return [n for n, p in enumerate(rated) if p > 0 and (n >= len(costs) or costs[n] <= 0)]
+
+    gen_costs: dict = {}
+    techs = getattr(sys, "technologies", None) or {}
+    for key, gen in (getattr(sys, "generators", None) or {}).items():
+        # Only the nodes where the unit has capacity: elsewhere its 0 cost
+        # prices nothing
+        if not _still_free(gen.invest_cost, gen.rated_power):
             continue
-        slat, slng = storage_positions[sid]
-        snode = sdata.get("node", 0)
-        fuels_list = sdata.get("fuels", [])
-        if not fuels_list:
-            # Legacy single-fuel format
-            single_fuel = sdata.get("fuel", "")
-            if single_fuel:
-                fuels_list = [single_fuel]
-        for fname in fuels_list:
-            fuel_supply.setdefault(fname, []).append((sid, slat, slng, snode))
-
-    if not fuel_supply:
-        return {}
-
-    # --- Derive per-fuel per-km transport rates from existing routes ---
-    transport_pipelines = sys_config.fuel_infrastructure.transport_pipelines
-    fuel_cost_per_km: Dict[str, float] = {}
-    fuel_loss_per_km: Dict[str, float] = {}
-
-    if transport_pipelines:
-        # Accumulate (sum, count) for each fuel
-        cost_acc: Dict[str, List[float]] = {}
-        loss_acc: Dict[str, List[float]] = {}
-        for _route_id, rdata in transport_pipelines.items():
-            length_km = rdata.get("length_km", 0.0)
-            if length_km < 0.5:
-                # Skip very short routes (e.g. port connections < 500m)
-                continue
-            route_fuels = rdata.get("fuels", [])
-            if not route_fuels:
-                single = rdata.get("fuel", "")
-                if single:
-                    route_fuels = [single]
-            fuel_params = rdata.get("fuel_params", {})
-            for fname in route_fuels:
-                fp = fuel_params.get(fname, {})
-                cost = fp.get("transport_cost", rdata.get("transport_cost", 0))
-                losses = fp.get("losses_fraction", rdata.get("losses_fraction", 0))
-                cost_acc.setdefault(fname, []).append(cost / length_km)
-                loss_acc.setdefault(fname, []).append(losses / length_km)
-
-        for fname, vals in cost_acc.items():
-            fuel_cost_per_km[fname] = sum(vals) / len(vals)
-        for fname, vals in loss_acc.items():
-            fuel_loss_per_km[fname] = sum(vals) / len(vals)
-
-    # Fallback defaults
-    DEFAULT_COST_PER_KM = 0.5  # $/fuel_unit/km
-    DEFAULT_LOSS_PER_KM = 0.001  # fraction/km
-
-    # --- For each generator, compute adjusted fuel_cost ---
-    # gui_layout keys use canonical format: "{unit_key}_n{node_idx}"
-    # config generator keys are just "{unit_key}"
-    adjustments: Dict[str, List[float]] = {}
-    log_entries: List[str] = []
-
-    num_nodes = sys_config.nodes.num_nodes or 1
-
-    for gen_key, gen_cfg in sys_config.generators.items():
-        fuel = gen_cfg.fuel
-        if fuel in _RENEWABLE_FUELS:
+        candidates, prefix = _own_system(key, gen, techs)
+        matches = [(k, t) for k, t in candidates
+                   if t.fuel == gen.fuel and t.type == gen.type]
+        named = [m for m in matches
+                 if getattr(gen, "technology", None) in _names(*m, prefix)]
+        if not (named or matches):
+            _warn("Generator", key)
             continue
-        fuel_def = sys_config.fuels.get(fuel)
-        if not fuel_def or not fuel_def.energy_content:
+        _, tech = (named or matches)[0]
+        own = list(gen.invest_cost) + [0.0] * (len(gen.rated_power) - len(gen.invest_cost))
+        filled = _fill(own, tech.invest_cost)
+        if filled != own:
+            gen_costs[key] = filled
+        free = _still_free(filled, gen.rated_power)
+        if free:
+            _warn("Generator", key, free)
+
+    bat_costs: dict = {}
+    btechs = getattr(sys, "battery_technologies", None) or {}
+    for key, bat in (getattr(sys, "batteries", None) or {}).items():
+        if not _still_free(bat.invest_cost, bat.rated_power):
             continue
-
-        candidates = fuel_supply.get(fuel, [])
-        if not candidates:
+        candidates, prefix = _own_system(key, bat, btechs)
+        named = [m for m in candidates if bat.technology in _names(*m, prefix)]
+        if not (named or candidates):
+            _warn("Battery", key)
             continue
+        _, btech = (named or candidates)[0]
+        own = list(bat.invest_cost) + [0.0] * (len(bat.rated_power) - len(bat.invest_cost))
+        filled = _fill(own, btech.invest_cost_power)
+        if filled != own:
+            bat_costs[key] = filled
+        free = _still_free(filled, bat.rated_power)
+        if free:
+            _warn("Battery", key, free)
 
-        energy_content = fuel_def.energy_content
-        efficiency = float(np.mean(gen_cfg.eff_at_rated)) if gen_cfg.eff_at_rated else 0.35
-        if efficiency < 1e-6:
-            efficiency = 0.35
-
-        cpk = fuel_cost_per_km.get(fuel, DEFAULT_COST_PER_KM)
-        lpk = fuel_loss_per_km.get(fuel, DEFAULT_LOSS_PER_KM)
-
-        # Build per-node adjusted fuel_cost
-        adjusted = list(gen_cfg.fuel_cost)
-        any_adjusted = False
-
-        for node_idx in range(min(num_nodes, len(adjusted))):
-            # Look up position using canonical key format: {gen_key}_n{node_idx}
-            layout_key = f"{gen_key}_n{node_idx}"
-            if layout_key not in gen_positions:
-                continue
-            gen_lat, gen_lng = gen_positions[layout_key]
-
-            # Find nearest storage with matching fuel (prefer same node)
-            best_dist = float("inf")
-            best_sid = ""
-            for sid, slat, slng, snode in candidates:
-                d = _haversine_km(gen_lat, gen_lng, slat, slng)
-                if d < best_dist:
-                    best_dist = d
-                    best_sid = sid
-
-            if best_dist == float("inf") or best_dist < 0.01:
-                continue
-
-            # Transport cost: $/fuel_unit/km → $/MWh_e
-            transport_cost_mwhe = cpk * best_dist / (energy_content * efficiency)
-
-            # Transport losses: need more fuel due to losses
-            loss_factor = min(lpk * best_dist, 0.5)  # cap at 50%
-            loss_multiplier = 1.0 / (1.0 - loss_factor) if loss_factor < 1.0 else 1.0
-
-            adjusted[node_idx] = adjusted[node_idx] * loss_multiplier + transport_cost_mwhe
-            any_adjusted = True
-
-            # Log entry
-            storage_name = storage_facilities.get(best_sid, {}).get("name", best_sid)
-            orig_cost = gen_cfg.fuel_cost[node_idx]
-            new_cost = adjusted[node_idx]
-            log_entries.append(
-                f"  {gen_cfg.name:30s} (n{node_idx}) → {storage_name:25s}  "
-                f"dist={best_dist:6.1f}km  "
-                f"fuel_cost: {orig_cost:.2f} → {new_cost:.2f} $/MWh_e  "
-                f"(+{new_cost - orig_cost:.2f})"
-            )
-
-        if any_adjusted:
-            adjustments[gen_key] = adjusted
-
-    if log_entries:
-        logger.debug(
-            "Geographic fuel transport adjustments:\n%s",
-            "\n".join(log_entries),
-        )
-        # Summary at info level (only generator count + range)
-        costs = [a[0] for a in adjustments.values() if a]
-        orig = [sys_config.generators[k].fuel_cost[0] for k in adjustments if sys_config.generators[k].fuel_cost]
-        if costs and orig:
-            max_delta = max(c - o for c, o in zip(costs, orig))
-            logger.debug(
-                "Geographic fuel transport: %d generators adjusted, max delta=+%.2f $/MWh_e",
-                len(adjustments), max_delta,
-            )
-
-    return adjustments
+    return gen_costs, bat_costs
 
 
 class TransmissionDCAdapter:
@@ -849,7 +1157,7 @@ class TransmissionDCAdapter:
         num_nodes: int,
         nodes_config: NodeConfig,
         fuel_transport_distances: List[List[float]],
-        base_impedance: float = 100.0,
+        s_base_mva: float = 100.0,
         reactance_per_km: float = 0.4,
         voltage_level_kv: float = 220.0,
         max_angle_diff_deg: float = 30.0,
@@ -866,7 +1174,7 @@ class TransmissionDCAdapter:
             num_nodes: Number of nodes in the network
             nodes_config: Node configuration
             fuel_transport_distances: Distance matrix (km)
-            base_impedance: Base impedance (Ohm)
+            s_base_mva: System power base (MVA) of the per-unit values
             reactance_per_km: Line reactance (Ohm/km)
             voltage_level_kv: Nominal voltage (kV)
             max_angle_diff_deg: Maximum angle difference (degrees, ACOPF)
@@ -887,7 +1195,6 @@ class TransmissionDCAdapter:
 
         # Build a DCPowerFlowConfig from the provided parameters
         dc_config = DCPowerFlowConfig(
-            base_impedance=base_impedance,
             reactance_per_km=reactance_per_km,
             voltage_level_kv=voltage_level_kv,
             max_angle_diff_deg=max_angle_diff_deg,
@@ -902,6 +1209,7 @@ class TransmissionDCAdapter:
             acdc_converters=acdc_converters,
             freq_converters=freq_converters,
             buses=buses,
+            s_base_mva=s_base_mva,
         )
 
         # Create Julia TransmissionDC instance
@@ -961,6 +1269,7 @@ class PowerSystemAdapter:
         availability_cache: Optional[Dict[str, np.ndarray]] = None,
         inflow_cache: Optional[Dict[str, np.ndarray]] = None,
         start_hour: int = 0,
+        run_mode: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -973,15 +1282,22 @@ class PowerSystemAdapter:
             num_nodes: Number of nodes
             year: Current simulation year
             base_year: Base year for calculations
-            mode: Optimization mode
+            mode: Dispatch formulation ("economic_dispatch" or
+                "unit_commitment"; a development run's dispatch is one of them)
             availability_cache: Pre-loaded availability profiles {gen_key: array}
             inflow_cache: Pre-loaded inflow profiles {gen_key: array} for reservoir hydro
             start_hour: Start hour within the year for slicing availability/inflow profiles
+            run_mode: The run's ``simulation_mode`` ("development",
+                "unit_commitment", "economic_dispatch"), which
+                ``n1_security.apply_to_modes`` lists. Defaults to the
+                configuration's ``simulation_mode`` (``mode`` without one).
             **kwargs: Additional parameters (system_config: explicit SystemConfig override)
         """
         # Accept explicit system_config override (used by runner to pass
         # the merged system instead of config.primary_system).
         system_config_override = kwargs.pop("system_config", None)
+        # The configuration file: relative profile paths resolve next to it
+        self._config_path = kwargs.pop("config_path", None)
         if isinstance(config, ESFEXConfig):
             self.esfex_config = config
             self.system_config = system_config_override or config.primary_system
@@ -995,13 +1311,18 @@ class PowerSystemAdapter:
         self.year = year
         self.base_year = base_year
         self.mode = mode
+        if run_mode is None:
+            run_mode = self.esfex_config.simulation_mode if self.esfex_config else mode
+        self.run_mode = run_mode
         self.availability_cache = availability_cache or {}
         self.inflow_cache = inflow_cache or {}
         self.start_hour = start_hour
         self.units_config = kwargs.get('units_config', {})  # Updated capacities from investments
         self.sectoral_demand = kwargs.get('sectoral_demand', {})  # Sectoral demand arrays
         self.rooftop_generation = kwargs.get('rooftop_generation', None)  # (hours × nodes) or None
-        self.re_penetration_target_override = kwargs.get('re_penetration_target', None)  # Year-specific RE target
+        # Year-specific RE target (development mode only). target_re_penetration
+        # is a planning target: without a year's value the dispatch applies none.
+        self.re_penetration_target_override = kwargs.get('re_penetration_target', None)
         self.boundary_conditions = kwargs.get('boundary_conditions', {}) or {}
         self.kwargs = kwargs
 
@@ -1013,24 +1334,43 @@ class PowerSystemAdapter:
 
         logger.debug(f"PowerSystemAdapter initialized: {hours}h, {num_nodes} nodes, mode={mode}")
 
+    def _grown_fuel_cost(self, gen: GeneratorConfig) -> GeneratorConfig:
+        """*gen* with its ``fuel_cost`` grown to this window's year at the
+        ``price_growth_rate`` of its fuel in the ``fuels`` block, from the
+        run's first year (``fuel_price_factor``, as the master charges it).
+        A unit whose fuel is not in ``fuels`` keeps its ``fuel_cost``; offer
+        curves stay as given."""
+        f = fuel_price_factor(getattr(self.system_config, "fuels", None), gen.fuel,
+                              self.year, self.base_year)
+        if f == 1.0:
+            return gen
+        return gen.model_copy(update={"fuel_cost": [c * f for c in gen.fuel_cost]})
+
     def _slice_availability(self, cached: np.ndarray, resolution_hours: int) -> Optional[np.ndarray]:
-        """Slice a cached availability profile to the current window."""
+        """Slice a cached hourly profile (availability, inflow) to this window.
+
+        ``start_hour`` counts from the start of the model year. The profile is
+        indexed by horizon hour (year index × 8760 + hour), wrapping around
+        when it is shorter, as in the master problem: a multi-year profile
+        gives each year its own block, a one-year profile repeats.
+        """
+        start = absolute_start_hour(self.year, self.base_year, self.start_hour) % max(len(cached), 1)
         if resolution_hours > 1 and len(cached) > self.hours:
             resampled = aggregate_to_resolution(cached, target_hours=resolution_hours)
-            start_idx = self.start_hour // resolution_hours
+            start_idx = start // resolution_hours
             end_idx = start_idx + self.hours
             return resampled[start_idx:end_idx]
         else:
-            end_h = self.start_hour + self.hours
+            end_h = start + self.hours
             if end_h <= len(cached):
-                return cached[self.start_hour:end_h]
-            elif self.start_hour < len(cached):
+                return cached[start:end_h]
+            elif start < len(cached):
                 return np.concatenate([
-                    cached[self.start_hour:],
+                    cached[start:],
                     cached[:end_h - len(cached)]
                 ])
             else:
-                wrapped_start = self.start_hour % len(cached)
+                wrapped_start = start % len(cached)
                 wrapped_end = wrapped_start + self.hours
                 if wrapped_end <= len(cached):
                     return cached[wrapped_start:wrapped_end]
@@ -1039,6 +1379,44 @@ class PowerSystemAdapter:
                         cached[wrapped_start:],
                         cached[:wrapped_end - len(cached)]
                     ])
+
+    def _storage_availability(self, cache_key: str, availability_file: Optional[str],
+                              num_nodes: int, resolution_hours: int,
+                              owner: str) -> Optional[np.ndarray]:
+        """This window's availability profile of a battery (``[steps × nodes]``),
+        or None when it has none: the runner's preloaded profile
+        (``availability_cache[cache_key]``, else by file name), else read
+        from ``availability_file``."""
+        if not availability_file:
+            return None
+        cached = self.availability_cache.get(cache_key)
+        if cached is None:
+            cached = self.availability_cache.get(availability_file)
+        if cached is None:
+            cached = self._load_availability_file(availability_file, num_nodes, owner)
+        return self._slice_availability(cached, resolution_hours)
+
+    def _load_availability_file(self, availability_file: str, num_nodes: int,
+                                owner: str) -> np.ndarray:
+        """Hourly profile of a unit not in ``availability_cache``.
+
+        Read with the runner's reader (:func:`esfex.io.demand.
+        load_run_availability`): path under the configuration's directory
+        (``config_path``), Feb 29 dropped by the calendar of ``date_start``.
+        Pass the result through :meth:`_slice_availability` like a cached one.
+        """
+        from pathlib import Path
+
+        from esfex.io.demand import load_run_availability
+        from esfex.utils.temporal import parse_date_start
+
+        config_path = getattr(self, "_config_path", None)
+        config_dir = Path(config_path).parent if config_path else Path(".")
+        date_start = None
+        if self.esfex_config is not None:
+            date_start = parse_date_start(self.esfex_config.date_start).strftime("%d/%m/%Y %H:%M")
+        return load_run_availability(config_dir, availability_file, num_nodes, date_start,
+                                     owner=owner)
 
     def build_model(self, external_model=None):
         """
@@ -1141,21 +1519,40 @@ class PowerSystemAdapter:
             )
             sys = reduced_sys
 
-        # Pre-compute geographic fuel transport adjustments
-        fuel_adjustments = _compute_geographic_fuel_adjustments(sys)
 
         # Build bus_to_node mapping for per-node → per-bus expansion.
-        # When num_buses > num_nodes, converter functions expand per-node arrays
-        # to per-bus arrays (capacity at first bus, properties replicated).
+        # Converter functions expand per-node arrays to per-bus arrays
+        # (capacity at the unit's bus, properties replicated) whenever the bus
+        # list is not the identity mapping over nodes — see
+        # ``node_bus_mapping_required``. A reduced network can have FEWER buses
+        # than nodes, which the old ``num_buses > num_nodes`` test missed.
         from esfex.config.schema import BusConfig
+        from esfex.bridge.converters import node_bus_mapping_required
         buses = sys.buses or [
             BusConfig(bus_id=f"bus_{i}", parent_node=i, demand_fraction=1.0)
             for i in range(num_nodes)
         ]
         bus_to_node_0idx = [b.parent_node for b in buses]
         num_buses = len(buses)
-        need_expansion = num_buses > num_nodes
+        need_expansion = node_bus_mapping_required(buses, num_nodes)
         b2n_arg = bus_to_node_0idx if need_expansion else None
+        self._unattached_nodes = _nodes_without_load_bus(buses, num_nodes)
+        _dem = np.asarray(self.demand) if self.demand is not None else None
+        _orphan = [n for n in self._unattached_nodes
+                   if _dem is not None and _dem.ndim == 2 and n < _dem.shape[1]
+                   and float(np.nanmax(_dem[:, n], initial=0.0)) > 0.0]
+        if _orphan:
+            _warn_once(
+                ("unattached_nodes", sys.name, tuple(_orphan)),
+                "%d node(s) have no operational load bus (%s%s): their demand "
+                "cannot be served and is reported as unserved load (loss of "
+                "load, priced at the loss_of_load penalty). Units at a node "
+                "with no bus at all are not dispatched. Give each such node a "
+                "bus with role 'load' or 'mixed' (a network reduction can "
+                "also leave nodes without buses).",
+                len(_orphan), _orphan[:10],
+                "…" if len(_orphan) > 10 else "",
+            )
 
         # Resolve generator/battery → bus mapping from transmission_lines_geo
         gen_bus_per_node, bat_bus_per_node = _resolve_element_bus_mapping(sys)
@@ -1174,12 +1571,28 @@ class PowerSystemAdapter:
         # windows once, keyed by type then id. Generators fold their windows into
         # the availability matrix in the loop below; other element categories are
         # compiled into the centralised outage_masks dict passed to Julia.
+        # Windows are in absolute horizon hours: locate this window in them.
+        outage_hour0 = absolute_start_hour(self.year, self.base_year, self.start_hour)
         outage_by_type: dict[str, dict[str, list]] = {}
+        # Generator / battery windows may target one node of the unit.
+        outage_nodes: dict[str, dict[str, list]] = {}
         for _ow in getattr(sys, "outage_schedule", None) or []:
             outage_by_type.setdefault(_ow.element_type, {}).setdefault(
                 _ow.element_id, []
-            ).append((_ow.start_hour, _ow.end_hour, _ow.availability))
+            ).append(outage_window_tuple(_ow))
+            outage_nodes.setdefault(_ow.element_type, {}).setdefault(
+                _ow.element_id, []
+            ).append(getattr(_ow, "node", None))
         outage_by_gen = outage_by_type.get("generator", {})
+        bat_windows_by_key = outage_by_type.get("battery", {})
+        for _key, _nodes in outage_nodes.get("battery", {}).items():
+            _bat = sys.batteries.get(_key)
+            if _bat is not None and any(n is not None for n in _nodes) and \
+                    sum(1 for c in _bat.capacity if c > 0) > 1:
+                logger.warning(
+                    "Outage window on one node of battery %r: battery outages "
+                    "apply to the whole unit, which has capacity at several "
+                    "nodes.", _key)
 
         # Convert generators with availability profiles
         # Track order for cost curve mapping (key, python_config) in Julia push order
@@ -1189,64 +1602,19 @@ class PowerSystemAdapter:
             # Use cached availability if available, otherwise load from file
             availability = None
             if key in self.availability_cache:
-                # Use pre-loaded cache (already at full resolution, slice window)
-                cached = self.availability_cache[key]
-                if resolution_hours > 1 and len(cached) > self.hours:
-                    # Aggregate to temporal resolution using MEAN (correct for capacity factors)
-                    resampled = aggregate_to_resolution(cached, target_hours=resolution_hours)
-                    start_idx = self.start_hour // resolution_hours
-                    end_idx = start_idx + self.hours
-                    availability = resampled[start_idx:end_idx]
-                else:
-                    # Slice from correct window offset within the year
-                    end_h = self.start_hour + self.hours
-                    if end_h <= len(cached):
-                        availability = cached[self.start_hour:end_h]
-                    elif self.start_hour < len(cached):
-                        # Window extends beyond available data — wrap around
-                        availability = np.concatenate([
-                            cached[self.start_hour:],
-                            cached[:end_h - len(cached)]
-                        ])
-                    else:
-                        # start_hour beyond data — wrap
-                        wrapped_start = self.start_hour % len(cached)
-                        wrapped_end = wrapped_start + self.hours
-                        if wrapped_end <= len(cached):
-                            availability = cached[wrapped_start:wrapped_end]
-                        else:
-                            availability = np.concatenate([
-                                cached[wrapped_start:],
-                                cached[:wrapped_end - len(cached)]
-                            ])
+                # Pre-loaded cache at full resolution: slice this year's window
+                # (mean aggregation for resolution > 1, correct for capacity factors)
+                availability = self._slice_availability(
+                    self.availability_cache[key], resolution_hours
+                )
             elif hasattr(gen, 'availability_file') and gen.availability_file:
-                # Fallback: load from file if not cached. Resolve safely
-                # under config_dir to refuse `../../...` traversal from
-                # untrusted yaml files (see utils/paths.safe_resolve_under).
-                from pathlib import Path
-                from esfex.utils.paths import safe_resolve_under
-                config_dir = Path(self._config_path).parent if getattr(self, '_config_path', None) else Path('.')
-                try:
-                    avail_path = safe_resolve_under(config_dir, gen.availability_file)
-                except ValueError:
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "Skipping generator %r: availability_file %r resolves "
-                        "outside config directory %s (refusing path traversal)",
-                        key, gen.availability_file, config_dir,
-                    )
-                    continue
-                if not avail_path.exists():
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "availability_file %r not found under %s",
-                        gen.availability_file, config_dir,
-                    )
-                    continue
-                availability = load_availability_profile(
-                    avail_path,
-                    temporal_resolution_hours=resolution_hours,
-                    num_nodes=num_nodes
+                # Not preloaded: read it as the runner does and slice this
+                # window. A profile that cannot be read is an error: skipping
+                # here dropped the whole generator from the dispatch.
+                availability = self._slice_availability(
+                    self._load_availability_file(
+                        gen.availability_file, num_nodes, f"Generator {key!r}"),
+                    resolution_hours,
                 )
 
             # Apply updated capacities from units_config if available
@@ -1255,70 +1623,50 @@ class PowerSystemAdapter:
             if key in self.units_config:
                 updated_data = self.units_config[key]
                 if 'rated_power' in updated_data:
-                    from copy import deepcopy
                     gen_dict = gen.model_dump()
                     gen_dict['rated_power'] = updated_data['rated_power']
-                    # Also propagate degradation_rate and initial_age overrides
-                    # (set to 0 when using MasterProblem cumulative capacities
-                    # to prevent double degradation/retirement)
-                    if 'degradation_rate' in updated_data:
-                        gen_dict['degradation_rate'] = updated_data['degradation_rate']
-                    if 'initial_age' in updated_data:
-                        gen_dict['initial_age'] = updated_data['initial_age']
+                    # Also propagate the ageing overrides (no degradation and
+                    # no end of life for MasterProblem cumulative capacities,
+                    # which already hold the retirements and life extension)
+                    # and the units left of that capacity (units_in_service)
+                    for f in ('degradation_rate', 'initial_age', 'life_time', 'num_units'):
+                        if f in updated_data:
+                            gen_dict[f] = updated_data[f]
                     gen_to_convert = GeneratorConfig(**gen_dict)
 
-            # Apply geographic fuel transport cost adjustment
-            if key in fuel_adjustments:
-                gen_dict = gen_to_convert.model_dump()
-                gen_dict['fuel_cost'] = fuel_adjustments[key]
-                gen_to_convert = GeneratorConfig(**gen_dict)
+            gen_to_convert = self._grown_fuel_cost(gen_to_convert)
 
             # Reservoir inflow profile
             inflow = None
             if key in self.inflow_cache:
-                cached_inflow = self.inflow_cache[key]
-                if resolution_hours > 1:
-                    # Aggregate inflow using MEAN (m³/s average over period)
-                    resampled_inflow = aggregate_to_resolution(
-                        cached_inflow, target_hours=resolution_hours
-                    )
-                    start_idx = self.start_hour // resolution_hours
-                    end_idx = start_idx + self.hours
-                    inflow = resampled_inflow[start_idx:end_idx]
-                else:
-                    end_h = self.start_hour + self.hours
-                    if end_h <= len(cached_inflow):
-                        inflow = cached_inflow[self.start_hour:end_h]
-                    elif self.start_hour < len(cached_inflow):
-                        inflow = np.concatenate([
-                            cached_inflow[self.start_hour:],
-                            cached_inflow[:end_h - len(cached_inflow)]
-                        ])
-                    else:
-                        wrapped_start = self.start_hour % len(cached_inflow)
-                        wrapped_end = wrapped_start + self.hours
-                        if wrapped_end <= len(cached_inflow):
-                            inflow = cached_inflow[wrapped_start:wrapped_end]
-                        else:
-                            inflow = np.concatenate([
-                                cached_inflow[wrapped_start:],
-                                cached_inflow[:wrapped_end - len(cached_inflow)]
-                            ])
+                # Mean aggregation for resolution > 1 (m³/s average over period)
+                inflow = self._slice_availability(
+                    self.inflow_cache[key], resolution_hours
+                )
 
             # Apply scheduled interruptions as an availability mask. Materialise
             # a ones matrix for dispatchable units (no CF profile) so the outage
             # still bites — Julia now caps every generator by availability.
             gen_windows = outage_by_gen.get(key)
             if gen_windows:
-                factor = compile_outage_factor(
-                    gen_windows, self.start_hour, self.hours, resolution_hours
-                )
                 if availability is None:
                     availability = np.ones((self.hours, num_nodes), dtype=float)
-                if availability.ndim == 1:
-                    availability = availability * factor
+                elif availability.ndim == 1:
+                    availability = np.repeat(availability[:, None], num_nodes, axis=1)
                 else:
-                    availability = availability * factor[:, None]
+                    availability = availability.copy()
+                win_nodes = outage_nodes["generator"][key]
+                for node in sorted({n for n in win_nodes if n is not None}) + [None]:
+                    windows = [w for w, n in zip(gen_windows, win_nodes) if n == node]
+                    if not windows:
+                        continue
+                    factor = compile_outage_factor(
+                        windows, outage_hour0, self.hours, resolution_hours
+                    )
+                    if node is None:
+                        availability = availability * factor[:, None]
+                    elif node < availability.shape[1]:
+                        availability[:, node] = availability[:, node] * factor
 
             gen_bus_map = gen_bus_per_node.get(key)
             jl_gen = convert_generator_config(gen_to_convert, availability, inflow,
@@ -1330,6 +1678,7 @@ class PowerSystemAdapter:
         # Create virtual generators from investment units in units_config
         # These are created by _build_config_from_cumulative() but don't exist
         # in sys.generators — they represent technology investments from MasterProblem
+        per_bus_gen_keys: set = set()
         for key, vdata in self.units_config.items():
             if key in sys.generators:
                 continue  # Already handled above
@@ -1337,6 +1686,8 @@ class PowerSystemAdapter:
                 continue  # Batteries handled below
             if "rated_power" not in vdata:
                 continue
+            vdata = _per_bus_unit_on_model_buses(vdata, self._reduction_map,
+                                                 self.system_config.buses or [])
             rp = vdata["rated_power"]
             if not rp or max(rp) < 0.01:
                 continue
@@ -1365,12 +1716,17 @@ class PowerSystemAdapter:
                 initial_age=vdata.get("initial_age", [0] * nn),
                 degradation_rate=vdata.get("degradation_rate", [0.0] * nn),
                 decommissioning_cost=vdata.get("decommissioning_cost", [0.0] * nn),
+                # Units of the technology's unit_size (one when it has none)
+                num_units=vdata.get("num_units", [1] * nn),
                 invest_cost=[0.0] * nn,
-                invest_max_power=[0.0] * nn,
                 frequency_hz=vdata.get("frequency_hz", 50.0),
                 current_type=vdata.get("current_type", "AC"),
                 availability_file=vdata.get("availability_file") or vdata.get("Availability"),
+                # The technology's bidding curve, so the dispatch prices the
+                # unit as the master did (flat fuel_cost otherwise).
+                fuel_cost_curve=vdata.get("fuel_cost_curve"),
             )
+            vgen = self._grown_fuel_cost(vgen)
 
             # Load availability profile for virtual generator
             v_avail = None
@@ -1390,9 +1746,16 @@ class PowerSystemAdapter:
                         ):
                             v_avail = self._slice_availability(cached_arr, resolution_hours)
                             break
+                    else:
+                        v_avail = self._slice_availability(
+                            self._load_availability_file(
+                                avail_file, num_nodes, f"Technology unit {key!r}"),
+                            resolution_hours,
+                        )
 
-            if v_avail is None:
-                logger.warning(f"Virtual gen {key}: NO availability matched for file={avail_file}")
+            # No availability_file: available at full capacity (normal for a
+            # thermal technology; a renewable one is reported once per run
+            # when the runner preloads the profiles, not in every window).
 
             # Per-bus virtual generators: arrays already at bus-level length,
             # expand availability to per-bus and skip node→bus expansion.
@@ -1417,20 +1780,17 @@ class PowerSystemAdapter:
                                                     bus_to_node=b2n_arg)
             jl.seval("push!")(jl_generators, jl_vgen)
             gen_order.append((key, vgen))
-            avail_shape = v_avail.shape if v_avail is not None else "NONE"
-            avail_mean = float(np.mean(v_avail)) if v_avail is not None else 0.0
-            logger.info(f"Virtual gen: {vdata.get('name', key)}, type={vdata.get('type')}, "
-                       f"rated={rp}, avail_shape={avail_shape}, avail_mean={avail_mean:.3f}")
+            if is_per_bus and b2n_arg is not None:
+                per_bus_gen_keys.add(key)
+            avail_mean = float(np.mean(v_avail)) if v_avail is not None else 1.0
+            logger.debug("Virtual gen: %s, type=%s, rated=%s, availability %s (mean %.3f)",
+                         vdata.get('name', key), vdata.get('type'), rp,
+                         "profile" if v_avail is not None else "none, full capacity",
+                         avail_mean)
 
         # Convert batteries
         bat_order = []  # (key, python_config) in Julia push order
         jl_batteries = jl.seval("BatteryConfig[]")
-        # Boundary-conditions SOC carry-over from previous rolling window.
-        # Shape: (n_bat, n_node) in MWh.  When present we override each
-        # battery's soc_initial fractions so the next window starts where
-        # the last one ended (chronological linking).
-        bc_battery_soc = self.boundary_conditions.get('battery_soc')
-        bat_idx_counter = 0
         for key, bat in sys.batteries.items():
             # Apply updated capacities from units_config if available
             bat_to_convert = bat
@@ -1443,31 +1803,21 @@ class PowerSystemAdapter:
                         bat_dict['capacity'] = updated_data['capacity']
                     if 'MaxChargePower' in updated_data:
                         bat_dict['MaxChargePower'] = updated_data['MaxChargePower']
-                    if 'MaxDischargePower' in updated_data:
-                        bat_dict['MaxDischargePower'] = updated_data['MaxDischargePower']
+                    # Power, energy and ageing of a battery the master keeps
+                    # past its lifetime (_apply_master_battery_life)
+                    for f in ('MaxDischargePower', 'rated_power', 'degradation_rate',
+                              'initial_age', 'life_time'):
+                        if f in updated_data:
+                            bat_dict[f] = updated_data[f]
                     bat_to_convert = BatteryConfig(**bat_dict)
 
-            # SOC carry-over: override soc_initial per node from prev window.
-            if bc_battery_soc is not None and bat_idx_counter < bc_battery_soc.shape[0]:
-                cap_arr = list(bat_to_convert.capacity)
-                soc_row = bc_battery_soc[bat_idx_counter]
-                new_soc_init = []
-                for ni, c in enumerate(cap_arr):
-                    if c > 0 and ni < len(soc_row):
-                        frac = float(soc_row[ni]) / float(c)
-                        frac = max(0.0, min(1.0, frac))
-                        new_soc_init.append(frac)
-                    else:
-                        new_soc_init.append(float(bat_to_convert.soc_initial[ni])
-                                            if ni < len(bat_to_convert.soc_initial) else 0.5)
-                bat_dict = bat_to_convert.model_dump()
-                bat_dict['soc_initial'] = new_soc_init
-                bat_to_convert = BatteryConfig(**bat_dict)
-            bat_idx_counter += 1
-
             bat_bus_map = bat_bus_per_node.get(key)
+            bat_avail = self._storage_availability(
+                battery_availability_key(key), bat.availability_file, num_nodes,
+                resolution_hours, f"Battery {key!r}")
             jl_bat = convert_battery_config(bat_to_convert, bus_to_node=b2n_arg,
-                                             bus_per_node=bat_bus_map)
+                                             bus_per_node=bat_bus_map,
+                                             availability=bat_avail)
             jl.seval("push!")(jl_batteries, jl_bat)
             bat_order.append((key, bat_to_convert))
 
@@ -1479,29 +1829,22 @@ class PowerSystemAdapter:
                 continue  # Already handled above
             if vdata.get("_type") != "battery" and vdata.get("type") != "Storage":
                 continue  # Not a battery
+            vdata = _per_bus_unit_on_model_buses(vdata, self._reduction_map,
+                                                 self.system_config.buses or [])
             cap = vdata.get("capacity", [])
             charge_pow = vdata.get("MaxChargePower", [])
             if not cap or (max(cap) < 0.01 and max(charge_pow) < 0.01):
                 continue
 
             nn = len(cap)
-            # Apply SOC carry-over to virtual batteries too.
             soc_init_default = vdata.get("soc_initial", [0.5] * nn)
-            if bc_battery_soc is not None and bat_idx_counter < bc_battery_soc.shape[0]:
-                soc_row = bc_battery_soc[bat_idx_counter]
-                soc_init_default = []
-                for ni, c in enumerate(cap):
-                    if c > 0 and ni < len(soc_row):
-                        frac = float(soc_row[ni]) / float(c)
-                        soc_init_default.append(max(0.0, min(1.0, frac)))
-                    else:
-                        soc_init_default.append(0.5)
-            bat_idx_counter += 1
+            # Operating fields of the battery technology it was built from
+            # (battery_technology_unit_fields)
             vbat = BatteryConfig(
                 name=vdata.get("name", key),
                 type="Storage",
                 fuel="None",
-                reservable=True,
+                reservable=vdata.get("reservable", True),
                 spillage=vdata.get("spillage", True),
                 capacity=cap,
                 MaxChargePower=charge_pow,
@@ -1511,36 +1854,37 @@ class PowerSystemAdapter:
                 soc_initial=soc_init_default,
                 max_DoD=vdata.get("max_DoD", [0.9] * nn),
                 rated_power=charge_pow,  # BatteryConfig requires rated_power
-                min_power=[0.0] * nn,
-                eff_at_rated=[1.0] * nn,
-                eff_at_min=[1.0] * nn,
-                ramp_up=[1.0] * nn,
-                ramp_down=[1.0] * nn,
-                min_up=[0] * nn,
-                min_down=[0] * nn,
-                fuel_cost=[0.0] * nn,
-                fixed_cost=[0.0] * nn,
+                ramp_up=vdata.get("ramp_up", [0.0] * nn),
+                ramp_down=vdata.get("ramp_down", [0.0] * nn),
+                fixed_cost=vdata.get("fixed_cost", [0.0] * nn),
                 maintenance_cost=vdata.get("maintenance_cost", [0.0] * nn),
-                start_up_cost=[0.0] * nn,
                 inertia=vdata.get("inertia", [0.0] * nn),
                 life_time=vdata.get("life_time", [999] * nn),
                 initial_age=vdata.get("initial_age", [0] * nn),
                 degradation_rate=vdata.get("degradation_rate", [0.0] * nn),
                 decommissioning_cost=vdata.get("decommissioning_cost", [0.0] * nn),
                 invest_cost=[0.0] * nn,
-                invest_cost_energy=[0.0] * nn,
                 invest_max_power=[0.0] * nn,
-                invest_max_capacity=[0.0] * nn,
                 throughput_degradation_cost=vdata.get("throughput_degradation_cost", [0.0] * nn),
                 current_type=vdata.get("current_type", "DC"),
+                availability_file=vdata.get("availability_file") or vdata.get("Availability"),
             )
+            # Cached under the technology's file name by the runner
+            v_avail = self._storage_availability(
+                vbat.availability_file or "", vbat.availability_file, num_nodes,
+                resolution_hours, f"Battery technology unit {key!r}")
             is_per_bus = vdata.get('_is_per_bus', False)
             if is_per_bus and b2n_arg is not None:
-                jl_vbat = convert_battery_config(vbat, bus_to_node=None)
+                # Arrays already per bus: lay the per-node profile on the buses
+                if v_avail is not None:
+                    v_avail = expand_node_to_bus_matrix(v_avail, bus_to_node_0idx)
+                jl_vbat = convert_battery_config(vbat, bus_to_node=None,
+                                                 availability=v_avail)
             else:
                 # Virtual battery (master investment): per-node capacity
                 # falls back to the node's first (canonical) bus.
-                jl_vbat = convert_battery_config(vbat, bus_to_node=b2n_arg)
+                jl_vbat = convert_battery_config(vbat, bus_to_node=b2n_arg,
+                                                 availability=v_avail)
             jl.seval("push!")(jl_batteries, jl_vbat)
             bat_order.append((key, vbat))
             logger.info(f"Virtual bat: {vdata.get('name', key)}, "
@@ -1551,6 +1895,7 @@ class PowerSystemAdapter:
             gen_order, [], num_buses,
             bus_to_node=bus_to_node_0idx if need_expansion else None,
             gen_bus_per_node=gen_bus_per_node,
+            per_bus_keys=per_bus_gen_keys,
         )
         jl_bat_cost_curves = build_bat_cost_curves_dict(
             bat_order, num_buses,
@@ -1566,6 +1911,7 @@ class PowerSystemAdapter:
             acdc_converters=getattr(sys, 'acdc_converters', None) or None,
             freq_converters=getattr(sys, 'freq_converters', None) or None,
             buses=sys.buses or None,
+            s_base_mva=system_s_base(sys),
         )
 
         # Convert temporal config (already retrieved above)
@@ -1598,13 +1944,19 @@ class PowerSystemAdapter:
             "medium": sys.criticality_penalties.medium,
             "low": sys.criticality_penalties.low,
         }
-        has_flexible_sector = False
+        # Flexible sectors can shift up to flexibility_ratio of their demand
+        # by up to delay_tolerance hours.
+        jl_shift_ratio = jl.seval("Dict{String, Float64}()")
+        jl_shift_delay = jl.seval("Dict{String, Int}()")
         if sys.electric_demand:
             for sector_name, sector_cfg in sys.electric_demand.items():
                 level = getattr(sector_cfg, 'criticality', 'medium')
                 jl_crit[sector_name] = crit_map.get(level, crit_map['medium'])
-                if getattr(sector_cfg, 'is_flexible', False) and getattr(sector_cfg, 'flexibility_ratio', 0.0) > 0:
-                    has_flexible_sector = True
+                ratio = float(getattr(sector_cfg, 'flexibility_ratio', 0.0))
+                delay = int(getattr(sector_cfg, 'delay_tolerance', 0))
+                if getattr(sector_cfg, 'is_flexible', False) and ratio > 0 and delay > 0:
+                    jl_shift_ratio[sector_name] = ratio
+                    jl_shift_delay[sector_name] = delay
         jl_sectoral_criticality = jl.seval("Dict{String, Float64}()")
         for k, v in jl_crit.items():
             jl_sectoral_criticality[k] = float(v)
@@ -1617,7 +1969,13 @@ class PowerSystemAdapter:
             num_vehicles = ev_config_data['num_vehicles']
             target_soc = float(ev_config_data.get('target_soc', 0.8))
             bat_cap_kwh = float(ev_config_data['battery_capacity_kwh'])
-            initial_soc = [target_soc * bat_cap_kwh * nv / 1000.0 for nv in num_vehicles]
+            # EV_initial_soc per node (it used to be ignored: always target_soc),
+            # kept within the fleet's SOC limits
+            lo = float(ev_config_data.get('min_soc', 0.0))
+            hi = float(ev_config_data.get('max_soc', 1.0))
+            fracs = ev_config_data.get('initial_soc_fraction') or [target_soc] * len(num_vehicles)
+            initial_soc = [min(max(float(f), lo), hi) * bat_cap_kwh * nv / 1000.0
+                           for f, nv in zip(fracs, num_vehicles)]
 
             jl_ev_config = ESFEX.EVConfig(
                 py_to_julia_vector(num_vehicles),
@@ -1636,29 +1994,40 @@ class PowerSystemAdapter:
                 py_to_julia_vector(initial_soc),
             )
 
-        # Build electrolyzer config if available
-        jl_electrolyzer = jl.seval("nothing")
-        electrolyzers = getattr(sys, 'electrolyzers', {})
-        if electrolyzers:
-            e = next(iter(electrolyzers.values()))
-            jl_electrolyzer = ESFEX.ElectrolyzerConfig(
-                py_to_julia_vector(e.rated_power),
-                py_to_julia_vector(e.eff_at_rated),
-                py_to_julia_vector(e.eff_at_min),
-                float(e.energy_per_kg_h2),
-                py_to_julia_vector(e.ramp_up),
-                py_to_julia_vector(e.ramp_down),
-                py_to_julia_vector(scale_cost_list(e.invest_cost)),
-                py_to_julia_vector(e.invest_max_power),
-                py_to_julia_vector(scale_cost_list(e.fixed_cost)),
-                py_to_julia_vector(scale_cost_list(e.variable_cost)),
-                scale_cost(float(e.water_cost)),
-                py_to_julia_vector([float(x) for x in e.life_time]),
-            )
+        # Electrolyzers, in config order (results follow the same order).
+        # The Julia electrolyzer is indexed by bus; its config lists are per
+        # node. Map them like generators: capacity at the node's first bus,
+        # properties replicated to every bus of the node.
+        jl_electrolyzers = jl.seval("ElectrolyzerConfig[]")
+        electrolyzers = getattr(sys, 'electrolyzers', None) or {}
 
-        # Get N-1 security settings — only enable for applicable modes
+        def _elz(values, mode="property"):
+            values = [float(v) for v in values]
+            if b2n_arg is None:
+                return values
+            return expand_node_to_bus_array(values, b2n_arg, mode=mode)
+
+        for e in electrolyzers.values():
+            jl_elz = ESFEX.ElectrolyzerConfig(
+                py_to_julia_vector(_elz(e.rated_power, "capacity")),
+                py_to_julia_vector(_elz(e.eff_at_rated)),
+                py_to_julia_vector(_elz(e.eff_at_min)),
+                float(e.energy_per_kg_h2),
+                py_to_julia_vector(_elz(e.ramp_up)),
+                py_to_julia_vector(_elz(e.ramp_down)),
+                py_to_julia_vector(_elz(scale_cost_list(e.invest_cost))),
+                py_to_julia_vector(_elz(e.invest_max_power, "capacity")),
+                py_to_julia_vector(_elz(scale_cost_list(e.fixed_cost))),
+                py_to_julia_vector(_elz(scale_cost_list(e.variable_cost))),
+                scale_cost(float(e.water_cost)),
+                py_to_julia_vector(_elz(e.life_time)),
+            )
+            jl.seval("push!")(jl_electrolyzers, jl_elz)
+
+        # N-1 security: apply_to_modes lists simulation modes, so a
+        # development run is "development" whatever its dispatch formulation
         n1 = self.esfex_config.n1_security if self.esfex_config else N1SecurityConfig()
-        n1_enabled = n1.enabled and self.mode in n1.apply_to_modes
+        n1_enabled = n1.enabled and self.run_mode in n1.apply_to_modes
 
         # Rolling-horizon boundary conditions for the seam with the previous
         # window. Each boundary entry has shape (gen × bus) at the last
@@ -1680,12 +2049,35 @@ class PowerSystemAdapter:
                 outer[g + 1] = inner
             return outer
 
+        def _to_model_buses(arr):
+            # Boundary state (unit × bus) comes from results expanded to the
+            # original buses; with network reduction this model is built on
+            # the reduced ones, so keep the retained buses in reduced order.
+            rm = self._reduction_map
+            if (arr is not None and rm is not None and np.ndim(arr) == 2
+                    and np.shape(arr)[1] == rm.n_original_buses):
+                return np.asarray(arr)[:, rm.retained_original_indices]
+            return arr
+
         jl_gen_status_init = _np2d_to_jl_gen_bus_dict(
-            self.boundary_conditions.get('gen_status_init'))
+            _to_model_buses(self.boundary_conditions.get('gen_status_init')))
         jl_gen_output_prev = _np2d_to_jl_gen_bus_dict(
-            self.boundary_conditions.get('gen_output_prev'))
+            _to_model_buses(self.boundary_conditions.get('gen_output_prev')))
         jl_reservoir_level = _np2d_to_jl_gen_bus_dict(
-            self.boundary_conditions.get('reservoir_level'))
+            _to_model_buses(self.boundary_conditions.get('reservoir_level')))
+        # Battery SOC carried from the previous window (battery × bus, MWh),
+        # in Julia battery order (existing then virtual, as pushed above).
+        jl_battery_soc_prev = _np2d_to_jl_gen_bus_dict(
+            _to_model_buses(self.boundary_conditions.get('battery_soc')))
+        # Battery discharge / charge (MW) at the previous window's last step,
+        # for the batteries' ramp limits at t=1.
+        jl_battery_discharge_prev = _np2d_to_jl_gen_bus_dict(
+            _to_model_buses(self.boundary_conditions.get('battery_discharge_prev')))
+        jl_battery_charge_prev = _np2d_to_jl_gen_bus_dict(
+            _to_model_buses(self.boundary_conditions.get('battery_charge_prev')))
+        # End-of-year SOC floor (battery × bus, MWh), set on the last window.
+        jl_bat_soc_end_min = _np2d_to_jl_gen_bus_dict(
+            _to_model_buses(self.boundary_conditions.get('battery_soc_end_min')))
 
         # Centralised deterministic-outage masks for non-generator elements,
         # each aligned to that element's Julia push order (generators fold their
@@ -1693,9 +2085,9 @@ class PowerSystemAdapter:
         jl_outage_masks = jl.seval("Dict{String, Any}()")
         # Batteries: position-indexed matrix (unfiltered push order).
         bat_mask = build_outage_mask_matrix(
-            outage_by_type.get("battery", {}),
+            bat_windows_by_key,
             [k for k, _ in bat_order],
-            self.start_hour, self.hours, resolution_hours,
+            outage_hour0, self.hours, resolution_hours,
         )
         if bat_mask is not None:
             jl.seval("setindex!")(
@@ -1703,7 +2095,7 @@ class PowerSystemAdapter:
         # Lines: id-addressed (multi-stage filtered) → Dict{line_id → factor}.
         line_masks = build_outage_mask_by_id(
             outage_by_type.get("line", {}),
-            self.start_hour, self.hours, resolution_hours,
+            outage_hour0, self.hours, resolution_hours,
         )
         if line_masks is not None:
             jl_line_masks = jl.seval("Dict{String, Vector{Float64}}()")
@@ -1711,11 +2103,23 @@ class PowerSystemAdapter:
                 jl.seval("setindex!")(
                     jl_line_masks, py_to_julia_vector(fac), str(lid))
             jl.seval("setindex!")(jl_outage_masks, jl_line_masks, "line")
+        # Electrolyzers: position-indexed matrix in config order (whole unit).
+        elz_windows = outage_by_type.get("electrolyzer", {})
+        if any(n is not None for ns in outage_nodes.get("electrolyzer", {}).values() for n in ns):
+            logger.warning("Outage window on one node of an electrolyzer: electrolyzer "
+                           "outages apply to the whole unit.")
+        elz_mask = build_outage_mask_matrix(
+            elz_windows, list(electrolyzers.keys()),
+            outage_hour0, self.hours, resolution_hours,
+        )
+        if elz_mask is not None:
+            jl.seval("setindex!")(
+                jl_outage_masks, py_to_julia_matrix(elz_mask), "electrolyzer")
         # Converters (AC/DC, frequency) and transformers: id-addressed by name.
         for _cat in ("acdc_converter", "freq_converter", "transformer"):
             _m = build_outage_mask_by_id(
                 outage_by_type.get(_cat, {}),
-                self.start_hour, self.hours, resolution_hours,
+                outage_hour0, self.hours, resolution_hours,
             )
             if _m is not None:
                 _jl_m = jl.seval("Dict{String, Vector{Float64}}()")
@@ -1739,7 +2143,7 @@ class PowerSystemAdapter:
             loss_of_reserve_dynamic=scale_cost(float(sys.penalties.loss_of_reserve_dynamic)),
             co2_cost=scale_cost(float(sys.penalties.co2_cost)),
             curtailment_cost=scale_cost(float(getattr(sys.penalties, 'curtailment_cost', 20.0))),
-            re_penetration_target=float(self.re_penetration_target_override if self.re_penetration_target_override is not None else sys.target_re_penetration),
+            re_penetration_target=float(self.re_penetration_target_override or 0.0),
             co2_budget=float(sys.co2_budget.annual_budget) if sys.co2_budget.enabled else float("inf"),
             inertia_limit=float(sys.inertia_limit_threshold),
             mode=self.mode,
@@ -1752,8 +2156,10 @@ class PowerSystemAdapter:
             outage_masks=jl_outage_masks,
             fuel_co2=jl_fuel_co2,
             ev_config=jl_ev_config,
-            electrolyzer_config=jl_electrolyzer,
+            electrolyzers=jl_electrolyzers,
             sectoral_criticality=jl_sectoral_criticality,
+            sectoral_delay_tolerance=jl_shift_delay,
+            sectoral_flexibility_ratio=jl_shift_ratio,
             loss_of_inertia_penalty=scale_cost(float(sys.penalties.loss_of_inertia)),
             n1_security_enabled=n1_enabled,
             n1_transmission_enabled=n1.transmission_enabled,
@@ -1763,41 +2169,34 @@ class PowerSystemAdapter:
             n1_generation_reserve_percentage=n1.generation_reserve_percentage,
             n1_scopf_enabled=n1.scopf_enabled,
             n1_corrective_enabled=n1.corrective_enabled,
-            n1_scopf_max_iterations=int(n1.scopf_max_iterations),
-            n1_scopf_violation_tolerance=float(n1.scopf_violation_tolerance),
             # Rolling-horizon seam: per-window-N initial state from window N-1.
             # All three default to empty Dict (no boundary) → Julia preserves
             # legacy behaviour for the first window of every year.
             generator_initial_status=jl_gen_status_init,
             generator_output_prev=jl_gen_output_prev,
             reservoir_level_prev=jl_reservoir_level,
+            battery_soc_prev=jl_battery_soc_prev,
+            battery_discharge_prev=jl_battery_discharge_prev,
+            battery_charge_prev=jl_battery_charge_prev,
             # Penalty coefficients from config (B4)
             fre_penetration_penalty=scale_cost(float(getattr(sys.penalties, 'fre_penetration_loss', 100.0))),
             transfer_margin_penalty=scale_cost(float(getattr(sys.penalties, 'transfer_margin', 0.0))),
             rooftop_curtailment_penalty=scale_cost(float(getattr(sys.penalties, 'rooftop_curtailment', 5.0))),
             co2_budget_violation_penalty=scale_cost(float(getattr(sys.penalties, 'co2_budget_violation', 500.0))),
-            delay_retirement_penalty_per_mw=scale_cost(float(getattr(sys.penalties, 'delay_retirement_per_mw', 50000.0))),
             # Demand constraints — load shedding bounded to fraction of demand
-            loss_demand_threshold=float(sys.loss_demand_threshold),
-            max_annual_system_cost=scale_cost(float(getattr(sys, 'max_annual_system_cost', float('inf')))),
             # Electricity price for time-varying V2G compensation and flex demand benefit
             electricity_price=py_to_julia_vector(
                 [p * COST_SCALE for p in self.kwargs.get('electricity_price', [])[:self.hours]]
                 if self.kwargs.get('electricity_price') else []
             ),
-            # NPV/lifecycle tracking (H1: wire P2 fields)
-            unit_npv=_dict_to_jl_tuple_dict(_scale_dict_values(self.kwargs.get('unit_npv', {}))),
-            replacement_needed=_dict_to_jl_tuple_bool_dict(self.kwargs.get('replacement_needed', {})),
-            bat_unit_npv=_dict_to_jl_tuple_dict(_scale_dict_values(self.kwargs.get('bat_unit_npv', {}))),
-            bat_replacement_needed=_dict_to_jl_tuple_bool_dict(self.kwargs.get('bat_replacement_needed', {})),
-            decommissioning_cost_gen=_dict_to_jl_tuple_dict(_scale_dict_values(self.kwargs.get('decommissioning_cost_gen', {}))),
-            decommissioning_cost_bat=_dict_to_jl_tuple_dict(_scale_dict_values(self.kwargs.get('decommissioning_cost_bat', {}))),
-            discount_rate=float(self.kwargs.get('discount_rate', sys.discount_rate)),
             # Configurable parameters (previously hardcoded)
             soc_end_tolerance=float(getattr(sys, 'soc_end_tolerance', 0.05)),
             # Operational rolling windows chain SOC across windows via boundary
-            # conditions; the per-window cyclic constraint must be off.
+            # conditions; the per-window cyclic constraint must be off. Only the
+            # year's last window gets a (soft) floor back to the year-start SOC.
             cyclic_end_soc=False,
+            bat_soc_end_min=jl_bat_soc_end_min,
+            bat_soc_end_min_cyclic=bool(self.boundary_conditions.get('battery_soc_end_cyclic', False)),
             min_cycling_ratio=float(getattr(sys, 'min_cycling_ratio', 0.8)),
             min_cycling_period_days=float(getattr(sys, 'min_cycling_period_days', 7.0)),
             reserve_static_default_ratio=float(getattr(sys, 'reserve_static_default_ratio', 0.15)),
@@ -1808,11 +2207,8 @@ class PowerSystemAdapter:
                 list(getattr(sys.nodes, 'reserve_dynamic', []) or [])
             ),
             soc_violation_penalty=scale_cost(float(getattr(sys.penalties, 'soc_violation', 1e6))),
-            flexible_demand_benefit_ratio=float(getattr(sys, 'flexible_demand_benefit_ratio', 0.5)) if has_flexible_sector else 0.0,
             demand_shift_cost_rate=scale_cost(float(getattr(sys, 'demand_shift_cost_rate', 0.1))),
             dynamic_reserve_contribution=float(getattr(sys, 'dynamic_reserve_contribution', 0.5)),
-            max_decommission_cost_per_mw=scale_cost(float(getattr(sys, 'max_decommission_cost_per_mw', 5e5))),
-            max_npv_penalty_per_mw=scale_cost(float(getattr(sys, 'max_npv_penalty_per_mw', 1e6))),
             # PWL transmission loss model
             pwl_loss_segments=_pwl_segments_from_config(sys.dc_power_flow),
             # Rooftop solar generation (hours × nodes matrix, or nothing)
@@ -1834,9 +2230,30 @@ class PowerSystemAdapter:
             acopf_q_min_ratio=float(getattr(sys.ac_power_flow, 'q_min_ratio', 0.5)),
             gen_q_limits=_build_gen_q_limits(sys),
             gen_q_limits_min=_build_gen_q_limits_min(sys),
+            co2_budget_groups=self._co2_budget_groups(sys, ESFEX),
         )
 
         return jl_input
+
+    @staticmethod
+    def _co2_budget_groups(sys, ESFEX):
+        """Per-system CO2 budgets of a merged run as ``CO2BudgetGroup``s.
+
+        Empty for a single system: the dispatch then uses ``co2_budget`` and
+        ``co2_budget_violation_penalty`` over all nodes.
+        """
+        jl = get_julia()
+        groups = jl.seval("CO2BudgetGroup[]")
+        for b in getattr(sys, "co2_budget_by_system", None) or []:
+            nodes = ([b.first_node + k + 1 for k in range(b.num_nodes)]  # 1-indexed
+                     + [n + 1 for n in b.extra_nodes])
+            jl.seval("push!")(groups, ESFEX.CO2BudgetGroup(
+                str(b.system),
+                py_to_julia_int_vector(nodes),
+                float(b.annual_budget) if b.enabled else float("inf"),
+                scale_cost(float(b.violation_penalty)),
+            ))
+        return groups
 
     def write_lp(self, filepath: str) -> None:
         """
@@ -1877,17 +2294,37 @@ class PowerSystemAdapter:
         jl.seval("global _ps_model")
         jl._ps_model = self._jl_model
 
-        # Solve using JuMP. No retries, no fallbacks: if the configured solver
-        # cannot prove optimality, that is a real formulation/conditioning bug
-        # and must be surfaced — masking it with a simplex fallback hides
-        # silent errors that are extremely hard to debug later.
+        # Solve as the master is solved: a Gurobi solve that ends
+        # NUMERICAL_ERROR or SUBOPTIMAL is solved once more with the
+        # homogeneous barrier, and a loss-repair round still short of optimal
+        # is undone (ESFEX.optimize_dispatch!). No fallback to another
+        # solver or method.
         jl.seval("using JuMP")
         t0 = _time.perf_counter()
-        jl.seval("optimize!(_ps_model)")
+        jl.seval("(m, label) -> ESFEX.optimize_dispatch!(m; label = label)")(
+            self._jl_model, self._window_label())
         t_solve = _time.perf_counter() - t0
         logger.info(f"⏱ PowerSystem solve: {t_solve:.2f}s")
+        # Bounds of the window's line-loss repair: the runner sums them per
+        # year and logs the year (each window only at DEBUG)
+        self.loss_repair = loss_repair_bounds(self._jl_model)
+        if self.loss_repair and self.loss_repair["rounds"]:
+            logger.debug(f"{self._window_label()}: line-loss repair {self.loss_repair}")
 
         status_code = self._map_termination_status(jl)
+
+        # Cost of N-1 security (opt-in): re-solve a copy without the N-1
+        # constraints; extract_solution reports the objective difference.
+        if status_code == 1 and self._n1_security_cost_requested():
+            try:
+                t0 = _time.perf_counter()
+                cost = float(jl.seval("compute_n1_security_cost!")(
+                    self._jl_model, self._jl_input))
+                logger.info(
+                    f"⏱ N-1 security cost re-solve: {_time.perf_counter() - t0:.2f}s "
+                    f"(cost={cost:.6g} M$)")
+            except Exception as exc:
+                logger.warning(f"N-1 security cost skipped due to bridge error: {exc}")
 
         # UC dual recovery (Ruta A v2): MIPs have no duals, so a UC solve
         # otherwise produces ``prices = 0`` in the HDF5 export. We clone
@@ -1925,27 +2362,77 @@ class PowerSystemAdapter:
 
         return status_code
 
+    def _n1_security_cost_requested(self) -> bool:
+        """``n1_security.compute_security_cost`` is on and N-1 applies to this run's mode."""
+        n1 = getattr(self.esfex_config, "n1_security", None) if self.esfex_config else None
+        return bool(n1 is not None and n1.enabled and n1.compute_security_cost
+                    and self.run_mode in n1.apply_to_modes)
+
+    def _window_label(self) -> str:
+        """This dispatch window in log messages: its number (when the runner
+        gives one), year and first hour."""
+        window = self.kwargs.get("window")
+        where = f"{self.year}, from hour {self.start_hour}"
+        return (f"Dispatch window {window} ({where})" if window is not None
+                else f"Dispatch ({where})")
+
     def _map_termination_status(self, jl) -> int:
         """Map JuMP termination status to PuLP-compatible code.
 
-        Strict mapping: only ``OPTIMAL`` / ``LOCALLY_SOLVED`` returns success.
-        Anything else (including ``OTHER_ERROR`` with a "feasible point"
-        primal status) is reported as a failure so the caller can stop.
+        ``OPTIMAL`` / ``LOCALLY_SOLVED`` return success. ``LOCALLY_SOLVED``
+        from an LP or MIP solver (Gurobi's ``SUBOPTIMAL``: the barrier
+        stalled short of its tolerances) is what remains after the retry of
+        ``optimize_dispatch!``: its feasible point is kept with a warning that
+        names the window; it is the normal answer of a local NLP solver
+        (Ipopt), kept without one. A solver that stops at
+        a resource LIMIT (time / nodes / iterations) but holds a FEASIBLE primal
+        point is also accepted: an operational dispatch that meets demand is a
+        valid result, and discarding it turns a slow-but-solved window into a
+        total run failure (Japan's 72 h UC would grind the last ~2 % of the MIP
+        gap for the whole time limit, then fail — throwing away a usable
+        dispatch). The optimality gap is logged loudly so the result is not
+        mistaken for a proven optimum; loosen ``solver.gap`` or raise
+        ``solver.time_limit`` to close it. INFEASIBLE / UNBOUNDED stay failures.
         """
         status = jl.seval("termination_status(_ps_model)")
         status_str = str(status)
         logger.info(f"Solve completed with status: {status_str}")
 
-        if "OPTIMAL" in status_str or "LOCALLY_SOLVED" in status_str:
+        if "OPTIMAL" in status_str:
             return 1
         elif "DUAL_INFEASIBLE" in status_str or "UNBOUNDED" in status_str:
             return -2
         elif "INFEASIBLE" in status_str:
             self._dump_iis_if_requested(jl, "_ps_model")
             return -1
-        # Diagnose anything else as a failure (no fallback, no acceptance)
+
         try:
             primal_status = str(jl.seval("primal_status(_ps_model)"))
+        except Exception:
+            primal_status = "NO_SOLUTION"
+        if ("LOCALLY_SOLVED" in status_str
+                and primal_status.split(".")[-1] == "FEASIBLE_POINT"):
+            try:
+                local_solver = str(jl.seval("solver_name(_ps_model)")) == "Ipopt"
+            except Exception:
+                local_solver = False
+            if not local_solver:
+                logger.warning(
+                    f"{self._window_label()}: the solver stopped short of optimal "
+                    f"({status_str}, Gurobi's SUBOPTIMAL) after one more solve; "
+                    "keeping its feasible point, whose cost may lie above the "
+                    "optimum.")
+            return 1
+
+        # Accept a feasible incumbent found before a resource limit was hit.
+        if _accept_limit_incumbent(
+            jl, "_ps_model", status_str, primal_status, "The dispatch solver",
+            "loosen solver.gap or raise solver.time_limit to close the gap.",
+        ):
+            return 1
+
+        # Diagnose anything else as a failure (no fallback, no acceptance)
+        try:
             dual_status = str(jl.seval("dual_status(_ps_model)"))
             logger.error(
                 f"Solver failed with non-optimal termination: {status_str}, "
@@ -2004,9 +2491,47 @@ class PowerSystemAdapter:
         except Exception as e:
             logger.error(f"Failed to dump IIS: {e}")
 
-    def get_solution_values(self) -> Dict[str, Any]:
+    def _committed_steps(self, keep_steps: Optional[int],
+                         primary_energy: Optional["PrimaryEnergyAdapter"] = None):
+        """The Julia ``CommittedSteps`` of the window's first *keep_steps*
+        steps (primary-energy variables included), or None for the whole
+        window."""
+        n_steps = int(self._jl_input.temporal.hours)
+        if keep_steps is None or not 0 < int(keep_steps) < n_steps:
+            return None
+        return get_esfex_module().committed_steps(
+            self._jl_vars, n_steps, int(keep_steps),
+            pe_vars=getattr(primary_energy, "_jl_vars", None),
+            pe_temporal=getattr(primary_energy, "_jl_temporal", None))
+
+    def add_operating_budget(self, budget: float, keep_steps: Optional[int] = None,
+                             primary_energy: Optional["PrimaryEnergyAdapter"] = None,
+                             ) -> None:
+        """Cap the operating spending of the window's committed steps at
+        *budget* ($): fuel, maintenance, fixed O&M and, with
+        *primary_energy* (already integrated), the fuel bought and
+        transported. Spending above it is penalised (COST-1,
+        ``ESFEX.add_operating_budget!``). Call after ``build_model`` and the
+        primary-energy integration, before ``solve``."""
+        if self._jl_model is None:
+            raise RuntimeError("Model not built. Call build_model() first.")
+        get_julia().seval("(m, b, c) -> ESFEX.add_operating_budget!(m, b; committed = c)")(
+            self._jl_model, scale_cost(float(budget)),
+            self._committed_steps(keep_steps, primary_energy))
+
+    def get_solution_values(self, keep_steps: Optional[int] = None,
+                            primary_energy: Optional["PrimaryEnergyAdapter"] = None,
+                            ) -> Dict[str, Any]:
         """
         Extract solution values from the solved model.
+
+        Args:
+            keep_steps: Steps of a rolling-horizon window that are committed
+                (the next window solves the rest again). The objective, the
+                scalar totals and ``cost_breakdown`` then cover only those
+                steps; the arrays still span the window. Default: all steps.
+            primary_energy: The primary-energy block solved in the same
+                model, so its costs are split by step too.
 
         Returns:
             Dictionary with solution values
@@ -2017,9 +2542,12 @@ class PowerSystemAdapter:
         if self._jl_model is None:
             raise RuntimeError("Model not built. Call build_model() first.")
 
+        committed = self._committed_steps(keep_steps, primary_energy)
+
         # Extract solution using Julia function
         t0 = _time.perf_counter()
-        jl_result = ESFEX.extract_solution(self._jl_model, self._jl_vars, self._jl_input)
+        jl_result = ESFEX.extract_solution(self._jl_model, self._jl_vars, self._jl_input,
+                                           committed=committed)
         t_extract = _time.perf_counter() - t0
 
         # Convert to Python dictionary
@@ -2058,6 +2586,10 @@ class PowerSystemAdapter:
                     recovered_unscaled.shape, _np.asarray(expected).shape,
                 )
 
+        _add_unattached_load_shed(result, self.demand,
+                                  getattr(self, "_unattached_nodes", None),
+                                  self._jl_input, keep_steps)
+
         # Expand results back to the original bus/line topology when
         # network reduction was applied.  All per-bus arrays (generation,
         # battery dispatch, voltage angles, prices) are padded to the
@@ -2088,6 +2620,129 @@ class PowerSystemAdapter:
         return float(jl.seval("objective_value(_ps_model)")) * COST_UNSCALE
 
 
+def _master_co2_budget_groups(sys, ESFEX):
+    """The master's annual CO2 budgets as ``CO2BudgetGroup``s, as the dispatch
+    sets them: one per system of a merged run (``co2_budget_by_system``), or
+    one over all nodes from ``co2_budget`` and
+    ``penalties.co2_budget_violation``. Empty when no budget is enabled.
+    """
+    jl = get_julia()
+    if getattr(sys, "co2_budget_by_system", None):
+        return PowerSystemAdapter._co2_budget_groups(sys, ESFEX)
+    groups = jl.seval("CO2BudgetGroup[]")
+    budget = getattr(sys, "co2_budget", None)
+    if budget is not None and budget.enabled:
+        jl.seval("push!")(groups, ESFEX.CO2BudgetGroup(
+            str(sys.name),
+            py_to_julia_int_vector(list(range(1, sys.num_nodes + 1))),
+            float(budget.annual_budget),
+            scale_cost(float(getattr(sys.penalties, 'co2_budget_violation', 500.0))),
+        ))
+    return groups
+
+
+def _julia_profiles(profiles: Optional[List[np.ndarray]]) -> Any:
+    """*profiles* (1-D series) as a Julia ``Vector{Vector{Float64}}``."""
+    jl = get_julia()
+    out = jl.seval("Vector{Float64}[]")
+    for p in profiles or []:
+        jl.seval("push!")(out, py_to_julia_vector(np.asarray(p, dtype=float).ravel()))
+    return out
+
+
+def master_rep_day_offsets(demand: np.ndarray, num_years: int, num_days: int,
+                           min_separation: int, resolution_hours: int = 1,
+                           profiles: Optional[List[np.ndarray]] = None) -> List[int]:
+    """Representative days of a development run, chosen once: the first
+    step (0-based, within a year) of each day, the same calendar days for
+    every planning year.
+
+    Julia ``representative_day_offsets``: the peak day of the horizon-mean
+    demand (the mean over the ``num_years`` yearly blocks of *demand*, steps
+    of ``resolution_hours`` × nodes), then one day per segment of the year
+    (``min_separation`` days apart) such that the days' mean demand and the
+    days' mean of each renewable availability series in *profiles* (1-D, at
+    the same resolution, one or several years) match the annual means.
+    """
+    ESFEX = get_esfex_module()
+    resolution_hours = max(1, int(resolution_hours))
+    offsets = ESFEX.representative_day_offsets(
+        py_to_julia_matrix(np.asarray(demand, dtype=float)), int(num_years),
+        int(num_days), int(min_separation), 24 // resolution_hours,
+        HOURS_STD_YEAR // resolution_hours, profiles=_julia_profiles(profiles))
+    return [int(o) for o in offsets]
+
+
+def master_critical_days(demand: np.ndarray, num_years: int, num_days: int,
+                         min_separation: int, resolution_hours: int = 1,
+                         profiles: Optional[List[np.ndarray]] = None,
+                         capacities: Optional[List[float]] = None,
+                         exclude: Optional[List[int]] = None) -> tuple[List[int], float]:
+    """Critical days of a development run, chosen once, and the storage firm
+    hours (Julia ``critical_day_plan``).
+
+    The ``num_days`` days (first steps, 0-based, within a year; the most
+    critical first) with the largest net load, the day mean of the
+    horizon-mean system demand over its annual mean minus the renewable
+    supply over its annual mean (the *profiles*, 1-D at the same
+    resolution, weighted by the MW behind each, *capacities*), skipping the
+    days already modelled (*exclude*) and ``min_separation`` days apart.
+    The hours are the longest stretch without solar on those days (the
+    longest stretch with renewable supply below demand without a solar
+    profile; 4 h without renewable profiles).
+    """
+    ESFEX = get_esfex_module()
+    resolution_hours = max(1, int(resolution_hours))
+    offsets, hours = ESFEX.critical_day_plan(
+        py_to_julia_matrix(np.asarray(demand, dtype=float)), int(num_years),
+        int(num_days), int(min_separation), 24 // resolution_hours,
+        HOURS_STD_YEAR // resolution_hours, profiles=_julia_profiles(profiles),
+        capacities=py_to_julia_vector([float(c) for c in capacities or []]),
+        exclude=py_to_julia_int_vector([int(o) for o in exclude or []]))
+    return [int(o) for o in offsets], float(hours)
+
+
+def master_day_weights(demand: np.ndarray, num_years: int, offsets: List[int],
+                       critical_offsets: List[int], resolution_hours: int = 1,
+                       profiles: Optional[List[np.ndarray]] = None,
+                       prior: Optional[List[float]] = None) -> List[float]:
+    """Days of the year each representative day (or TSAM period, *offsets*)
+    and then each critical day stands for (Julia
+    ``representative_day_weights``): 1 per critical day; the representative
+    days share the rest, from their *prior* weights (equal when None),
+    corrected so the year keeps the demand and renewable energy of the
+    representative days alone."""
+    ESFEX = get_esfex_module()
+    resolution_hours = max(1, int(resolution_hours))
+    weights = ESFEX.representative_day_weights(
+        py_to_julia_matrix(np.asarray(demand, dtype=float)), int(num_years),
+        py_to_julia_int_vector([int(o) for o in offsets]),
+        py_to_julia_int_vector([int(o) for o in critical_offsets]),
+        24 // resolution_hours, HOURS_STD_YEAR // resolution_hours,
+        profiles=_julia_profiles(profiles),
+        prior=py_to_julia_vector([float(w) for w in prior or []]))
+    return [float(w) for w in weights]
+
+
+def master_rep_day_ratios(demand: np.ndarray, num_years: int, offsets: List[int],
+                          resolution_hours: int = 1,
+                          profiles: Optional[List[np.ndarray]] = None,
+                          weights: Optional[List[float]] = None) -> List[float]:
+    """Mean on the representative days (or TSAM periods, weighted by
+    *weights*) starting at *offsets* over the annual mean, for the
+    horizon-mean demand and then each of *profiles* (Julia
+    ``representative_day_ratios``). 1.0 means the master's year has the real
+    year's energy; NaN for a series that is zero all year."""
+    ESFEX = get_esfex_module()
+    resolution_hours = max(1, int(resolution_hours))
+    ratios = ESFEX.representative_day_ratios(
+        py_to_julia_matrix(np.asarray(demand, dtype=float)), int(num_years),
+        py_to_julia_int_vector([int(o) for o in offsets]), 24 // resolution_hours,
+        HOURS_STD_YEAR // resolution_hours, profiles=_julia_profiles(profiles),
+        weights=py_to_julia_vector([float(w) for w in weights or []]))
+    return [float(r) for r in ratios]
+
+
 class MasterProblemAdapter:
     """
     Python adapter for the Julia MasterProblem optimization model.
@@ -2101,41 +2756,83 @@ class MasterProblemAdapter:
         years: List[int],
         base_year: int,
         demand: np.ndarray,
-        demand_growth: float = 0.02,
+        demand_growth: float = 0.0,
         discount_rate: float = 0.05,
         max_annual_investment: float = 1e9,
+        budget_scope: str = "investment",
         target_re_penetration: float = 0.5,
         initial_re_penetration: float = 0.1,
         min_re_increment: float = 0.0,
         max_re_increment: float = 1.0,
-        slack_penalty: float = 1e6,
-        life_extension_cost_factor: float = 0.3,
+        life_extension_cost_factor: Optional[float] = None,
         decommissioning_cost_factor: float = 0.1,
         temporal_resolution_hours: int = 24,
         representative_days_per_year: int = 12,
         min_day_separation: int = 7,
+        # First step (0-based, within a year) of each representative day,
+        # the same for every year; None: Julia chooses them from the
+        # horizon-mean demand and renewable profiles (master_rep_day_offsets)
+        rep_day_offsets: Optional[List[int]] = None,
+        # Critical days (master_critical_days), modelled with the
+        # representative days; the days of the year each representative day
+        # and then each critical day stands for (master_day_weights); the
+        # storage firm hours of the adequacy constraint (None: from the
+        # data); the critical days Julia picks when rep_day_offsets is None
+        critical_day_offsets: Optional[List[int]] = None,
+        rep_day_weights: Optional[List[float]] = None,
+        storage_firm_hours: Optional[float] = None,
+        critical_days: int = 0,
         investment_resolution_hours: int = 8760,
         # TSAM parameters
         use_tsam: bool = False,
         tsam_period_start_hours: Optional[List[List[int]]] = None,
         tsam_period_weights: Optional[List[List[float]]] = None,
-        tsam_chronological_order: Optional[List[List[int]]] = None,
+        # Per year, the period (1-indexed) of each day of the year: the
+        # seasonal storage's day map (each period's count = its weight)
+        tsam_day_period: Optional[List[List[int]]] = None,
         tsam_inter_period_linking: bool = True,
+        # Periods (0-based indices) kept as they are when the renewable
+        # profiles are rescaled to each year's energy: the critical days
+        tsam_critical_periods: Optional[List[int]] = None,
         # Stochastic parameters
         use_stochastic: bool = False,
         stochastic_scenarios: Optional[List[dict]] = None,
         # Per-system node ranges for per-system RE constraints
         # List of (name, first_bus_1indexed, num_buses, initial_re)
         system_node_ranges: Optional[List[tuple]] = None,
+        # RE targets {(system_1idx, year_1idx): share} replacing the RE-1
+        # trajectory (myopic mode: each year's target from the full horizon)
+        re_target_override: Optional[dict] = None,
+        # Actual RE share per system (1-based order of system_node_ranges, or
+        # one value) the year before the first modelled year, from which the
+        # maximum annual increment is measured (myopic: last year's share)
+        re_share_anchor: Optional[List[float]] = None,
+        # Year the fuels block's prices are given for (the run's first
+        # planning year; a myopic year's master has a later base_year)
+        fuel_price_base_year: Optional[int] = None,
         # Config path for resolving relative file paths (availability, inflow)
         config_path: Optional[str] = None,
         # Pre-loaded availability cache (includes zone-extended profiles)
         availability_cache: Optional[Dict[str, np.ndarray]] = None,
+        # Pre-loaded reservoir inflow cache {gen_key: hourly array}
+        inflow_cache: Optional[Dict[str, np.ndarray]] = None,
+        # Timestamp of the first data row ("DD/MM/YYYY HH:MM") for profiles
+        # read from disk (Feb 29 rows are dropped by this calendar)
+        date_start: Optional[str] = None,
+        # Horizon hour of the first planned hour: profiles start there
+        # (myopic masters plan one later year at a time)
+        profile_start_hour: int = 0,
         # Master-problem solver method and Benders settings
         solver_method: str = "monolithic",
         benders_max_iterations: int = 50,
         benders_tolerance: float = 1e-4,
-        benders_lol_penalty_cap: float = 1000.0,
+        # NPV-based retirement (system setting npv_retirement): units an
+        # earlier myopic year retired [(kind, unit key, bus)], kept retired
+        # here without paying their decommissioning again, and the unit
+        # keys whose NPV is checked (None: every existing unit)
+        retired_units: Optional[List[tuple]] = None,
+        npv_unit_keys: Optional[set] = None,
+        npv_horizon_end: Optional[int] = None,
         **kwargs,
     ):
         """
@@ -2146,32 +2843,90 @@ class MasterProblemAdapter:
             years: List of simulation years
             base_year: Base year for NPV calculations
             demand: Base demand array (hours x nodes)
-            demand_growth: Annual demand growth rate
+            demand_growth: Extra annual growth applied on top of each year's
+                demand (default 0: the demand array already holds every year)
             discount_rate: Discount rate for NPV
             max_annual_investment: Maximum annual investment budget
+            budget_scope: "investment" (the budget caps each build year's
+                overnight investment) or "total" (that investment plus the
+                money the year spends on operation, no penalties and no
+                CO2 price; ``budget_operating_cost``)
             target_re_penetration: Target RE penetration ratio
             initial_re_penetration: Initial RE penetration ratio
             min_re_increment: Minimum annual RE penetration increment
             max_re_increment: Maximum annual RE penetration increment
-            slack_penalty: Penalty for violating soft constraints
+            re_target_override: RE targets {(system, year): share}, both
+                1-based, that replace the RE-1 trajectory (myopic mode)
+            re_share_anchor: actual RE share per system the year before the
+                first modelled year, from which max_re_increment caps the
+                growth (myopic mode: the share the previous year achieved);
+                None = each system's initial share
+            fuel_price_base_year: year the ``fuels`` prices are given for,
+                from which ``price_growth_rate`` grows them (default
+                ``base_year``)
             life_extension_cost_factor: Cost factor for life extension
+                (default: the system's life_extension_cost_factor)
             decommissioning_cost_factor: Cost factor for decommissioning
             temporal_resolution_hours: Hours per timestep
             investment_resolution_hours: Hours per investment period (8760=annual)
             representative_days_per_year: Number of representative days
             min_day_separation: Minimum days between representative days
+            rep_day_offsets: First step of each representative day within a
+                year (0-based), the same calendar days for every year
+                (``master_rep_day_offsets``); None lets the Julia master
+                choose them from the horizon-mean demand and its renewable
+                availability profiles
+            critical_day_offsets: First step of each critical day within a
+                year (0-based, ``master_critical_days``), modelled with the
+                representative days in every year
+            rep_day_weights: Days of the year each representative day and
+                then each critical day stands for (``master_day_weights``);
+                None = the year shared equally by the representative days
+            storage_firm_hours: Hours a battery must sustain to count as
+                firm power in the capacity adequacy constraint
+                (min(power, usable energy / hours)); None = from the data
+            critical_days: Critical days the Julia master chooses itself
+                when ``rep_day_offsets`` is None
             use_tsam: Enable TSAM clustering
             tsam_period_start_hours: Per-year list of period start hours (1-indexed)
-            tsam_period_weights: Per-year list of period weights
-            tsam_chronological_order: Per-year list of chronological period indices (1-indexed)
-            tsam_inter_period_linking: Enable inter-period SOC linking
+            tsam_period_weights: Per-year list of period weights (days of the
+                year each period stands for)
+            tsam_day_period: Per-year list of the period (1-indexed) of each
+                day of the year, in calendar order; each period's count must
+                equal its weight
+            tsam_inter_period_linking: Seasonal storage across the TSAM
+                periods (Kotzur et al. 2018 inter-day state through
+                ``tsam_day_period``)
+            tsam_critical_periods: Indices (0-based) of the TSAM periods that
+                are critical days, kept as they are when the renewable
+                profiles are rescaled to each year's energy
+                (``_tsam_energy_matched``)
             use_stochastic: Enable stochastic two-stage optimization
             stochastic_scenarios: List of scenario dicts with name/probability/multipliers
             config_path: Path to config file for resolving relative availability/inflow paths
-            availability_cache: Pre-loaded availability profiles {key: array}
-            **kwargs: Additional parameters (system_config: explicit SystemConfig override)
+            availability_cache: Pre-loaded hourly availability profiles {key: array},
+                the ones the dispatch uses (the runner's cache)
+            inflow_cache: Pre-loaded hourly reservoir inflows {gen_key: array}
+            date_start: First data row's timestamp, for profiles read from disk
+            profile_start_hour: Horizon hour (year index × 8760 + hour) of the
+                first planned hour; every profile is rotated to start there,
+                wrapping around when it is shorter, as in the dispatch
+            retired_units: Units already retired by the NPV iteration of an
+                earlier (myopic) year, as ``(kind, unit key, bus)`` with kind
+                "generator" or "battery" and the 1-based master bus; they stay
+                retired, without paying their decommissioning again
+            npv_unit_keys: Generator and battery keys whose NPV the NPV
+                retirement checks (default: every existing unit)
+            npv_horizon_end: Last year of the planning horizon when it goes
+                past ``years`` (a myopic year's master): the NPV also covers
+                the unit's remaining in-service years up to it, its last
+                modelled year's operation held (Julia ``extra_unit_npv``)
+            **kwargs: Additional parameters (system_config: explicit SystemConfig
+                override; debug_lp_dir: folder where Benders writes the master
+                and subproblem LPs that fail, none when unset)
         """
         system_config_override = kwargs.pop("system_config", None)
+        self.debug_lp_dir = kwargs.pop("debug_lp_dir", None)
         if isinstance(config, ESFEXConfig):
             self.esfex_config = config
             self.system_config = system_config_override or config.primary_system
@@ -2181,6 +2936,9 @@ class MasterProblemAdapter:
 
         self._config_path = config_path
         self._availability_cache = availability_cache or {}
+        self._inflow_cache = inflow_cache or {}
+        self._date_start = date_start
+        self._profile_start_hour = int(profile_start_hour or 0)
 
         self.years = years
         self.base_year = base_year
@@ -2188,12 +2946,16 @@ class MasterProblemAdapter:
         self.demand_growth = demand_growth
         self.discount_rate = discount_rate
         self.max_annual_investment = max_annual_investment
+        self.budget_scope = budget_scope
         self.target_re_penetration = target_re_penetration
         self.initial_re_penetration = initial_re_penetration
         self.min_re_increment = min_re_increment
         self.max_re_increment = max_re_increment
         self.system_node_ranges = system_node_ranges or []
-        self.slack_penalty = slack_penalty
+        self.re_target_override = re_target_override or {}
+        self.re_share_anchor = [float(a) for a in (re_share_anchor or [])]
+        self.fuel_price_base_year = int(fuel_price_base_year if fuel_price_base_year is not None
+                                        else base_year)
         self.life_extension_cost_factor = life_extension_cost_factor
         self.decommissioning_cost_factor = decommissioning_cost_factor
 
@@ -2224,11 +2986,21 @@ class MasterProblemAdapter:
             self.system_config, 'INERTIA_LIMIT',
             getattr(self.system_config, 'inertia_limit', 0.0)))
 
-        # CO2
-        self.fuel_co2 = getattr(self.system_config, 'fuel_co2', {})
-        if not isinstance(self.fuel_co2, dict):
-            self.fuel_co2 = {}
-        self.co2_cost = float(getattr(self.system_config, 'co2_cost', 0.0))
+        # Life extension: the system's life_extension_cost_factor unless the
+        # caller overrides it (the runner never passed it, so the config key
+        # had no effect and a hard-coded 0.3 applied).
+        if self.life_extension_cost_factor is None:
+            self.life_extension_cost_factor = float(getattr(
+                self.system_config, 'life_extension_cost_factor', 0.20))
+
+        # CO2: same sources as the dispatch (fuels' emission factors and
+        # penalties.co2_cost), so the plan sees the carbon cost it will pay.
+        fuels = getattr(self.system_config, 'fuels', None) or {}
+        self.fuel_co2 = {
+            name: float(f.emission_factor)
+            for name, f in fuels.items() if f.emission_factor > 0
+        }
+        self.co2_cost = float(getattr(penalties, 'co2_cost', 0.0)) if penalties is not None else 0.0
 
         # Transmission line data for DC power flow in master problem
         self._build_transmission_line_data()
@@ -2236,12 +3008,18 @@ class MasterProblemAdapter:
         self.temporal_resolution_hours = temporal_resolution_hours
         self.representative_days_per_year = representative_days_per_year
         self.min_day_separation = min_day_separation
+        self.rep_day_offsets = [int(o) for o in rep_day_offsets or []]
+        self.critical_day_offsets = [int(o) for o in critical_day_offsets or []]
+        self.rep_day_weights = [float(w) for w in rep_day_weights or []]
+        self.storage_firm_hours = float(storage_firm_hours or 0.0)
+        self.critical_days = int(critical_days)
         self.investment_resolution_hours = investment_resolution_hours
         self.use_tsam = use_tsam
         self.tsam_period_start_hours = tsam_period_start_hours or []
         self.tsam_period_weights = tsam_period_weights or []
-        self.tsam_chronological_order = tsam_chronological_order or []
+        self.tsam_day_period = tsam_day_period or []
         self.tsam_inter_period_linking = tsam_inter_period_linking
+        self.tsam_critical_periods = list(tsam_critical_periods or [])
         self.use_stochastic = use_stochastic
         self.stochastic_scenarios = stochastic_scenarios or []
         self.kwargs = kwargs
@@ -2250,7 +3028,6 @@ class MasterProblemAdapter:
         self.solver_method = str(solver_method or "monolithic").lower()
         self.benders_max_iterations = int(benders_max_iterations)
         self.benders_tolerance = float(benders_tolerance)
-        self.benders_lol_penalty_cap = float(benders_lol_penalty_cap)
 
         self._jl_model = None
         self._jl_vars = None
@@ -2261,9 +3038,25 @@ class MasterProblemAdapter:
         self._benders_result = None
         self._benders_solution = None
         self._benders_use_rep_days = True
+        self._use_rep_days = True
+
+        # NPV-based retirement: settings of the system, the units earlier
+        # years retired, and the ones this master retires
+        # (npv_retirements: dicts, see _solve_npv_retirement)
+        sc = self.system_config
+        self.npv_retirement = bool(getattr(sc, 'npv_retirement', False))
+        self.npv_max_iterations = int(getattr(sc, 'npv_retirement_max_iterations', 5))
+        self.npv_threshold = float(getattr(sc, 'npv_retirement_threshold', 0.0))
+        self._retired_carried = list(retired_units or [])
+        self._npv_unit_keys = set(npv_unit_keys) if npv_unit_keys is not None else None
+        self.npv_extra_years = (max(0, int(npv_horizon_end) - int(years[-1]))
+                                if npv_horizon_end is not None and years else 0)
+        self.npv_retirements: List[Dict[str, Any]] = []
+        self._last_status = ""
 
         # Get solver config
         self._solver = self.esfex_config.solver if self.esfex_config else SolverConfig()
+        self._solver_options = master_solver_options(self.esfex_config)
 
         logger.debug(f"MasterProblemAdapter initialized: {len(years)} years, base_year={base_year}")
 
@@ -2336,6 +3129,69 @@ class MasterProblemAdapter:
         pairs_str = ", ".join(f"({f}, {t})" for f, t in self.transmission_lines)
         return jl.seval(f"Tuple{{Int64,Int64}}[{pairs_str}]")
 
+    def _master_profile(self, cache: Dict[str, np.ndarray], key: str,
+                        file_name: Optional[str], num_nodes: int, loader,
+                        required: bool = True) -> Optional[np.ndarray]:
+        """Hourly profile of one unit for the master, at its resolution.
+
+        Takes the dispatch's preloaded profile (``cache[key]``) when it has
+        one with ``num_nodes`` columns, else reads ``file_name`` with
+        ``loader`` and the run's ``date_start`` (so Feb 29 is dropped by the
+        data's calendar, as in the dispatch). A missing file gives None when
+        not ``required``. The profile is rotated to start at
+        ``profile_start_hour`` (wrapping around) and averaged to the master's
+        resolution.
+        """
+        prof = cache.get(key)
+        if prof is not None and (np.ndim(prof) != 2 or np.shape(prof)[1] != num_nodes):
+            prof = None
+        if prof is None:
+            if not file_name:
+                return None
+            from pathlib import Path
+            config_dir = Path(self._config_path).parent if self._config_path else Path('.')
+            path = config_dir / file_name
+            if not path.exists():
+                path = Path(file_name)
+            if not required and not path.exists():
+                return None
+            prof = loader(path, temporal_resolution_hours=1, num_nodes=num_nodes,
+                          date_start=self._date_start)
+        prof = np.asarray(prof, dtype=float)
+        if self._profile_start_hour and len(prof) > 0:
+            prof = np.roll(prof, -(self._profile_start_hour % len(prof)), axis=0)
+        if self.temporal_resolution_hours > 1:
+            prof = aggregate_to_resolution(prof, target_hours=self.temporal_resolution_hours)
+        return prof
+
+    def _tsam_energy_matched(self, key: str, profile: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """Renewable availability *profile* (the master's, ``_master_profile``)
+        with its TSAM periods rescaled so that, in each modelled year, the
+        periods' weighted energy is the year's (``rescale_profile_periods``:
+        shape kept, capped at full availability, the critical periods
+        ``tsam_critical_periods`` kept as they are). Only the rows of the
+        periods change. Unchanged without TSAM periods."""
+        if profile is None or not self.use_tsam or not self.tsam_period_start_hours:
+            return profile
+        from esfex.models.tsam import rescale_profile_periods
+
+        res = max(1, int(self.temporal_resolution_hours))
+        steps = HOURS_STD_YEAR // res
+        years = []
+        for starts, weights in zip(self.tsam_period_start_hours, self.tsam_period_weights):
+            if not starts:
+                continue
+            # 1-based steps of the master's horizon; the year's first row
+            first = (min(starts) - 1) // steps * steps
+            years.append((first, [s - 1 - first for s in starts], list(weights)))
+        out, ratios = rescale_profile_periods(profile, years, 24 // res, steps,
+                                              self.tsam_critical_periods)
+        if np.isfinite(ratios).any():
+            logger.debug("TSAM periods of %s rescaled to the year's energy: weighted mean / "
+                         "annual mean %.4f to %.4f", key, float(np.nanmin(ratios)),
+                         float(np.nanmax(ratios)))
+        return out
+
     def _create_input(self) -> Any:
         """Create the Julia MasterProblemInput struct."""
         ESFEX = get_esfex_module()
@@ -2368,66 +3224,51 @@ class MasterProblemAdapter:
             )
             sys = reduced_sys
 
-        # Pre-compute geographic fuel transport adjustments
-        fuel_adjustments = _compute_geographic_fuel_adjustments(sys)
 
         # Build bus_to_node mapping for per-node → per-bus expansion
         from esfex.config.schema import BusConfig
+        from esfex.bridge.converters import node_bus_mapping_required
         buses = sys.buses or [
             BusConfig(bus_id=f"bus_{i}", parent_node=i, demand_fraction=1.0)
             for i in range(num_nodes)
         ]
         bus_to_node_0idx = [b.parent_node for b in buses]
         num_buses = len(buses)
-        need_expansion = num_buses > num_nodes
+        need_expansion = node_bus_mapping_required(buses, num_nodes)
         b2n_arg = bus_to_node_0idx if need_expansion else None
 
         # Resolve per-(unit, node) physical bus mapping (endpoint /
         # bus_index).  See _resolve_element_bus_mapping.
         gen_bus_per_node, bat_bus_per_node = _resolve_element_bus_mapping(sys)
 
+        # Life extension is priced at invest_cost; units without one take it
+        # from their candidate technology (life_extension_invest_costs).
+        ext_gen_costs, ext_bat_costs = life_extension_invest_costs(sys)
+
         # Convert generators with availability profiles
         gen_order = []  # (key, python_config) in Julia push order
         jl_generators = jl.seval("GeneratorConfig[]")
         for key, gen in sys.generators.items():
-            # Load availability profile if specified
-            availability = None
-            if hasattr(gen, 'availability_file') and gen.availability_file:
-                from pathlib import Path
-                # Resolve relative path from config directory
-                config_dir = Path(self._config_path).parent if getattr(self, '_config_path', None) else Path('.')
-                avail_path = config_dir / gen.availability_file
-                if not avail_path.exists():
-                    avail_path = Path(gen.availability_file)
-                availability = load_availability_profile(
-                    avail_path,
-                    temporal_resolution_hours=self.temporal_resolution_hours,
-                    num_nodes=num_nodes
-                )
-                logger.debug(f"Loaded availability for {gen.name}: shape={availability.shape}")
+            if key in ext_gen_costs:
+                gen = gen.model_copy(update={"invest_cost": ext_gen_costs[key]})
+            # Availability: the dispatch's profile (runner cache) when there
+            # is one, else read from disk with the same calendar.
+            availability = self._master_profile(
+                self._availability_cache, key, getattr(gen, 'availability_file', None),
+                num_nodes, load_availability_profile)
+            if gen.type == "Renewable":
+                availability = self._tsam_energy_matched(key, availability)
+            if availability is not None:
+                logger.debug(f"Availability for {gen.name}: shape={availability.shape}")
 
-            # Apply geographic fuel transport cost adjustment
             gen_to_convert = gen
-            if key in fuel_adjustments:
-                gen_dict = gen.model_dump()
-                gen_dict['fuel_cost'] = fuel_adjustments[key]
-                gen_to_convert = GeneratorConfig(**gen_dict)
 
-            # Load reservoir inflow profile if specified
-            inflow = None
-            if hasattr(gen, 'reservoir_inflow_file') and gen.reservoir_inflow_file:
-                from pathlib import Path
-                config_dir = Path(self._config_path).parent if getattr(self, '_config_path', None) else Path('.')
-                inflow_path = config_dir / gen.reservoir_inflow_file
-                if not inflow_path.exists():
-                    inflow_path = Path(gen.reservoir_inflow_file)
-                if inflow_path.exists():
-                    inflow = load_availability_profile(
-                        inflow_path,
-                        temporal_resolution_hours=self.temporal_resolution_hours,
-                        num_nodes=num_nodes
-                    )
-                    logger.debug(f"Loaded inflow for {gen.name}: shape={inflow.shape}")
+            # Reservoir inflow (MW-eq, not clipped), same sources as above
+            inflow = self._master_profile(
+                self._inflow_cache, key, getattr(gen, 'reservoir_inflow_file', None),
+                num_nodes, load_inflow_profile, required=False)
+            if inflow is not None:
+                logger.debug(f"Inflow for {gen.name}: shape={inflow.shape}")
 
             gen_bus_map = gen_bus_per_node.get(key)
             jl_gen = convert_generator_config(gen_to_convert, availability, inflow,
@@ -2440,9 +3281,15 @@ class MasterProblemAdapter:
         bat_order = []  # (key, python_config) in Julia push order
         jl_batteries = jl.seval("BatteryConfig[]")
         for key, bat in sys.batteries.items():
+            if key in ext_bat_costs:
+                bat = bat.model_copy(update={"invest_cost": ext_bat_costs[key]})
             bat_bus_map = bat_bus_per_node.get(key)
+            bat_avail = self._master_profile(
+                self._availability_cache, battery_availability_key(key),
+                bat.availability_file, num_nodes, load_availability_profile)
             jl_bat = convert_battery_config(bat, bus_to_node=b2n_arg,
-                                             bus_per_node=bat_bus_map)
+                                             bus_per_node=bat_bus_map,
+                                             availability=bat_avail)
             jl.seval("push!")(jl_batteries, jl_bat)
             bat_order.append((key, bat))
 
@@ -2451,28 +3298,13 @@ class MasterProblemAdapter:
         jl_technologies = jl.seval("TechnologyConfig[]")
         for key, tech in sys.technologies.items():
             # Use cached availability if available, otherwise load from disk
-            tech_availability = None
-            if key in self._availability_cache:
-                cached = self._availability_cache[key]
-                if self.temporal_resolution_hours > 1:
-                    tech_availability = aggregate_to_resolution(
-                        cached, target_hours=self.temporal_resolution_hours,
-                    )
-                else:
-                    tech_availability = cached
-                logger.debug(f"Using cached availability for tech {tech.name}: shape={tech_availability.shape}")
-            elif tech.availability_file:
-                from pathlib import Path
-                config_dir = Path(self._config_path).parent if self._config_path else Path('.')
-                avail_path = config_dir / tech.availability_file
-                if not avail_path.exists():
-                    avail_path = Path(tech.availability_file)
-                tech_availability = load_availability_profile(
-                    avail_path,
-                    temporal_resolution_hours=self.temporal_resolution_hours,
-                    num_nodes=num_nodes,
-                )
-                logger.debug(f"Loaded availability for tech {tech.name}: shape={tech_availability.shape}")
+            tech_availability = self._master_profile(
+                self._availability_cache, key, tech.availability_file,
+                num_nodes, load_availability_profile)
+            if tech.type == "Renewable":
+                tech_availability = self._tsam_energy_matched(key, tech_availability)
+            if tech_availability is not None:
+                logger.debug(f"Availability for tech {tech.name}: shape={tech_availability.shape}")
             jl_tech = convert_technology_config(tech, tech_availability, bus_to_node=b2n_arg)
             jl.seval("push!")(jl_technologies, jl_tech)
             tech_order.append((key, tech))
@@ -2480,7 +3312,11 @@ class MasterProblemAdapter:
         # Convert battery technologies (investment candidates)
         jl_battery_technologies = jl.seval("BatteryTechnologyConfig[]")
         for key, bat_tech in sys.battery_technologies.items():
-            jl_bat_tech = convert_battery_technology_config(bat_tech, bus_to_node=b2n_arg)
+            bt_avail = self._master_profile(
+                self._availability_cache, battery_technology_availability_key(key),
+                bat_tech.availability_file, num_nodes, load_availability_profile)
+            jl_bat_tech = convert_battery_technology_config(bat_tech, bus_to_node=b2n_arg,
+                                                            availability=bt_avail)
             jl.seval("push!")(jl_battery_technologies, jl_bat_tech)
 
         # Build cost curve dicts for generators, technologies, and batteries
@@ -2494,11 +3330,12 @@ class MasterProblemAdapter:
             bus_to_node=bus_to_node_0idx if need_expansion else None,
             bat_bus_per_node=bat_bus_per_node,
         )
-        # Technologies use same fuel_cost_curve attribute
+        # Technologies use the same fuel_cost_curve attribute; the master may
+        # build them at any bus of a node, so each bus gets the node's curve
         jl_tech_cost_curves = build_gen_cost_curves_dict(
             tech_order, [], num_buses,
             bus_to_node=bus_to_node_0idx if need_expansion else None,
-            gen_bus_per_node={},
+            all_buses_of_node=True,
         )
 
         # Convert network (pass per-line data + transformers + buses)
@@ -2509,6 +3346,7 @@ class MasterProblemAdapter:
             acdc_converters=getattr(sys, 'acdc_converters', None) or None,
             freq_converters=getattr(sys, 'freq_converters', None) or None,
             buses=sys.buses or None,
+            s_base_mva=system_s_base(sys),
         )
 
         # Convert years to Julia vector
@@ -2520,8 +3358,6 @@ class MasterProblemAdapter:
         fre_penetration_loss_penalty = scale_cost(float(penalties.fre_penetration_loss))  # $/MWh → M$/MWh
         max_curtailment_ratio = float(getattr(penalties, 'max_curtailment_ratio', 0.05))  # fraction (no scaling)
         curtailment_cost = scale_cost(float(getattr(penalties, 'curtailment_cost', 20.0)))  # $/MWh → M$/MWh
-        curtailment_excess_penalty = scale_cost(float(getattr(penalties, 'curtailment_excess_penalty', 500.0)))  # $/MWh → M$/MWh
-        re_excess_penalty = scale_cost(float(getattr(penalties, 're_excess_penalty', 100.0)))  # $/MWh → M$/MWh
 
         # Build sectoral demand for master problem (M2)
         jl_sectoral = jl.seval("Dict{String, Matrix{Float64}}()")
@@ -2536,25 +3372,15 @@ class MasterProblemAdapter:
             for sector_name, crit_val in sectoral_criticality.items():
                 jl_sectoral_criticality[sector_name] = float(crit_val)
 
-        # Build primary energy investment configs (H2)
-        jl_pe_configs = jl.seval("PrimaryEnergyInvestmentConfig[]")
-        pe_sources = getattr(sys, 'primary_energy_sources', {})
-        if pe_sources:
-            import math
-            num_nodes_pe = sys.nodes.num_nodes or int(math.sqrt(len(sys.nodes.nodes_connections)))
-            for fuel_id, pe_src in pe_sources.items():
-                storage_cost = [float(getattr(pe_src, 'storage_investment_cost', 0.0))] * num_nodes_pe
-                storage_max = [float(getattr(pe_src, 'max_storage_investment_per_node', 0.0))] * num_nodes_pe
-                transport_cost = float(getattr(pe_src, 'transport_cost', 0.0))
-                transport_max = float(getattr(pe_src, 'max_transport_investment_per_arc', 0.0))
-                jl_pe = ESFEX.PrimaryEnergyInvestmentConfig(
-                    fuel_id,
-                    jl.seval(f"Float64{list(storage_cost)}"),
-                    jl.seval(f"Float64{list(storage_max)}"),
-                    transport_cost,
-                    transport_max,
-                )
-                jl.seval("push!")(jl_pe_configs, jl_pe)
+        # Fuel balance, fuel infrastructure and electrolyzers (#89)
+        jl_fuel = self._create_fuel_input(
+            jl, ESFEX, sys, gen_order, tech_order, num_nodes,
+            b2n_arg, bus_to_node_0idx)
+
+        # Scheduled outages of the existing generators and batteries on the
+        # master's steps (horizon hours from profile_start_hour), as the
+        # dispatch folds them into availability
+        jl_gen_outages, jl_bat_outages = self._outage_factors(jl, sys, gen_order, bat_order)
 
         # Create input struct using keyword constructor
         jl_input = ESFEX.MasterProblemInput(
@@ -2570,45 +3396,45 @@ class MasterProblemAdapter:
             demand_growth=self.demand_growth,
             discount_rate=self.discount_rate,
             max_annual_investment=scale_cost(self.max_annual_investment),
+            budget_total=self.budget_scope == "total",
             target_re_penetration=self.target_re_penetration,
             initial_re_penetration=self.initial_re_penetration,
             min_re_increment=self.min_re_increment,
             max_re_increment=self.max_re_increment,
             system_node_ranges=self._build_jl_system_node_ranges(jl),
-            slack_penalty=scale_cost(self.slack_penalty),
             loss_of_load_penalty=loss_of_load_penalty,
             fre_penetration_loss_penalty=fre_penetration_loss_penalty,
             max_curtailment_ratio=max_curtailment_ratio,
             curtailment_cost=curtailment_cost,
-            curtailment_excess_penalty=curtailment_excess_penalty,
-            re_excess_penalty=re_excess_penalty,
             temporal_resolution_hours=self.temporal_resolution_hours,
             representative_days_per_year=self.representative_days_per_year,
             min_day_separation=self.min_day_separation,
+            rep_day_offsets=(jl.seval("Int[]") if not self.rep_day_offsets else
+                             jl.seval("Vector{Int}")(self.rep_day_offsets)),
+            critical_days=self.critical_days,
+            critical_day_offsets=py_to_julia_int_vector(self.critical_day_offsets),
+            rep_day_weights=py_to_julia_vector(self.rep_day_weights),
+            storage_firm_hours=self.storage_firm_hours,
             investment_resolution_hours=self.investment_resolution_hours,
             use_tsam=self.use_tsam,
             tsam_period_start_hours=_py_nested_list_to_julia_vec_vec(jl, self.tsam_period_start_hours, "Int"),
             tsam_period_weights=_py_nested_list_to_julia_vec_vec(jl, self.tsam_period_weights, "Float64"),
-            tsam_chronological_order=_py_nested_list_to_julia_vec_vec(jl, self.tsam_chronological_order, "Int"),
+            tsam_day_period=_py_nested_list_to_julia_vec_vec(jl, self.tsam_day_period, "Int"),
             tsam_inter_period_linking=self.tsam_inter_period_linking,
             life_extension_cost_factor=self.life_extension_cost_factor,
             decommissioning_cost_factor=self.decommissioning_cost_factor,
             sectoral_demand=jl_sectoral,
             sectoral_criticality=jl_sectoral_criticality,
-            pe_configs=jl_pe_configs,
             # Configurable parameters (previously hardcoded)
             reserve_margin=float(getattr(sys, 'reserve_margin', 1.15)),
             npv_annual_return_rate=float(getattr(sys, 'npv_annual_return_rate', 0.15)),
             base_lcoe=scale_cost(float(getattr(sys, 'base_lcoe', 93.0))),
-            max_npv_penalty_per_mw=scale_cost(float(getattr(sys, 'max_npv_penalty_per_mw', 1e6))),
-            max_decommission_cost_per_mw=scale_cost(float(getattr(sys, 'max_decommission_cost_per_mw', 5e5))),
-            force_replacement_threshold=scale_cost(float(getattr(sys, 'force_replacement', -5e5))),
             solver_name=self._solver.name,
             threads=self._solver.threads,
             time_limit=float(self._solver.time_limit),
             gap=self._solver.gap,
             verbose=self._solver.verbose,
-            solver_options=_solver_options_to_julia(self._solver.options, self._solver.name),
+            solver_options=_solver_options_to_julia(self._solver_options, self._solver.name),
             # Reserve, inertia, CO2 parameters for operational constraints
             reserve_static_default_ratio=self.reserve_static_default_ratio,
             reserve_static_requirement=_build_reserve_requirement_dict(
@@ -2635,10 +3461,58 @@ class MasterProblemAdapter:
             gen_cost_curves=jl_gen_cost_curves,
             bat_cost_curves=jl_bat_cost_curves,
             tech_cost_curves=jl_tech_cost_curves,
-            benders_lol_penalty_cap=scale_cost(self.benders_lol_penalty_cap),
+            re_target_override=jl.seval(
+                "Dict{Tuple{Int,Int}, Float64}(" + ", ".join(
+                    f"({int(s)}, {int(y)}) => {float(v)!r}"
+                    for (s, y), v in self.re_target_override.items()) + ")"),
+            re_share_anchor=(py_to_julia_vector(self.re_share_anchor)
+                             if self.re_share_anchor else jl.seval("Float64[]")),
+            # CO2 budgets and start-ups, as in the dispatch (link flow costs
+            # ride on the network's lines, `flow_cost`)
+            co2_budget_groups=_master_co2_budget_groups(sys, ESFEX),
+            unit_commitment=self._dispatch_commits_units(),
+            primary_energy=jl_fuel,
+            gen_outage_factors=jl_gen_outages,
+            bat_outage_factors=jl_bat_outages,
+            # Each fuel's price growth: the master grows the fuel_cost of the
+            # units burning it per year (year_master_input), as the dispatch
+            fuel_price_growth=_fuel_price_growth(sys),
+            fuel_price_base_year=self.fuel_price_base_year,
         )
 
         return jl_input
+
+    def _outage_factors(self, jl, sys, gen_order, bat_order):
+        """The system's ``outage_schedule`` windows of its generators (per
+        node) and batteries (whole unit) as Julia ``gen_outage_factors`` and
+        ``bat_outage_factors``: an availability factor per master step over
+        the planned years, from horizon hour ``profile_start_hour``
+        (:func:`unit_outage_factors`, the dispatch's
+        :func:`compile_outage_factor`)."""
+        res = max(1, int(self.temporal_resolution_hours))
+        steps = len(self.years) * (HOURS_STD_YEAR // res)
+        sched = getattr(sys, "outage_schedule", None) or []
+        put = jl.seval("(d, u, n, v) -> (d[(Int(u), Int(n))] = Vector{Float64}(v); nothing)")
+        out = []
+        for kind, order, by_node in (("generator", gen_order, True),
+                                     ("battery", bat_order, False)):
+            d = jl.seval("Dict{Tuple{Int,Int}, Vector{Float64}}()")
+            factors = unit_outage_factors(sched, kind, [k for k, _ in order],
+                                          self._profile_start_hour, steps, res, by_node)
+            for (u, n), f in factors.items():
+                put(d, u, n, py_to_julia_vector(f))
+            if factors:
+                logger.debug("Master: scheduled outages on %d %s(s)", len({u for u, _ in factors}), kind)
+            out.append(d)
+        return out[0], out[1]
+
+    def _dispatch_commits_units(self) -> bool:
+        """Whether the dispatch of this development run commits units
+        (``master_problem.use_uc_in_dispatch``): the master then models
+        start-ups."""
+        cfg = self.esfex_config
+        mp = getattr(cfg, 'master_problem', None) if cfg is not None else None
+        return bool(getattr(mp, 'use_uc_in_dispatch', False))
 
     def build_model(self, use_representative_days: bool = True):
         """
@@ -2651,12 +3525,53 @@ class MasterProblemAdapter:
 
         logger.debug("Building Julia MasterProblem model...")
 
-        self._jl_input = self._create_input()
+        self._use_rep_days = use_representative_days
+        self._jl_input = self._with_npv_retirements(self._create_input())
+
+        # Resolve declarative user constraints targeting the investment model
+        # (technology names → 1-based tech indices, year values → year indices).
+        jl = get_julia()
+        tech_idx = {k: i for i, k in
+                    enumerate(self.system_config.technologies.keys(), 1)}
+        year_idx = {y: i for i, y in enumerate(self.years, 1)}
+        inv_specs = resolve_investment_constraints(
+            getattr(self.system_config, "custom_constraints", None),
+            tech_idx, year_idx,
+        )
+
+        if self.solver_method == "benders":
+            # The Benders master has neither TSAM periods, user constraints
+            # nor the year's operating cost (for budget_scope: total): solve
+            # the monolithic master instead of dropping them
+            unsupported = []
+            if self.use_tsam:
+                unsupported.append("TSAM periods (use_tsam)")
+            if inv_specs:
+                unsupported.append("user investment constraints (custom_constraints)")
+            if self.budget_scope == "total":
+                unsupported.append("an investment-and-operation budget (budget_scope: total)")
+            if unsupported:
+                logger.warning(
+                    "Benders decomposition does not support "
+                    f"{' or '.join(unsupported)}; solving the monolithic master "
+                    "problem instead."
+                )
+                self.solver_method = "monolithic"
 
         if self.solver_method == "benders":
             # Benders builds its own investment master and per-day subproblems
             # internally during solve(); here we only need the input ready.
             self._benders_use_rep_days = use_representative_days
+            if self.critical_day_offsets:
+                logger.info(
+                    "Benders decomposition models the representative days only, "
+                    "not the critical days; solver_method: monolithic models both.")
+            if self.use_stochastic and self.stochastic_scenarios:
+                logger.warning(
+                    "Stochastic scenarios are not supported with Benders "
+                    "decomposition; the master is solved deterministically. "
+                    "Use solver_method: monolithic for the stochastic master."
+                )
             logger.debug(
                 "MasterProblem will be solved by Benders decomposition "
                 f"(max_iter={self.benders_max_iterations}, "
@@ -2671,25 +3586,17 @@ class MasterProblemAdapter:
                 jl_scenarios,
                 True,
             )
+            custom = _custom_constraints_to_julia(inv_specs, jl) if inv_specs else None
             (self._jl_model, self._jl_vars,
              self._jl_targets, self._jl_scenarios) = (
-                ESFEX.create_stochastic_master_problem(jl_stochastic_input)
+                ESFEX.create_stochastic_master_problem(
+                    jl_stochastic_input, custom_constraints=custom)
             )
             logger.debug(
                 f"Stochastic MasterProblem built with "
                 f"{len(self.stochastic_scenarios)} scenarios"
             )
         else:
-            # Resolve declarative user constraints targeting the investment model
-            # (technology names → 1-based tech indices, year values → year indices).
-            jl = get_julia()
-            tech_idx = {k: i for i, k in
-                        enumerate(self.system_config.technologies.keys(), 1)}
-            year_idx = {y: i for i, y in enumerate(self.years, 1)}
-            inv_specs = resolve_investment_constraints(
-                getattr(self.system_config, "custom_constraints", None),
-                tech_idx, year_idx,
-            )
             if inv_specs:
                 self._jl_model, self._jl_vars, self._jl_targets = (
                     ESFEX.create_master_problem(
@@ -2707,6 +3614,100 @@ class MasterProblemAdapter:
                 )
 
         logger.debug("MasterProblem model built successfully")
+
+    # ── Fuel block of the master (#89) ──────────────────────────────────────
+
+    def _create_fuel_input(self, jl, ESFEX, sys, gen_order, tech_order, num_nodes,
+                           b2n_arg, bus_to_node_0idx):
+        """Julia ``MasterFuelInput`` from the ``primary_energy`` keyword
+        (``Orchestrator._master_fuel_kwargs``), or ``nothing`` without it.
+
+        The fuel data go through ``PrimaryEnergyAdapter`` exactly as for a
+        dispatch window. Its generator list is the master's generators and
+        then its candidate technologies, so technology ``tc`` is fuel-map key
+        ``len(generators) + tc`` (as the dispatch's virtual generators).
+        The window spans the horizon, so scheduled fuel-source outages are
+        placed by their absolute hours."""
+        self._fuel_elz_keys = []
+        self._fuel_bus_to_node = None
+        pe_kw = self.kwargs.get('primary_energy')
+        if not pe_kw:
+            return jl.seval("nothing")
+        pe_kw = dict(pe_kw)
+        base_year = int(pe_kw.pop('base_year', self.base_year))
+        last_year = int(pe_kw.pop('last_year', self.years[-1]))
+        res_h = max(1, int(self.temporal_resolution_hours))
+        gen_list = []
+        for key, unit in list(gen_order) + list(tech_order):
+            d = unit.model_dump() if hasattr(unit, 'model_dump') else dict(unit.__dict__)
+            d['name'] = key
+            gen_list.append(d)
+        pe = PrimaryEnergyAdapter(
+            year=base_year, base_year=base_year,
+            hours=(last_year - base_year + 1) * HOURS_STD_YEAR // res_h,
+            num_nodes=num_nodes, generators=gen_list,
+            primary_energy_resolution=max(1, 24 // res_h),
+            mode="master", step_hours=res_h, year_hour_offset=0,
+            **pe_kw)
+        jl_pe = pe._create_julia_input()
+
+        # Electrolyzers per bus, mapped like the dispatch's (capacity at the
+        # node's first bus, properties copied to its buses)
+        def _elz(values, mode="property"):
+            values = [float(v) for v in values]
+            if b2n_arg is None:
+                return values
+            return expand_node_to_bus_array(values, b2n_arg, mode=mode)
+
+        jl_elz = jl.seval("ElectrolyzerConfig[]")
+        for key, e in (getattr(sys, 'electrolyzers', None) or {}).items():
+            jl.seval("push!")(jl_elz, ESFEX.ElectrolyzerConfig(
+                py_to_julia_vector(_elz(e.rated_power, "capacity")),
+                py_to_julia_vector(_elz(e.eff_at_rated)),
+                py_to_julia_vector(_elz(e.eff_at_min)),
+                float(e.energy_per_kg_h2),
+                py_to_julia_vector(_elz(e.ramp_up)),
+                py_to_julia_vector(_elz(e.ramp_down)),
+                py_to_julia_vector(_elz(scale_cost_list(e.invest_cost))),
+                py_to_julia_vector(_elz(e.invest_max_power, "capacity")),
+                py_to_julia_vector(_elz(scale_cost_list(e.fixed_cost))),
+                py_to_julia_vector(_elz(scale_cost_list(e.variable_cost))),
+                scale_cost(float(e.water_cost)),
+                py_to_julia_vector(_elz(e.life_time)),
+            ))
+            self._fuel_elz_keys.append(key)
+        self._fuel_bus_to_node = bus_to_node_0idx if b2n_arg is not None else None
+        self._fuel_num_nodes = num_nodes
+        return ESFEX.MasterFuelInput(jl_pe, jl_elz)
+
+    def fuel_capacities_by_year(self, result: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+        """Fuel capacity the master built and that is in service in each
+        year, for the dispatch: {year index (1-based): {"storage": {fuel:
+        {node: capacity}}, "transport": {fuel: {route: capacity}},
+        "electrolyzer": {key: [MW per node]}}}, 0-based nodes and routes."""
+        fi = (result or {}).get('fuel_investment') or {}
+        out: Dict[int, Dict[str, Any]] = {}
+        for kind, src in (("storage", "storage_capacity"), ("transport", "transport_capacity")):
+            for y_idx, by_fuel in (fi.get(src) or {}).items():
+                tgt = out.setdefault(int(y_idx), {}).setdefault(kind, {})
+                for fuel, arr in by_fuel.items():
+                    vals = {i: float(v) for i, v in enumerate(arr) if v > 1e-9}
+                    if vals:
+                        tgt[str(fuel)] = vals
+        b2n = getattr(self, '_fuel_bus_to_node', None)
+        keys = getattr(self, '_fuel_elz_keys', [])
+        n_nodes = getattr(self, '_fuel_num_nodes', 0)
+        for y_idx, by_elz in (fi.get('electrolyzer_capacity') or {}).items():
+            tgt = out.setdefault(int(y_idx), {}).setdefault('electrolyzer', {})
+            for e, per_bus in by_elz.items():
+                if not 1 <= int(e) <= len(keys) or not any(v > 1e-9 for v in per_bus):
+                    continue
+                per_node = [0.0] * max(n_nodes, len(per_bus) if b2n is None else 0)
+                for b, v in enumerate(per_bus):
+                    n = b if b2n is None else b2n[b]
+                    per_node[n] += float(v)
+                tgt[keys[int(e) - 1]] = per_node
+        return out
 
     def _build_julia_scenarios(self):
         """Convert Python scenario dicts to Julia Vector{Scenario}."""
@@ -2731,6 +3732,11 @@ class MasterProblemAdapter:
         """
         jl = get_julia()
 
+        if self.solver_method == "benders":
+            # Benders builds its master and subproblems inside solve(); there is
+            # no single model to export.
+            logger.debug("Benders decomposition: no master LP to export")
+            return
         if self._jl_model is None:
             raise RuntimeError("Model not built. Call build_model() first.")
 
@@ -2742,14 +3748,206 @@ class MasterProblemAdapter:
 
         logger.debug(f"MasterProblem LP exported to: {filepath}")
 
+    # ── NPV-based retirement (system setting npv_retirement) ────────────────
+
+    def _unit_index(self, kind: str, key: str) -> Optional[int]:
+        """1-based Julia index of generator or battery *key*."""
+        units = (self.system_config.generators if kind == "generator"
+                 else self.system_config.batteries)
+        keys = list(units.keys())
+        return keys.index(key) + 1 if key in keys else None
+
+    def _jl_units(self, units: List[tuple]) -> Any:
+        """Julia ``Vector{UnitNPV}`` of ``(kind, key, bus)`` units."""
+        jl = get_julia()
+        ESFEX = get_esfex_module()
+        vec = jl.seval("ESFEX.UnitNPV[]")
+        name = str(getattr(self.system_config, 'name', 'primary'))
+        for kind, key, bus in units:
+            idx = self._unit_index(kind, key)
+            if idx is not None:
+                jl.seval("push!")(vec, ESFEX.UnitNPV(kind, idx, int(bus), name, 0.0, 0.0, True))
+        return vec
+
+    def _with_npv_retirements(self, jl_input: Any) -> Any:
+        """*jl_input* with the units retired by the NPV iteration: the ones an
+        earlier myopic year retired (no decommissioning again) and the ones
+        this master retired so far (decommissioned in its first year)."""
+        if not (self._retired_carried or self.npv_retirements):
+            return jl_input
+        ESFEX = get_esfex_module()
+        if self._retired_carried:
+            jl_input = ESFEX.retire_units(
+                jl_input, self._jl_units(self._retired_carried), decommission=False)
+        if self.npv_retirements:
+            jl_input = ESFEX.retire_units(jl_input, self._jl_units(
+                [(r["kind"], r["key"], r["bus"]) for r in self.npv_retirements]))
+        return jl_input
+
+    def _npv_result(self) -> Any:
+        """The solved plan (Julia ``MasterProblemResult``) with the units'
+        operation, for their NPV."""
+        if self.solver_method == "benders":
+            return self._benders_solution
+        return get_esfex_module().extract_master_solution(
+            self._jl_model, self._jl_vars, self._jl_input, unit_operation=True)
+
+    def _unit_npvs(self, result: Any) -> List[Dict[str, Any]]:
+        """NPV ($) of each existing unit in the solved plan *result*
+        (Julia ``unit_npvs``), as dicts with kind, key, name, bus (1-based,
+        the master's location), node (0-based), npv and retire (below the
+        threshold)."""
+        jl = get_julia()
+        ESFEX = get_esfex_module()
+        npvs = ESFEX.unit_npvs(result, self._jl_input,
+                               npv_threshold=scale_cost(self.npv_threshold),
+                               extra_years=self.npv_extra_years)
+        node_of = jl.seval("(inp, b) -> inp.network.bus_to_node[b]")
+        out = []
+        for u in npvs:
+            kind = str(u.unit_type)
+            units = (self.system_config.generators if kind == "generator"
+                     else self.system_config.batteries)
+            key = list(units.keys())[int(u.unit_idx) - 1]
+            if self._npv_unit_keys is not None and key not in self._npv_unit_keys:
+                continue
+            bus = int(u.node)
+            out.append({
+                "kind": kind, "key": key,
+                "name": str(getattr(units[key], 'name', key)),
+                "bus": bus, "node": int(node_of(self._jl_input, bus)) - 1,
+                "npv": float(u.npv) * COST_UNSCALE,
+                "retire": bool(u.recommend_retirement),
+            })
+        return out
+
+    # The solved model the NPV iteration falls back on when a re-solve fails
+    _SOLVED_STATE = ("_jl_model", "_jl_vars", "_jl_input", "_jl_targets", "_jl_scenarios",
+                     "_benders_result", "_benders_solution", "solver_method",
+                     "_benders_use_rep_days")
+
+    def _solve_npv_retirement(self, status: int) -> int:
+        """NPV-based retirement around the solve: while the plan is optimal,
+        retire the existing units whose NPV is below the threshold for the
+        whole horizon, rebuild and re-solve; stop when no new unit is below
+        it or after ``npv_retirement_max_iterations`` rounds. Each retired
+        unit is added to ``npv_retirements`` with its NPV and round.
+
+        A re-solve that is not optimal (or fails), that curtails more
+        above the annual curtailment limit than the plan before (retiring
+        the store that held the limit: under the hard limit of earlier
+        versions such a re-solve was infeasible), or whose total cost is
+        above the plan before's (relative 1e-6: retiring the units saved
+        less than it cost elsewhere; Julia ``npv_round_reference_cost``)
+        undoes its round: the last optimal model and its retirements are
+        kept, a warning names the units of the undone round and the reason,
+        and the iteration stops (the run goes on with that plan). Returns
+        the status of the plan kept."""
+        ESFEX = get_esfex_module()
+        rounds = 0
+        while status == 1:
+            result = self._npv_result()
+            npvs = self._unit_npvs(result)
+            for u in npvs:
+                logger.debug(f"  NPV {u['kind']} {u['name']} (node {u['node']}, "
+                             f"bus {u['bus']}): ${u['npv']:,.0f}")
+            flagged = [u for u in npvs if u["retire"]]
+            if not flagged:
+                logger.info(
+                    f"NPV retirement: no existing unit below the threshold "
+                    f"(${self.npv_threshold:,.0f}) after {rounds} round(s)")
+                break
+            if rounds >= self.npv_max_iterations:
+                logger.warning(
+                    f"NPV retirement: {len(flagged)} unit(s) still below the "
+                    f"threshold after {rounds} round(s) "
+                    f"(npv_retirement_max_iterations); keeping them")
+                break
+            rounds += 1
+            logger.info(
+                f"NPV retirement, round {rounds}: retiring {len(flagged)} unit(s): "
+                + ", ".join(f"{u['name']} at node {u['node']} (NPV ${u['npv']:,.0f})"
+                            for u in flagged))
+            kept = {a: getattr(self, a) for a in self._SOLVED_STATE}
+            excess_before = self._curtailment_excess_mwh()
+            # The plan before's total cost, past the horizon of a myopic
+            # year's master the units' later years as their NPV counts them
+            cost_before = float(ESFEX.npv_round_reference_cost(
+                result, self._jl_input,
+                self._jl_units([(u["kind"], u["key"], u["bus"]) for u in flagged]),
+                extra_years=self.npv_extra_years))
+            n_before = len(self.npv_retirements)
+            for u in flagged:
+                u = dict(u, iteration=rounds)
+                u.pop("retire")
+                self.npv_retirements.append(u)
+            try:
+                self.build_model(use_representative_days=self._use_rep_days)
+                status = self._solve_once()
+            except Exception as e:  # noqa: BLE001 — a failed re-solve is undone
+                status, self._last_status = 0, f"error: {e}"
+            why = f"is not optimal ({self._last_status})"
+            if status == 1:
+                excess = self._curtailment_excess_mwh()
+                if excess > excess_before * (1 + 1e-6) + 1e-3:
+                    status = 0
+                    why = (f"curtails {excess / 1e3:,.4g} GWh/yr above the annual "
+                           f"curtailment limit (the plan before: {excess_before / 1e3:,.4g})")
+                else:
+                    cost = self._plan_cost()
+                    if bool(ESFEX.cost_grew(cost_before, cost)):
+                        status = 0
+                        why = (f"raises the plan's total cost to "
+                               f"${cost * COST_UNSCALE:,.0f} (the plan before: "
+                               f"${cost_before * COST_UNSCALE:,.0f})")
+            if status != 1:
+                undone = self.npv_retirements[n_before:]
+                del self.npv_retirements[n_before:]
+                for a, v in kept.items():
+                    setattr(self, a, v)
+                logger.warning(
+                    f"NPV retirement, round {rounds}: the master re-solve after retiring "
+                    + ", ".join(f"{u['name']} at node {u['node']}" for u in undone)
+                    + f" {why}; keeping these units and the last optimal plan")
+                return 1
+        return status
+
+    def _plan_cost(self) -> float:
+        """Objective (M$) of the solved master: the plan's total cost."""
+        if self.solver_method == "benders":
+            return float(self._benders_solution.objective)
+        return float(get_julia().seval("objective_value")(self._jl_model))
+
+    def _curtailment_excess_mwh(self) -> float:
+        """MWh/yr the solved master curtails above its annual curtailment
+        limits (Julia ``curtailment_excess_mwh``); 0 without a model or
+        under Benders (its limit is hard)."""
+        if self._jl_model is None:
+            return 0.0
+        try:
+            return float(get_esfex_module().curtailment_excess_mwh(self._jl_model))
+        except Exception:  # noqa: BLE001 — a Benders result, or no values
+            return 0.0
+
     def solve(self) -> int:
         """
-        Solve the master problem.
+        Solve the master problem; with the system's ``npv_retirement`` on,
+        retire the existing units whose NPV is below the threshold and
+        re-solve (:meth:`_solve_npv_retirement`).
 
         Returns:
             PuLP-compatible status code (1 = optimal)
         """
+        status = self._solve_once()
+        if self.npv_retirement:
+            status = self._solve_npv_retirement(status)
+        return status
+
+    def _solve_once(self) -> int:
+        """Solve the built master problem once."""
         jl = get_julia()
+        # Bounds of this solve's line-loss repair (none under Benders)
+        self.loss_repair = None
 
         if self.solver_method == "benders":
             return self._solve_benders()
@@ -2763,45 +3961,96 @@ class MasterProblemAdapter:
         jl._mp_model = self._jl_model
 
         jl.seval("using JuMP")
-        # Set solver verbose from config
-        verbose_flag = "true" if self._solver.verbose else "false"
-        jl.seval(f'set_optimizer_attribute(_mp_model, "output_flag", {verbose_flag})')
-        logger.debug(f"Solver output_flag={self._solver.verbose}, calling optimize!...")
-        jl.seval("optimize!(_mp_model)")
+        # Solver output from config, through MOI.Silent: every solver has it,
+        # while a raw parameter name ("output_flag") is HiGHS's own and GLPK
+        # rejects it
+        jl.seval("unset_silent(_mp_model)" if self._solver.verbose
+                 else "set_silent(_mp_model)")
+        logger.debug(f"Solver verbose={self._solver.verbose}, calling optimize!...")
+        # NUMERICAL_ERROR: one more solve with the solver's retry parameters
+        jl.seval("ESFEX.optimize_master!(_mp_model)")
+        self.loss_repair = loss_repair_bounds(self._jl_model)
+        log_loss_repair_bounds("Master problem", self.loss_repair)
 
         status = jl.seval("termination_status(_mp_model)")
         status_str = str(status)
+        self._last_status = status_str
 
         primal_status = str(jl.seval("primal_status(_mp_model)"))
         logger.info(f"MasterProblem termination: {status_str}, primal: {primal_status}")
 
-        if "OPTIMAL" in status_str:
-            obj_val = float(jl.seval("objective_value(_mp_model)")) * COST_UNSCALE
-            logger.info(f"MasterProblem objective value: {obj_val:,.2f}")
-            ESFEX = get_esfex_module()
-            jl_result = None
-            # Log detailed solution summary (costs in M$ internally)
-            try:
-                jl_result = ESFEX.extract_master_solution(
-                    self._jl_model, self._jl_vars, self._jl_input)
-                ESFEX.log_solution_summary(jl_result, self._jl_input)
-            except Exception as e:
-                logger.warning(f"log_solution_summary skipped: {e}")
-            return 1
-        elif "INFEASIBLE" in status_str:
+        if "INFEASIBLE" in status_str:
             logger.error("MasterProblem INFEASIBLE — check constraints")
             return -1
         elif "UNBOUNDED" in status_str:
             return -2
+        # A plan the solver holds when it stopped at a limit (time,
+        # iterations…) is feasible: use it, as the dispatch does
+        accepted = "OPTIMAL" in status_str or _accept_limit_incumbent(
+            jl, "_mp_model", status_str, primal_status, "The master problem solver",
+            "raise solver.time_limit (or loosen solver.gap) to close the gap.")
+        if accepted:
+            obj_val = float(jl.seval("objective_value(_mp_model)")) * COST_UNSCALE
+            logger.info(f"MasterProblem objective value: {obj_val:,.2f}")
+            ESFEX = get_esfex_module()
+            jl_result = None
+            # Detailed solution summary (costs in M$ internally): hundreds of
+            # lines per solve, so at debug level (the run log, or -v)
+            try:
+                jl_result = ESFEX.extract_master_solution(
+                    self._jl_model, self._jl_vars, self._jl_input)
+                logger.debug(str(ESFEX.log_solution_summary(jl_result, self._jl_input)))
+            except Exception as e:
+                logger.warning(f"log_solution_summary skipped: {e}")
+            return 1
+        if _is_limit_status(status_str):
+            logger.error(
+                f"MasterProblem solver stopped at {status_str} without a feasible "
+                f"plan (primal={primal_status}). Raise solver.time_limit; for a "
+                "large LP master, barrier without crossover (Gurobi method: "
+                "barrier, crossover: off) is usually much faster than the "
+                "default method.")
         else:
-            # Strict: do not accept "feasible point" results from non-optimal
-            # terminations. The solver must prove optimality. Anything else is
-            # a real bug in the formulation that needs to be surfaced.
             logger.error(
                 f"MasterProblem solver failed: status={status_str}, "
                 f"primal={primal_status}"
             )
-            return 0
+        return 0
+
+    def conflict(self, limit: int = 20) -> list[str]:
+        """Constraints and bounds of an infeasible master that cannot hold
+        together (the solver's irreducible infeasible subsystem), at most
+        *limit* of them; empty when the solver cannot compute one (HiGHS
+        and Gurobi can), under Benders, or when no model was solved."""
+        if self._jl_model is None or self.solver_method == "benders":
+            return []
+        try:
+            return [str(c) for c in get_esfex_module().master_conflict(
+                self._jl_model, limit=limit)]
+        except Exception as e:  # diagnosis only: never mask the failure
+            logger.debug(f"No conflict for the master: {e}")
+            return []
+
+    def diagnostics(self, top_n: int = 20) -> Optional[Dict[str, dict]]:
+        """Binding constraint families, top duals and paid slacks of the
+        solved master (Julia ``master_diagnostics``), as
+        :func:`esfex.io.master_diagnostics.from_julia` groups keyed by
+        ``year_{YYYY}`` (``all``: rows without a year in a master of several
+        years). ``None`` under Benders, without a solved model, or when the
+        extraction fails (it never fails the run)."""
+        if self._jl_model is None or self.solver_method == "benders":
+            return None
+        from esfex.io.master_diagnostics import from_julia
+        try:
+            ESFEX = get_esfex_module()
+            if not bool(ESFEX.JuMP.has_values(self._jl_model)):
+                return None
+            diag = ESFEX.master_diagnostics(
+                self._jl_model, self._jl_vars, self._jl_input, top_n=top_n)
+            return from_julia(diag, self.years)
+        except Exception as e:  # diagnosis only: never fail the run
+            logger.warning(f"Master diagnostics skipped: {e}")
+            return None
 
     def _solve_benders(self) -> int:
         """Solve the master problem by Benders decomposition.
@@ -2825,10 +4074,13 @@ class MasterProblemAdapter:
             tolerance=self.benders_tolerance,
             use_representative_days=self._benders_use_rep_days,
             verbose_benders=self._solver.verbose,
+            record_unit_operation=self.npv_retirement,
+            debug_lp_dir=str(self.debug_lp_dir or ""),
         )
         self._benders_solution = self._benders_result.solution
 
         status_str = str(self._benders_solution.status)
+        self._last_status = status_str
         gap = float(self._benders_result.gap)
         iters = int(self._benders_result.iterations)
         obj = float(self._benders_result.objective) * COST_UNSCALE
@@ -2887,6 +4139,8 @@ class MasterProblemAdapter:
                 'bat_tech_power_investment': {'bat_tech_investment_power_bt_n': value, ...},
                 'bat_tech_capacity_investment': {'bat_tech_investment_capacity_bt_n': value, ...},
                 'transfer_investment': {'transfer_investment_i_j': value, ...},
+                'converter_investment': {'converter_investment_acdc_c': MW, ...},
+                'reservoir_investment': {'reservoir_investment_g_n': MWh, ...},
                 're_penetration_ratio': float,
             },
             ...
@@ -2896,6 +4150,7 @@ class MasterProblemAdapter:
         """
         num_years = len(self.years)
         num_nodes = self.system_config.num_nodes
+        to_buses, bus_of = self._original_bus_layout()
 
         # Build legacy-compatible solution structure keyed by actual year
         solution = {}
@@ -2908,13 +4163,15 @@ class MasterProblemAdapter:
                 'bat_tech_power_investment': {},
                 'bat_tech_capacity_investment': {},
                 'transfer_investment': {},
+                'converter_investment': {},
+                'reservoir_investment': {},
                 're_penetration_ratio': 0.0,
             }
 
             # Technology investments: Julia 1-indexed → Python 0-indexed keys
             for t_jl in jl_result.tech_investment[y_idx].keys():
                 t_py = int(t_jl) - 1  # Convert to 0-indexed
-                node_values = np.array(jl_result.tech_investment[y_idx][t_jl])
+                node_values = to_buses(jl_result.tech_investment[y_idx][t_jl])
                 for n in range(len(node_values)):
                     value = float(node_values[n])
                     if value > 1e-6:
@@ -2924,7 +4181,7 @@ class MasterProblemAdapter:
             # Battery technology power investments
             for bt_jl in jl_result.bat_tech_power_investment[y_idx].keys():
                 bt_py = int(bt_jl) - 1  # Convert to 0-indexed
-                node_values = np.array(jl_result.bat_tech_power_investment[y_idx][bt_jl])
+                node_values = to_buses(jl_result.bat_tech_power_investment[y_idx][bt_jl])
                 for n in range(len(node_values)):
                     value = float(node_values[n])
                     if value > 1e-6:
@@ -2934,7 +4191,7 @@ class MasterProblemAdapter:
             # Battery technology capacity investments
             for bt_jl in jl_result.bat_tech_capacity_investment[y_idx].keys():
                 bt_py = int(bt_jl) - 1  # Convert to 0-indexed
-                node_values = np.array(jl_result.bat_tech_capacity_investment[y_idx][bt_jl])
+                node_values = to_buses(jl_result.bat_tech_capacity_investment[y_idx][bt_jl])
                 for n in range(len(node_values)):
                     value = float(node_values[n])
                     if value > 1e-6:
@@ -2943,12 +4200,29 @@ class MasterProblemAdapter:
 
             # Transmission investments: Julia 1-indexed → Python 0-indexed keys
             for key, val in jl_result.transfer_investment[y_idx].items():
-                i_py = int(key[0]) - 1  # Convert to 0-indexed
-                j_py = int(key[1]) - 1
+                i_py = bus_of(int(key[0]) - 1)  # Convert to 0-indexed
+                j_py = bus_of(int(key[1]) - 1)
                 value = float(val)
                 if value > 1e-6:
                     trans_key = f"transfer_investment_{i_py}_{j_py}"
                     solution[year]['transfer_investment'][trans_key] = value
+
+            # Converter investments: ("acdc" | "freq", 1-indexed) → 0-indexed keys
+            for key, val in jl_result.converter_investment[y_idx].items():
+                value = float(val)
+                if value > 1e-6:
+                    conv_key = f"converter_investment_{key[0]}_{int(key[1]) - 1}"
+                    solution[year]['converter_investment'][conv_key] = value
+
+            # Reservoir capacity built (MWh) per generator and location
+            res_inv = getattr(jl_result, 'reservoir_investment', None)
+            if res_inv is not None:
+                for g_jl in res_inv[y_idx].keys():
+                    loc_values = to_buses(res_inv[y_idx][g_jl])
+                    for n, value in enumerate(loc_values):
+                        if float(value) > 1e-6:
+                            key = f"reservoir_investment_{int(g_jl) - 1}_{n}"
+                            solution[year]['reservoir_investment'][key] = float(value)
 
             # RE penetration ratio
             re_by_year = np.array(jl_result.re_penetration_by_year)
@@ -2982,66 +4256,88 @@ class MasterProblemAdapter:
             cumulative_bat_tech_capacity[y_idx] = {}
 
             for t_jl in jl_result.tech_investment[y_idx].keys():
-                tech_investment[y_idx][int(t_jl)] = np.array(
+                tech_investment[y_idx][int(t_jl)] = to_buses(
                     jl_result.tech_investment[y_idx][t_jl]
                 )
 
             for bt_jl in jl_result.bat_tech_power_investment[y_idx].keys():
-                bat_tech_power_investment[y_idx][int(bt_jl)] = np.array(
+                bat_tech_power_investment[y_idx][int(bt_jl)] = to_buses(
                     jl_result.bat_tech_power_investment[y_idx][bt_jl]
                 )
-                bat_tech_capacity_investment[y_idx][int(bt_jl)] = np.array(
+                bat_tech_capacity_investment[y_idx][int(bt_jl)] = to_buses(
                     jl_result.bat_tech_capacity_investment[y_idx][bt_jl]
                 )
 
             for g_jl in jl_result.gen_life_extension[y_idx].keys():
-                gen_life_extension[y_idx][int(g_jl)] = np.array(
-                    jl_result.gen_life_extension[y_idx][g_jl]
+                gen_life_extension[y_idx][int(g_jl)] = to_buses(
+                    jl_result.gen_life_extension[y_idx][g_jl], flags=True
                 )
 
             for b_jl in jl_result.bat_life_extension[y_idx].keys():
-                bat_life_extension[y_idx][int(b_jl)] = np.array(
-                    jl_result.bat_life_extension[y_idx][b_jl]
+                bat_life_extension[y_idx][int(b_jl)] = to_buses(
+                    jl_result.bat_life_extension[y_idx][b_jl], flags=True
                 )
 
             for g_jl in jl_result.cumulative_gen_capacity[y_idx].keys():
-                cumulative_gen_capacity[y_idx][int(g_jl)] = np.array(
+                cumulative_gen_capacity[y_idx][int(g_jl)] = to_buses(
                     jl_result.cumulative_gen_capacity[y_idx][g_jl]
                 )
 
             for b_jl in jl_result.cumulative_bat_capacity[y_idx].keys():
-                cumulative_bat_capacity[y_idx][int(b_jl)] = np.array(
+                cumulative_bat_capacity[y_idx][int(b_jl)] = to_buses(
                     jl_result.cumulative_bat_capacity[y_idx][b_jl]
                 )
 
             for b_jl in jl_result.cumulative_bat_power[y_idx].keys():
-                cumulative_bat_power[y_idx][int(b_jl)] = np.array(
+                cumulative_bat_power[y_idx][int(b_jl)] = to_buses(
                     jl_result.cumulative_bat_power[y_idx][b_jl]
                 )
 
             for t_jl in jl_result.cumulative_tech_capacity[y_idx].keys():
-                cumulative_tech_capacity[y_idx][int(t_jl)] = np.array(
+                cumulative_tech_capacity[y_idx][int(t_jl)] = to_buses(
                     jl_result.cumulative_tech_capacity[y_idx][t_jl]
                 )
 
             for bt_jl in jl_result.cumulative_bat_tech_power[y_idx].keys():
-                cumulative_bat_tech_power[y_idx][int(bt_jl)] = np.array(
+                cumulative_bat_tech_power[y_idx][int(bt_jl)] = to_buses(
                     jl_result.cumulative_bat_tech_power[y_idx][bt_jl]
                 )
 
             for bt_jl in jl_result.cumulative_bat_tech_capacity[y_idx].keys():
-                cumulative_bat_tech_capacity[y_idx][int(bt_jl)] = np.array(
+                cumulative_bat_tech_capacity[y_idx][int(bt_jl)] = to_buses(
                     jl_result.cumulative_bat_tech_capacity[y_idx][bt_jl]
                 )
+
+        # Fuel storage, routes and electrolyzers (#89): {kind: {year index:
+        # {fuel or electrolyzer index: values per node/route/bus}}}, 1-based
+        fuel_investment = {}
+        jl_fi = getattr(jl_result, 'fuel_investment', None)
+        if jl_fi is not None:
+            for kind in jl_fi.keys():
+                fuel_investment[str(kind)] = {
+                    int(y): {(k if isinstance(k, (int, str)) else str(k)):
+                             np.asarray(v, dtype=float)
+                             for k, v in by.items()}
+                    for y, by in jl_fi[kind].items()}
 
         return {
             # Legacy-compatible solution keyed by year
             'solution': solution,
+            'fuel_investment': fuel_investment,
             # Metadata (unscale M$ → $)
             'status': str(jl_result.status),
             'objective': float(jl_result.objective) * COST_UNSCALE,
             'solve_time': float(jl_result.solve_time),
+            # Overnight cost of each year's builds (what the budget limits)
             'total_investment_by_year': np.array(jl_result.total_investment_by_year) * COST_UNSCALE,
+            # Investment annuities paid each year (what the objective charges)
+            'annuity_cost_by_year': np.array(getattr(jl_result, 'annuity_cost_by_year', []),
+                                             dtype=float) * COST_UNSCALE,
+            # The annuity streams behind them: (build year index 1-based,
+            # life in years, annuity $ per year)
+            'annuity_streams': [
+                (int(y), float(life), float(a) * COST_UNSCALE)
+                for (y, life, a) in getattr(jl_result, 'annuity_streams', [])],
             'total_operational_by_year': np.array(jl_result.total_operational_cost_by_year) * COST_UNSCALE,
             're_penetration_by_year': np.array(jl_result.re_penetration_by_year),
             're_penetration_by_system': {
@@ -3060,6 +4356,45 @@ class MasterProblemAdapter:
             'cumulative_bat_tech_power': cumulative_bat_tech_power,
             'cumulative_bat_tech_capacity': cumulative_bat_tech_capacity,
         }
+
+    def _original_bus_layout(self):
+        """``(to_buses, bus_of)``: lay master results out on the system's own
+        buses.
+
+        With ``network_reduction`` the master solves on the reduced network,
+        whose bus ``k`` is original bus ``retained_original_indices[k]``; the
+        runner, the myopic history and the dispatch index master results by
+        the original buses. ``to_buses(values, flags=False)`` returns a
+        per-bus array on the original buses: eliminated buses hold no
+        capacity (0), and a per-unit status flag (``flags``, e.g. life
+        extension) takes the value of a retained bus of the same node.
+        ``bus_of(k)`` maps a reduced bus index. Both are identities without
+        reduction.
+        """
+        rm = getattr(self, "_reduction_map", None)
+        if rm is None or not rm.n_original_buses or not rm.n_reduced_buses:
+            return (lambda values, flags=False: np.array(values, dtype=float)), (lambda k: k)
+        retained = list(rm.retained_original_indices)
+        parent = [b.parent_node for b in (self.system_config.buses or [])]
+
+        def to_buses(values, flags=False):
+            arr = np.array(values, dtype=float)
+            if arr.ndim != 1 or len(arr) != len(retained):
+                return arr
+            out = np.zeros(rm.n_original_buses)
+            if flags:
+                node_value = {}
+                for r, o in enumerate(retained):
+                    node_value.setdefault(parent[o], arr[r])
+                out[:] = [node_value.get(parent[o], 1.0) if o < len(parent) else 1.0
+                          for o in range(rm.n_original_buses)]
+            out[retained] = arr
+            return out
+
+        def bus_of(k):
+            return retained[k] if 0 <= k < len(retained) else k
+
+        return to_buses, bus_of
 
     def get_investment_decisions(self) -> Dict[str, Any]:
         """
@@ -3130,6 +4465,8 @@ class MasterProblemAdapter:
         year_investments.update(year_data.get('bat_tech_power_investment', {}))
         year_investments.update(year_data.get('bat_tech_capacity_investment', {}))
         year_investments.update(year_data.get('transfer_investment', {}))
+        year_investments.update(year_data.get('converter_investment', {}))
+        year_investments.update(year_data.get('reservoir_investment', {}))
 
         return year_investments
 
@@ -3287,7 +4624,8 @@ class MGAAdapter:
         # selected. ``_create_input`` builds the Pydantic-to-Julia
         # marshalled input without constructing the optimisation model —
         # both ``run_mga_spores`` and ``run_spores`` do that internally.
-        jl_input = self.master._create_input()
+        # Units the NPV-based retirement retired stay out.
+        jl_input = self.master._with_npv_retirements(self.master._create_input())
 
         if self._method == "spores":
             self._jl_result = self._run_spores(jl_input, use_representative_days)
@@ -3640,10 +4978,11 @@ class PrimaryEnergyAdapter:
         mode: str = "development",
         cumulative_capacities: Optional[Dict] = None,
         initial_storage_levels: Optional[Dict] = None,
-        investment_from_master: bool = False,
-        h2_production_hourly: Optional[np.ndarray] = None,
         transport_routes: Optional[List[Dict]] = None,
         outage_schedule: Optional[list] = None,
+        step_hours: int = 1,
+        year_hour_offset: int = 0,
+        scheduled_arrivals: Optional[Dict[str, np.ndarray]] = None,
     ):
         """
         Initialize the PrimaryEnergy adapter.
@@ -3663,12 +5002,22 @@ class PrimaryEnergyAdapter:
             primary_energy_resolution: Resolution for fuel planning (hours)
             investment_resolution: Resolution for investment decisions (hours)
             discount_rate: Discount rate for annualization
-            mode: Operation mode
-            cumulative_capacities: Previously accumulated investments
+            mode: The run's ``simulation_mode`` ("development",
+                "unit_commitment", "economic_dispatch"), not the dispatch
+                formulation; "master" for the master's day model. In
+                "development" each window ends with its tanks at least 10 % full.
+            cumulative_capacities: Fuel storage/transport capacity built by the
+                master: {"storage"|"transport": {fuel: {node or route: capacity}}}
             initial_storage_levels: Initial storage levels for carry-over
-            investment_from_master: Skip investment vars when MasterProblem handles them
-            h2_production_hourly: H2 production from electrolyzers [hours x nodes]
             transport_routes: Route-based fuel transport list (preferred over distance matrix)
+            step_hours: Length of a time step (h)
+            year_hour_offset: First hour of the window within the year; with
+                step_hours it places periods in their month for the
+                non-electric demand's seasonal factors
+            scheduled_arrivals: Fuel shipped in an earlier window and still in
+                transit, ``{fuel: array [node, step]}`` arriving in this
+                window's steps (from the previous window's
+                :meth:`get_in_transit_arrivals`)
         """
         self.year = year
         self.base_year = base_year
@@ -3689,8 +5038,9 @@ class PrimaryEnergyAdapter:
         self.mode = mode
         self.cumulative_capacities = cumulative_capacities or {'storage': {}, 'transport': {}}
         self.initial_storage_levels = initial_storage_levels
-        self.investment_from_master = investment_from_master
-        self.h2_production_hourly = h2_production_hourly
+        self.step_hours = step_hours
+        self.year_hour_offset = year_hour_offset
+        self.scheduled_arrivals = scheduled_arrivals or {}
 
         self._jl_model = None
         self._jl_vars = None
@@ -3698,7 +5048,9 @@ class PrimaryEnergyAdapter:
         self._jl_temporal = None
         self._adjusted_prices = None
 
-        # Warn if loss penalty is below max fuel cost (user should fix in config)
+        # A fuel shortfall below the fuel price would be a cheaper fuel; the
+        # model prices it at 10 × the fuel's price plus import cost at least
+        # (fuel_shortage_penalty in primary_energy.jl)
         loss_pen = float(self.penalties_config.get('loss_of_fuel_supply', 100.0))
         max_fuel_cost = 0.0
         for fuel_name, fuel_cfg in self.fuels_config.items():
@@ -3707,12 +5059,11 @@ class PrimaryEnergyAdapter:
             ic_list = fuel_cfg.get('import_cost', [0.0])
             max_ic = max(float(x) for x in ic_list) if ic_list else 0.0
             max_fuel_cost = max(max_fuel_cost, bp + max_ic)
-        if loss_pen < max_fuel_cost * 1.5:
-            logger.warning(
-                f"PE loss_of_fuel_supply penalty ({loss_pen}) is below max fuel cost ({max_fuel_cost:.1f}). "
-                f"The optimizer may prefer fuel loss over purchasing. "
-                f"Consider increasing penalties.loss_of_fuel_supply in config."
-            )
+        if loss_pen < max_fuel_cost:
+            logger.debug(
+                f"penalties.loss_of_fuel_supply ({loss_pen}) is below the dearest "
+                f"fuel ({max_fuel_cost:.1f} per unit); fuel shortfalls are priced "
+                f"at 10 x each fuel's price plus import cost instead")
 
         # Generator to fuel mapping (computed during initialization)
         self.generator_fuel_map = self._create_generator_fuel_map()
@@ -3738,8 +5089,8 @@ class PrimaryEnergyAdapter:
                 energy_content = fuel_def.get('energy_content', 0.0)
 
                 if energy_content > 1e-6:
-                    eff_rated = gen.get('eff_at_rated', [0.35])
-                    efficiency = np.mean(eff_rated) if isinstance(eff_rated, list) else eff_rated
+                    efficiency = _rated_efficiency(gen.get('eff_at_rated', [0.35]),
+                                                   gen.get('rated_power'))
 
                     # MWh_e per physical fuel unit
                     mwhe_per_unit = efficiency * energy_content
@@ -3761,19 +5112,27 @@ class PrimaryEnergyAdapter:
             fuel_def = self.fuels_definition.get(fuel_name, {})
 
             # Scheduled fuel-source outages reuse FuelConfig's built-in
-            # disruption window (start/end/availability). Applies the first
-            # scheduled window; the PE model supports one window per source.
+            # disruption window (start/end/availability, absolute horizon
+            # hours). The PE model takes one window per source: the first
+            # scheduled one that falls inside this model window.
             d_start = int(fuel_cfg.get('disruption_start_hour', 0))
             d_end = int(fuel_cfg.get('disruption_end_hour', 0))
             d_avail = float(fuel_cfg.get('disruption_availability', 1.0))
-            _fw = fuel_source_outage_windows(self.outage_schedule, fuel_name)
-            if _fw:
-                d_start, d_end, d_avail = int(_fw[0][0]), int(_fw[0][1]), float(_fw[0][2])
-                if len(_fw) > 1:
+            win_lo = absolute_start_hour(self.year, self.base_year, self.year_hour_offset)
+            win_hi = win_lo + int(self.hours) * max(1, int(self.step_hours))
+            _spans = [
+                (a, b, float(w[2]))
+                for w in fuel_source_outage_windows(self.outage_schedule, fuel_name)
+                for a, b in outage_window_spans(w, win_lo, win_hi)
+            ]
+            if _spans:
+                d_start, d_end, d_avail = _spans[0]
+                if len(_spans) > 1:
                     logger.warning(
-                        "Fuel source %r has %d scheduled outages; the primary-"
-                        "energy model applies one window per source — using the "
-                        "first (%d–%d h).", fuel_name, len(_fw), _fw[0][0], _fw[0][1],
+                        "Fuel source %r has %d scheduled outages in hours %d–%d; "
+                        "the primary-energy model applies one window per source "
+                        "— using the first (%d–%d h).", fuel_name, len(_spans),
+                        win_lo, win_hi, d_start, d_end,
                     )
 
             # Cost fields go through scale_cost to match the M$ convention of
@@ -3783,14 +5142,19 @@ class PrimaryEnergyAdapter:
                 scale_cost(float(fuel_def.get('price_base', 0.0))),
                 float(fuel_def.get('price_growth_rate', 0.0)),
                 float(fuel_def.get('energy_content', 0.0)),
-                float(fuel_cfg.get('emission_factor', 0.0)),
+                # The fuel definition (fuels.<name>.emission_factor) carries the
+                # factor; the source config has none, so this used to be 0.
+                float(fuel_def.get('emission_factor', fuel_cfg.get('emission_factor', 0.0))),
                 py_to_julia_vector(fuel_cfg.get('max_availability', [0.0] * n)),
                 py_to_julia_vector(fuel_cfg.get('storage_capacity', [0.0] * n)),
                 py_to_julia_vector(fuel_cfg.get('initial_storage_level', [0.5] * n)),
                 float(fuel_cfg.get('min_storage_level', 0.0)),
                 py_to_julia_vector(scale_cost_list(fuel_cfg.get('import_cost', [0.0] * n))),
-                scale_cost(float(fuel_cfg.get('transport_cost', 0.0))),
-                float(fuel_cfg.get('transport_losses', 0.0)),
+                # Transport cost and losses are per route (fuel_transport_
+                # routes); these fallbacks only feed Julia's distance-matrix
+                # constructor, which the runner does not use
+                0.0,
+                0.0,
                 float(fuel_cfg.get('transport_transit_days_per_100km', 0.0)),
                 d_start,
                 d_end,
@@ -3812,7 +5176,7 @@ class PrimaryEnergyAdapter:
             for fuel_name, fp in fuel_params.items():
                 if fuel_name not in fuel_storage_cfg:
                     fuel_storage_cfg[fuel_name] = {
-                        'efficiency': float(fp.get('efficiency', fac_data.get('efficiency', 0.8))),
+                        'efficiency': float(fp.get('efficiency', fac_data.get('efficiency', 1.0))),
                         'investment_cost': float(fp.get('investment_cost', fac_data.get('investment_cost', 0.0))),
                         'expansion_limit': float(fp.get('expansion_limit', fac_data.get('expansion_limit', 1.0))),
                         'lifetime': float(fp.get('lifetime', fac_data.get('lifetime', 30.0))),
@@ -3845,7 +5209,7 @@ class PrimaryEnergyAdapter:
                 float(t_cfg.get('expansion_limit', 0.5)),
                 scale_cost(float(s_cfg.get('investment_cost', 0.0))),
                 float(s_cfg.get('expansion_limit', 1.0)),
-                float(s_cfg.get('efficiency', 0.8)),
+                float(s_cfg.get('efficiency', 1.0)),
                 float(t_cfg.get('lifetime', 20.0)),
                 float(s_cfg.get('lifetime', 30.0)),
                 float(s_cfg.get('max_hourly_dispatch_rate_fraction_of_capacity', -1.0)),
@@ -3859,16 +5223,19 @@ class PrimaryEnergyAdapter:
             sector = parts[0]
             fuel = demand_cfg.get('fuel', "_".join(parts[1:]))
 
-            # Get seasonal factors (default to even distribution)
-            seasonal = demand_cfg.get('seasonal_factors', [1.0/12.0] * 12)
+            # Monthly factors, relative to their mean (even when absent)
+            seasonal = demand_cfg.get('seasonal_factors') or [1.0] * 12
             if len(seasonal) != 12:
-                seasonal = [1.0/12.0] * 12
+                logger.warning(
+                    "Non-electric demand %r: seasonal_factors needs 12 monthly values, "
+                    "got %d; using an even profile.", demand_key, len(seasonal))
+                seasonal = [1.0] * 12
 
             jl_ne = ESFEX.NonElectricDemandConfig(
                 sector,
                 fuel,
                 py_to_julia_vector(demand_cfg.get('demand', [0.0] * n)),
-                float(demand_cfg.get('growth_rate', 0.01)),
+                float(demand_cfg.get('growth_rate', 0.0)),
                 py_to_julia_vector(seasonal),
             )
             jl.seval("push!")(jl_ne_demand, jl_ne)
@@ -3881,9 +5248,16 @@ class PrimaryEnergyAdapter:
             jl_gen_map[gen_idx + 1] = (fuel_name, mwhe_per_unit, energy_content, eff)
 
         # Convert cumulative capacities
+        # {kind: {fuel: {0-based node/route: capacity}}} -> 1-based for Julia
         jl_cumul = jl.seval("Dict{String, Any}()")
-        jl_cumul["storage"] = jl.seval("Dict{String, Dict{Int, Float64}}()")
-        jl_cumul["transport"] = jl.seval("Dict{String, Dict{Int, Dict{Int, Float64}}}()")
+        for kind in ("storage", "transport"):
+            jl_kind = jl.seval("Dict{String, Dict{Int, Float64}}()")
+            for fuel_name, by_idx in (self.cumulative_capacities.get(kind) or {}).items():
+                jl_idx = jl.seval("Dict{Int, Float64}()")
+                for idx, cap in by_idx.items():
+                    jl_idx[int(idx) + 1] = float(cap)
+                jl_kind[fuel_name] = jl_idx
+            jl_cumul[kind] = jl_kind
 
         # Convert initial storage levels
         jl_initial_storage = jl.seval("nothing")
@@ -3898,10 +5272,14 @@ class PrimaryEnergyAdapter:
                 else:
                     jl_initial_storage[fuel_name] = py_to_julia_vector(levels)
 
-        # Convert H2 production hourly (if available)
-        jl_h2_production = jl.seval("nothing")
-        if self.h2_production_hourly is not None:
-            jl_h2_production = py_to_julia_matrix(self.h2_production_hourly)
+        # Fuel still in transit from the previous window: {fuel: [node, step]}
+        jl_arrivals = jl.seval("nothing")
+        if self.scheduled_arrivals:
+            jl_arrivals = jl.seval("Dict{String, Matrix{Float64}}()")
+            for fuel_name, arr in self.scheduled_arrivals.items():
+                arr = np.asarray(arr, dtype=float)
+                if arr.ndim == 2 and arr.size:
+                    jl_arrivals[fuel_name] = py_to_julia_matrix(arr)
 
         # Build generator rated_power dict for coupling optimization (skip zero-capacity nodes)
         jl_gen_rated = jl.seval("Dict{Int, Vector{Float64}}()")
@@ -3915,7 +5293,11 @@ class PrimaryEnergyAdapter:
 
         # Build transport routes
         jl_routes = jl.seval("TransportRoute[]")
-        for rt in self.transport_routes:
+        for i, rt in enumerate(self.transport_routes):
+            missing = [k for k in ("from_node", "to_node", "distance_km") if rt.get(k) is None]
+            if missing:
+                raise ValueError(f"Fuel transport route {rt.get('route_id', i)!r} has no "
+                                 f"{', '.join(missing)}")
             jl_fparams = jl.seval("Dict{String, FuelRouteParams}()")
             for fuel_name, fp in rt.get("fuel_params", {}).items():
                 jl_fparams[fuel_name] = ESFEX.FuelRouteParams(
@@ -3924,7 +5306,7 @@ class PrimaryEnergyAdapter:
                     float(fp.get("losses_fraction", 0.0)),
                 )
             jl_route = ESFEX.TransportRoute(
-                str(rt["route_id"]),
+                str(rt.get("route_id") or f"route_{i}"),
                 int(rt["from_node"]) + 1,   # 0-indexed Python -> 1-indexed Julia
                 int(rt["to_node"]) + 1,
                 float(rt["distance_km"]),
@@ -3946,14 +5328,14 @@ class PrimaryEnergyAdapter:
             self.investment_resolution,
             self.discount_rate,
             scale_cost(float(self.penalties_config.get('loss_of_fuel_supply', 1000.0))),
-            scale_cost(float(self.penalties_config.get('coupling_slack_penalty', 1.0))),
             self.mode,
             jl_cumul,
             jl_initial_storage,
-            self.investment_from_master,
-            jl_h2_production,
             jl_gen_rated,
-            jl.seval("nothing"),  # electrolyzer_config
+            scale_cost(float(self.penalties_config.get('non_electric_demand_loss', 100.0))),
+            int(self.step_hours),
+            int(self.year_hour_offset),
+            jl_arrivals,
         )
 
         return jl_input
@@ -3972,9 +5354,62 @@ class PrimaryEnergyAdapter:
 
         # Create model components
         self._jl_vars, self._jl_temporal, self._adjusted_prices = \
-            ESFEX.create_primary_energy_model(model, self._jl_input)
+            ESFEX.create_primary_energy_model(
+                model, self._jl_input, outage_masks=self._outage_masks())
 
         logger.debug("PrimaryEnergy variables created")
+
+    def _outage_masks(self) -> Any:
+        """Scheduled tank and route outages of this window, for Julia.
+
+        ``fuel_storage`` windows (``element_id`` = fuel, ``node`` = one node or
+        None for all) give ``{fuel: [node × step]}``; ``fuel_route`` windows
+        (``element_id`` = the route's ``route_id``, ``route_<i>`` for a route
+        without one) give ``{route_id: [step]}``. Factors compound like the
+        other outage masks (:func:`compile_outage_factor`).
+        """
+        jl = get_julia()
+        out = jl.seval("Dict{String, Any}()")
+        win_lo = absolute_start_hour(self.year, self.base_year, self.year_hour_offset)
+        res = max(1, int(self.step_hours))
+        route_ids = {str(rt.get("route_id") or f"route_{i}")
+                     for i, rt in enumerate(self.transport_routes)}
+        tanks: dict[str, np.ndarray] = {}
+        routes: dict[str, np.ndarray] = {}
+        for ow in self.outage_schedule:
+            if ow.element_type not in ("fuel_storage", "fuel_route"):
+                continue
+            fac = compile_outage_factor([outage_window_tuple(ow)], win_lo, self.hours, res)
+            if np.all(fac >= 1.0):
+                continue
+            if ow.element_type == "fuel_storage":
+                if ow.element_id not in self.fuels_config:
+                    logger.warning("Outage window for fuel storage %r: no such fuel; "
+                                   "ignored.", ow.element_id)
+                    continue
+                mask = tanks.setdefault(ow.element_id, np.ones((self.num_nodes, self.hours)))
+                nodes = range(self.num_nodes) if ow.node is None else [ow.node]
+                for n in nodes:
+                    if 0 <= n < self.num_nodes:
+                        mask[n] *= fac
+            else:
+                if ow.element_id not in route_ids:
+                    logger.warning("Outage window for fuel route %r: no such route_id; "
+                                   "ignored.", ow.element_id)
+                    continue
+                routes.setdefault(ow.element_id, np.ones(self.hours))
+                routes[ow.element_id] *= fac
+        if tanks:
+            jl_tanks = jl.seval("Dict{String, Matrix{Float64}}()")
+            for fuel, mask in tanks.items():
+                jl_tanks[fuel] = py_to_julia_matrix(mask)
+            jl.seval("setindex!")(out, jl_tanks, "fuel_storage")
+        if routes:
+            jl_routes = jl.seval("Dict{String, Vector{Float64}}()")
+            for rid, fac in routes.items():
+                jl_routes[rid] = py_to_julia_vector(fac)
+            jl.seval("setindex!")(out, jl_routes, "fuel_route")
+        return out
 
     def add_constraints(self, model: Any):
         """Add primary energy constraints (called by create_variables)."""
@@ -4027,14 +5462,17 @@ class PrimaryEnergyAdapter:
         jl._pe_resolution_hours = res_hours
 
         # Pass bus_to_node mapping so PE (node-indexed) can couple
-        # with PS (bus-indexed) when num_buses > num_nodes.
+        # with PS (bus-indexed) when num_buses > num_nodes, and the
+        # electrolyzers whose hydrogen fills the Hydrogen tank.
         if power_system._jl_input is not None:
             jl._ps_input = power_system._jl_input
             jl.seval("""
             couple_primary_energy_to_power_system!(
                 _pe_model, _pe_vars, _ps_vars, _pe_input;
                 bus_to_node = _ps_input.network.bus_to_node,
-                resolution_hours = _pe_resolution_hours
+                resolution_hours = _pe_resolution_hours,
+                generators = _ps_input.generators,
+                electrolyzers = _ps_input.electrolyzers
             )
             """)
         else:
@@ -4052,38 +5490,59 @@ class PrimaryEnergyAdapter:
         pe_cost_terms = self.get_objective_terms()
         jl._pe_costs_dict = pe_cost_terms
         jl._ps_model = self._jl_model
+        # In a `let`: at top level the objective and @objective's
+        # temporaries became globals of Main, new ones every window, each
+        # holding its window's model (0.3 GB a window on Cuba: a year of
+        # rolling horizon ran out of memory)
+        jl.seval("using JuMP")
         jl.seval("""
-        using JuMP
-        pe_sum = isempty(_pe_costs_dict) ? AffExpr(0.0) : sum(values(_pe_costs_dict))
-        current_obj = objective_function(_ps_model)
-        @objective(_ps_model, Min, current_obj + pe_sum)
-        if haskey(_ps_model.ext, :cost_expressions)
-            for (k, v) in _pe_costs_dict
-                _ps_model.ext[:cost_expressions][k] = v
+        let pe_sum = isempty(_pe_costs_dict) ? JuMP.AffExpr(0.0) : sum(values(_pe_costs_dict))
+            current_obj = JuMP.objective_function(_ps_model)
+            JuMP.@objective(_ps_model, Min, current_obj + pe_sum)
+            if haskey(_ps_model.ext, :cost_expressions)
+                for (k, v) in _pe_costs_dict
+                    _ps_model.ext[:cost_expressions][k] = v
+                end
             end
         end
         """)
+        # The window's model is no longer needed from Main
+        jl.seval("global _pe_model = nothing; global _ps_model = nothing; "
+                 "global _pe_vars = nothing; global _ps_vars = nothing; "
+                 "global _pe_input = nothing; global _ps_input = nothing; "
+                 "global _pe_costs_dict = nothing")
 
         logger.debug("PrimaryEnergy integrated with PowerSystem")
 
-    def get_results(self) -> Dict[str, Any]:
+    def get_results(self, keep_steps: Optional[int] = None) -> Dict[str, Any]:
         """
         Get primary energy results after solving.
 
+        Args:
+            keep_steps: Committed steps of a rolling-horizon window; the cost
+                totals cover only those (a period counts for the share of
+                its steps among them). Default: all steps.
+
         Returns:
-            Dictionary with solution values
+            Dictionary with solution values (``total_fuel_cost``,
+            ``total_transport_cost``, ``total_loss_penalty`` in $;
+            ``fuel_for_power``: ``{generator index (0-based): [node x step]}``,
+            the fuel each coupled unit burns per step)
         """
         ESFEX = get_esfex_module()
 
         if self._jl_model is None:
             raise RuntimeError("Model not built.")
 
+        keep = self.hours if keep_steps is None else max(1, min(int(keep_steps), self.hours))
         jl_result = ESFEX.extract_primary_energy_solution(
             self._jl_model,
             self._jl_vars,
             self._jl_input,
             self._jl_temporal,
+            keep=keep,
         )
+        hourly = ESFEX.extract_hourly_results(self._jl_vars, self._jl_input, self._jl_temporal)
 
         # Convert to Python types
         return {
@@ -4094,9 +5553,14 @@ class PrimaryEnergyAdapter:
             'total_loss_of_supply': {k: np.array(v) for k, v in jl_result.total_loss_of_supply.items()},
             'final_storage_levels': {k: np.array(v) for k, v in jl_result.final_storage_levels.items()},
             'transport_flows': {k: np.array(v) for k, v in jl_result.transport_flows.items()},
-            'total_fuel_cost': float(jl_result.total_fuel_cost),
-            'total_transport_cost': float(jl_result.total_transport_cost),
-            'total_loss_penalty': float(jl_result.total_loss_penalty),
+            # Julia costs are in M$; results are in $ like every other cost
+            'total_fuel_cost': float(jl_result.total_fuel_cost) * COST_UNSCALE,
+            'total_transport_cost': float(jl_result.total_transport_cost) * COST_UNSCALE,
+            'total_loss_penalty': float(jl_result.total_loss_penalty) * COST_UNSCALE,
+            'fuel_for_power': {
+                int(g) - 1: np.array(m, dtype=float)
+                for g, m in hourly["fuel_for_power_hourly"].items()
+            },
         }
 
     def get_debug_info(self) -> Dict[str, Any]:
@@ -4117,13 +5581,6 @@ class PrimaryEnergyAdapter:
                 mat = self._jl_vars.fuel_supply_periodic[fuel_jl]
                 total = float(jl.seval("m -> sum(JuMP.value.(m))")(mat))
                 info[f'supply_periodic_{fuel}'] = total
-
-            # fuel_loss_of_supply_periodic: fuel → [node, period]
-            for fuel_jl in self._jl_vars.fuel_loss_of_supply_periodic:
-                fuel = str(fuel_jl)
-                mat = self._jl_vars.fuel_loss_of_supply_periodic[fuel_jl]
-                total = float(jl.seval("m -> sum(JuMP.value.(m))")(mat))
-                info[f'loss_periodic_{fuel}'] = total
 
             # hourly loss: hr_loss_supply
             if hasattr(self._jl_vars, 'fuel_loss_of_supply_hourly'):
@@ -4152,34 +5609,52 @@ class PrimaryEnergyAdapter:
             info['debug_error'] = str(e)
         return info
 
-    def get_final_storage_levels(self) -> Dict[str, Dict[int, float]]:
-        """
-        Get final HOURLY storage levels for carry-over to next window.
+    def get_in_transit_arrivals(self, step: Optional[int] = None) -> Dict[str, np.ndarray]:
+        """Fuel still in transit after *step* timesteps, for the next window.
 
-        Uses the hourly storage level at the last timestep (t=hours+1)
-        rather than the periodic storage_level_end, which can be higher
-        due to coupling slack constraints.
+        Shipments that left in steps 1..*step* (default: the whole window)
+        and arrive later, plus scheduled arrivals of this window due after
+        *step*. Pass the result as the next window's ``scheduled_arrivals``,
+        alongside :meth:`get_final_storage_levels` with the same *step*.
+
+        Returns:
+            ``{fuel: array [node, s]}``: quantity reaching the node's tank in
+            step s of the next window (net of transport losses).
+        """
+        ESFEX = get_esfex_module()
+        k = self.hours if step is None else min(int(step), self.hours)
+        jl_out = ESFEX.in_transit_arrivals(
+            self._jl_vars, self._jl_input, self._jl_temporal, k)
+        return {str(f): np.array(m, dtype=float) for f, m in jl_out.items()}
+
+    def get_final_storage_levels(self, step: Optional[int] = None) -> Dict[str, Dict[int, float]]:
+        """
+        Get the tank levels for carry-over to the next window.
+
+        Uses the tank level after *step* timesteps (default: the whole
+        window, t=hours+1). Rolling horizons pass the committed steps, where
+        the next window starts.
 
         Returns:
             Dictionary with {fuel_id: {node_idx: level}}
         """
         jl = get_julia()
-        from juliacall import convert as jl_convert
 
         final_levels = {}
-        # Extract from hourly storage level variables (more accurate than periodic)
+        # Tank levels (the model's only fuel storage)
         for fuel_name_jl in self._jl_vars.fuel_storage_level_hourly:
             fuel_name = str(fuel_name_jl)
             mat = self._jl_vars.fuel_storage_level_hourly[fuel_name_jl]
             n_nodes = self.num_nodes
-            last_t = self.hours + 1  # hourly storage has hours+1 timesteps (0..hours)
+            # hourly storage has hours+1 timesteps (0..hours)
+            last_t = (self.hours if step is None else min(step, self.hours)) + 1
             final_levels[fuel_name] = {}
             for n in range(n_nodes):
                 try:
                     val = float(jl.seval("JuMP.value")(mat[n + 1, last_t]))
                     final_levels[fuel_name][n] = val
                 except Exception:
-                    # Fallback to periodic storage_level_end
+                    # Fallback to the window-end level of the results
                     try:
                         results = self.get_results()
                         levels = results['final_storage_levels'].get(fuel_name, [])

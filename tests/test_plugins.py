@@ -666,6 +666,91 @@ class TestInstallZip:
                 pm.install_from_zip(zip_path)
 
 
+# ── Trusted hashes ────────────────────────────────────────────────────
+
+
+class TestTrust:
+    """Importing a plugin wrote ``__pycache__/`` into its directory, which the
+    trusted hash covered: every trusted plugin was skipped from the second
+    start on, and the Studio offered no way to approve it again."""
+
+    @staticmethod
+    def _patched(tmp_path):
+        from contextlib import ExitStack
+        stack = ExitStack()
+        for target, value in (("_USER_PLUGINS_DIR", tmp_path / "plugins"),
+                              ("_STATE_FILE", tmp_path / "state.json"),
+                              ("_USER_DATA_DIR", tmp_path / "data")):
+            stack.enter_context(patch(f"esfex.plugins.manager.{target}", value))
+        return stack
+
+    def _install(self, tmp_path, name):
+        src = _create_plugin_dir(tmp_path / "src", name)
+        zip_path = tmp_path / f"{name}.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            for f in src.rglob("*"):
+                zf.write(f, f"{name}/{f.relative_to(src)}")
+        PluginManager().install_from_zip(zip_path)
+
+    def test_trusted_plugin_still_loads_after_being_imported(self, tmp_path):
+        with self._patched(tmp_path):
+            self._install(tmp_path, "trust_restart")
+            for _ in range(2):          # two Studio starts
+                pm = PluginManager()
+                pm.load_all(config=None)
+                assert [p.meta.name for p in pm.plugins] == ["trust_restart"]
+            # Bytecode left by any import does not change the hash
+            cache = tmp_path / "plugins" / "trust_restart" / "__pycache__"
+            cache.mkdir(exist_ok=True)
+            (cache / "__init__.cpython-312.pyc").write_bytes(b"stale")
+            pm = PluginManager()
+            pm.discover()
+            assert pm.is_trusted("trust_restart")
+
+    def test_cached_bytecode_is_not_run(self, tmp_path):
+        """Bytecode is outside the hash, so loading drops it and imports the
+        source (writing no new cache)."""
+        with self._patched(tmp_path):
+            self._install(tmp_path, "trust_pyc")
+            cache = tmp_path / "plugins" / "trust_pyc" / "__pycache__"
+            cache.mkdir()
+            (cache / "__init__.cpython-312.pyc").write_bytes(b"planted")
+            pm = PluginManager()
+            pm.load_all(config=None)
+            assert [p.meta.name for p in pm.plugins] == ["trust_pyc"]
+            assert not cache.exists()
+
+    def test_untrusted_plugin_is_skipped_until_trusted(self, tmp_path):
+        with self._patched(tmp_path):
+            self._install(tmp_path, "trust_known")
+            # Copied in by hand after the allowlist is active
+            _create_plugin_dir(tmp_path / "plugins", "trust_manual")
+            pm = PluginManager()
+            pm.load_all(config=None)
+            assert [p.meta.name for p in pm.plugins] == ["trust_known"]
+            assert not pm.is_trusted("trust_manual")
+            pm.trust_plugin("trust_manual")
+            assert pm.is_trusted("trust_manual")
+            pm = PluginManager()
+            pm.load_all(config=None)
+            assert sorted(p.meta.name for p in pm.plugins) == ["trust_known", "trust_manual"]
+
+    def test_cli_trust_command(self, tmp_path):
+        from typer.testing import CliRunner
+
+        from esfex.cli import app
+        with self._patched(tmp_path):
+            self._install(tmp_path, "trust_cli_known")
+            _create_plugin_dir(tmp_path / "plugins", "trust_cli")
+            out = CliRunner().invoke(app, ["plugin", "list"]).output
+            assert "untrusted" in out
+            result = CliRunner().invoke(app, ["plugin", "trust", "trust_cli"])
+            assert result.exit_code == 0, result.output
+            pm = PluginManager()
+            pm.discover()
+            assert pm.is_trusted("trust_cli")
+
+
 # ── Uninstall ─────────────────────────────────────────────────────────
 
 
@@ -1000,7 +1085,8 @@ class TestPluginsDialog:
         assert PluginsDialog._COL_CATEGORY == 3
         assert PluginsDialog._COL_AUTHOR == 4
         assert PluginsDialog._COL_DESCRIPTION == 5
-        assert PluginsDialog._NUM_COLS == 6
+        assert PluginsDialog._COL_TRUSTED == 6
+        assert PluginsDialog._NUM_COLS == 7
 
     @patch("esfex.plugins.get_plugin_manager")
     def test_dialog_inherits_qdialog(self, mock_get_pm):

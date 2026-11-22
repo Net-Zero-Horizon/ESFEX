@@ -5,16 +5,18 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import yaml
 
 from esfex.utils.temporal import HOURS_STD_YEAR
+from esfex.config.legacy_keys import LEGACY_SYSTEM_KEYS
 from esfex.config.schema import (
-    GeoCoordinate,
     ESFEXConfig,
+    RiskConfig,
     SystemConfig,
+    normalize_scenario_multipliers,
 )
 from esfex.visualization.data.gui_model import (
     RENEWABLE_FUELS,
@@ -44,6 +46,7 @@ from esfex.visualization.data.gui_model import (
     GuiGeneratorInstance,
     GuiGlobalSettings,
     GuiVisualScaling,
+    majority_ac_frequency,
     GuiInvestmentEntry,
     GuiInvestmentNodeData,
     GuiInterSystemLink,
@@ -103,7 +106,7 @@ def _normalize_voltage_kv(value: float) -> float:
     return value
 
 
-# Fields shared between generators and batteries (common scalars)
+# Generator scalar fields (batteries use a subset, _BAT_SCALAR_FIELDS)
 _COMMON_SCALAR_FIELDS = [
     "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
     "rated_power", "min_power", "min_up", "min_down", "ramp_up", "ramp_down",
@@ -113,7 +116,7 @@ _COMMON_SCALAR_FIELDS = [
 ]
 
 # Generator-only fields (NOT shared with batteries)
-_GEN_ONLY_FIELDS = ["droop", "governor_time_const"]
+_GEN_ONLY_FIELDS = ["droop", "governor_time_const", "num_units"]
 
 _GEN_SCALAR_FIELDS_BASE = _COMMON_SCALAR_FIELDS + _GEN_ONLY_FIELDS
 
@@ -130,19 +133,20 @@ _GEN_RESERVOIR_FIELDS = [
 
 _GEN_SCALAR_FIELDS = _GEN_SCALAR_FIELDS_BASE + _GEN_RESERVOIR_FIELDS
 
-# Investment fields read from YAML per-node arrays → investment portfolio
-_GEN_INVEST_FIELDS = ["invest_cost", "invest_max_power"]
-_BAT_INVEST_FIELDS = ["invest_cost", "invest_max_power", "invest_cost_energy", "invest_max_capacity"]
-
-_BAT_SCALAR_FIELDS = _COMMON_SCALAR_FIELDS + [
+# Batteries share only these generator fields (no commitment, efficiency
+# curve, start-up or fuel cost)
+_BAT_SCALAR_FIELDS = [
+    "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
+    "rated_power", "ramp_up", "ramp_down", "inertia", "risk_coefficient",
+    "fixed_cost", "maintenance_cost",
     "efficiency_charge", "efficiency_discharge", "soc_initial",
     "max_DoD", "capacity", "MaxChargePower", "MaxDischargePower",
     "throughput_degradation_cost",
 ]
 
 # Fields that indicate a generator has presence at a node
-_GEN_PRESENCE_FIELDS = ["rated_power", "invest_max_power"]
-_BAT_PRESENCE_FIELDS = ["rated_power", "capacity", "invest_max_power", "invest_max_capacity"]
+_GEN_PRESENCE_FIELDS = ["rated_power"]
+_BAT_PRESENCE_FIELDS = ["rated_power", "capacity", "invest_max_power"]
 
 
 def _cost_curve_to_gui_data(curve) -> dict | None:
@@ -203,7 +207,22 @@ def config_to_gui_states(
     states: dict[str, GuiSystemState] = {}
     for sys_name, sys_config in config.systems.items():
         states[sys_name] = _system_to_gui_state(sys_config, base_dir=base_dir)
+    _assign_unknown_keys(states, getattr(config, "unknown_keys", []))
     return states
+
+
+def _assign_unknown_keys(states: dict[str, GuiSystemState], keys: list[str]) -> None:
+    """Give each state the unknown keys under ``systems.<its name>.``; keys
+    outside any system go to the first state, so validation lists them once."""
+    if not states or not isinstance(keys, list):
+        return
+    first = next(iter(states))
+    for name, state in states.items():
+        prefix = f"systems.{name}."
+        state.unknown_config_keys = [k for k in keys if k.startswith(prefix)]
+    states[first].unknown_config_keys += [
+        k for k in keys
+        if not any(k.startswith(f"systems.{n}.") for n in states)]
 
 
 def config_to_inter_system_links(
@@ -225,7 +244,6 @@ def config_to_inter_system_links(
         vk_list  = getattr(sl, "voltage_kv", []) or []
         lt_list  = getattr(sl, "line_type", []) or []
         lkm_list = getattr(sl, "length_km", []) or []
-        bi_list  = getattr(sl, "base_impedance", []) or []
         rpk_list = getattr(sl, "reactance_per_km", []) or []
         sus_list = getattr(sl, "susceptance_pu", []) or []
         nc_list  = getattr(sl, "num_circuits", []) or []
@@ -281,7 +299,8 @@ def config_to_inter_system_links(
 
             link = GuiInterSystemLink(
                 link_id=f"islink_{counter}",
-                link_type="transmission",
+                link_type=getattr(sl, "link_type", None) or "transmission",
+                fuel=getattr(sl, "fuel", None) or "",
                 from_system=from_sys,
                 to_system=to_sys,
                 from_node=conn[0],
@@ -301,7 +320,6 @@ def config_to_inter_system_links(
                 voltage_kv=_pick(vk_list, i, None),
                 line_type=_pick(lt_list, i, None),
                 length_km=_pick(lkm_list, i, None),
-                base_impedance=_pick(bi_list, i, None),
                 reactance_per_km=_pick(rpk_list, i, None),
                 susceptance_pu=_pick(sus_list, i, None),
                 num_circuits=int(_pick(nc_list, i, 1)),
@@ -319,21 +337,24 @@ def inter_system_links_to_config_dict(
     links: list[GuiInterSystemLink],
     config_dict: dict,
 ) -> None:
-    """Write inter-system links back into ``config_dict["meta_network"]``."""
-    if not links:
-        return
+    """Write inter-system links back into ``config_dict["meta_network"]``.
+
+    An empty list writes ``systems_links: []``: the GUI's links replace the
+    loaded file's, so deleting every link in the Studio persists on save."""
     meta = config_dict.get("meta_network")
     if meta is None:
         return
 
-    # Group by (from_system, to_system)
-    groups: dict[tuple[str, str], list[GuiInterSystemLink]] = defaultdict(list)
+    # One systems_links entry per (from_system, to_system, type, fuel):
+    # the type and fuel are per entry, the rest are per-connection lists.
+    groups: dict[tuple[str, str, str, str], list[GuiInterSystemLink]] = defaultdict(list)
     for lk in links:
-        key = (lk.from_system, lk.to_system)
-        groups[key].append(lk)
+        link_type = lk.link_type or "transmission"
+        fuel = (lk.fuel or "") if link_type == "fuel_route" else ""
+        groups[(lk.from_system, lk.to_system, link_type, fuel)].append(lk)
 
     systems_links = []
-    for (from_sys, to_sys), group in groups.items():
+    for (from_sys, to_sys, link_type, fuel), group in groups.items():
         # Per-link GUI metadata so the map polyline survives save→load.
         # SystemLinkConfig now accepts these as optional fields; the
         # solver pipeline ignores them.
@@ -367,6 +388,11 @@ def inter_system_links_to_config_dict(
 
         sl = {
             "systems": [from_sys, to_sys],
+            "link_type": link_type,
+        }
+        if link_type == "fuel_route":
+            sl["fuel"] = fuel or None
+        sl.update({
             "connections": [[lk.from_node, lk.to_node] for lk in group],
             "existing_capacity_MW": [lk.capacity_mw for lk in group],
             "max_investment_MW": [lk.max_investment_mw for lk in group],
@@ -383,7 +409,6 @@ def inter_system_links_to_config_dict(
             "voltage_kv":       [lk.voltage_kv or 0.0      for lk in group],
             "line_type":        [lk.line_type or ""        for lk in group],
             "length_km":        [lk.length_km or 0.0       for lk in group],
-            "base_impedance":   [lk.base_impedance or 0.0  for lk in group],
             "reactance_per_km": [lk.reactance_per_km or 0.0 for lk in group],
             "susceptance_pu":   [lk.susceptance_pu or 0.0  for lk in group],
             "num_circuits":     [int(lk.num_circuits or 1) for lk in group],
@@ -391,7 +416,7 @@ def inter_system_links_to_config_dict(
             "current_type":     [lk.current_type or "AC"   for lk in group],
             "decorative":       [bool(lk.decorative)       for lk in group],
             "style":            style_per_link,
-        }
+        })
         systems_links.append(sl)
     meta["systems_links"] = systems_links
 
@@ -567,6 +592,7 @@ def _system_to_gui_state(sys: SystemConfig,
                     if lg.to_endpoint_type and lg.to_endpoint_id
                     else EndpointRef("node", str(lg.to_node)),
                 length_km=lg.length_km,
+                reactance_per_km=lg.reactance_per_km or None,
                 reactance_pu=lg.reactance_pu,
                 resistance_pu=lg.resistance_pu,
                 susceptance_pu=lg.susceptance_pu,
@@ -704,6 +730,9 @@ def _system_to_gui_state(sys: SystemConfig,
                 arr = getattr(gen, f, None)
                 if arr is not None and node_idx < len(arr):
                     setattr(inst, f, arr[node_idx])
+            # A single num_units holds for every node
+            if len(gen.num_units) == 1:
+                inst.num_units = int(gen.num_units[0])
             # Import fuel cost curve (per-node)
             fcc = getattr(gen, 'fuel_cost_curve', None)
             if fcc and node_idx < len(fcc):
@@ -1097,15 +1126,17 @@ def _system_to_gui_state(sys: SystemConfig,
         demand_scale=getattr(sys, 'demand_scale', 1.0),
         discount_rate=getattr(sys, 'discount_rate', 0.05),
         base_lcoe=getattr(sys, 'base_lcoe', 93.0),
+        npv_annual_return_rate=getattr(sys, 'npv_annual_return_rate', 0.15),
+        npv_retirement=bool(getattr(sys, 'npv_retirement', False)),
+        npv_retirement_max_iterations=int(getattr(sys, 'npv_retirement_max_iterations', 5)),
+        npv_retirement_threshold=getattr(sys, 'npv_retirement_threshold', 0.0),
         target_re_penetration=getattr(sys, 'target_re_penetration', 1.0),
         min_annual_increment=getattr(sys, 'min_annual_increment', 0.01),
         max_annual_increment=getattr(sys, 'max_annual_increment', 0.10),
-        max_annual_system_cost=getattr(sys, 'max_annual_system_cost', 20e9),
-        max_npv_penalty_per_mw=getattr(sys, 'max_npv_penalty_per_mw', 1e6),
-        max_decommission_cost_per_mw=getattr(sys, 'max_decommission_cost_per_mw', 5e5),
-        force_replacement=getattr(sys, 'force_replacement', -5e5),
+        max_annual_investment=getattr(sys, 'max_annual_investment', 20e9),
+        budget_scope=getattr(sys, 'budget_scope', 'investment'),
+        max_annual_operating_cost=getattr(sys, 'max_annual_operating_cost', None),
         life_extension_cost_factor=getattr(sys, 'life_extension_cost_factor', 0.20),
-        loss_demand_threshold=getattr(sys, 'loss_demand_threshold', 0.05),
         inertia_limit_threshold=getattr(sys, 'inertia_limit_threshold', 0.1),
         sim_rooftop=getattr(sys, 'sim_rooftop', False),
     )
@@ -1116,13 +1147,11 @@ def _system_to_gui_state(sys: SystemConfig,
         pen = sys.penalties
         for fld in (
             'loss_of_load', 'loss_of_reserve_static', 'loss_of_reserve_dynamic',
-            'loss_of_inertia', 'transfer_margin', 'curtailment',
+            'loss_of_inertia', 'transfer_margin',
             'max_curtailment_ratio', 'curtailment_cost',
-            'curtailment_excess_penalty', 're_excess_penalty',
             'rooftop_curtailment', 'co2_cost',
             'co2_budget_violation', 'fre_penetration_loss', 'ev_loss',
-            'loss_of_fuel_supply', 'coupling_slack_penalty',
-            'transport_congestion', 'storage_violation',
+            'loss_of_fuel_supply',
             'non_electric_demand_loss',
         ):
             if hasattr(pen, fld):
@@ -1184,12 +1213,10 @@ def _system_to_gui_state(sys: SystemConfig,
                 unit_key=el_key,
                 name=getattr(el_cfg, 'name', el_key),
                 fuel=getattr(el_cfg, 'fuel', 'Hydrogen'),
-                technology=getattr(el_cfg, 'technology', 'PEM'),
                 node=node_idx,
             )
             for fld in (
-                'life_time', 'initial_age', 'degradation_rate',
-                'rated_power', 'min_power', 'ramp_up', 'ramp_down',
+                'life_time', 'rated_power', 'ramp_up', 'ramp_down',
                 'eff_at_rated', 'eff_at_min', 'energy_per_kg_h2',
                 'fixed_cost', 'variable_cost', 'water_cost',
             ):
@@ -1231,13 +1258,12 @@ def _system_to_gui_state(sys: SystemConfig,
         rooftop_solar = GuiRooftopSolar()
         for fld in (
             'adoption_scenario', 'weather_variability', 'simulation_seed',
-            'performance_ratio', 'degradation_rate', 'cost_per_kw',
-            'cost_reduction_rate', 'o_and_m_cost', 'base_year', 'target_year',
+            'performance_ratio', 'degradation_rate', 'base_year', 'target_year',
         ):
             if hasattr(rc, fld):
                 setattr(rooftop_solar, fld, getattr(rc, fld))
         for arr_fld in ('systems_per_node', 'avg_system_size', 'initial_adoption'):
-            if hasattr(rc, arr_fld):
+            if getattr(rc, arr_fld, None) is not None:
                 setattr(rooftop_solar, arr_fld, list(getattr(rc, arr_fld)))
         if hasattr(rc, 'max_adoption') and rc.max_adoption:
             rooftop_solar.max_adoption = dict(rc.max_adoption)
@@ -1254,7 +1280,6 @@ def _system_to_gui_state(sys: SystemConfig,
                 flexibility_ratio=getattr(sec_cfg, 'flexibility_ratio', 0.0),
                 criticality=str(getattr(sec_cfg, 'criticality', 'medium')),
                 delay_tolerance=getattr(sec_cfg, 'delay_tolerance', 0),
-                price_sensitivity=getattr(sec_cfg, 'price_sensitivity', 0.0),
             )
 
     # Non-electric demand
@@ -1265,11 +1290,6 @@ def _system_to_gui_state(sys: SystemConfig,
                 demand_id=did,
                 fuel=getattr(dcfg, 'fuel', ''),
                 unit=getattr(dcfg, 'unit', ''),
-                is_flexible=getattr(dcfg, 'is_flexible', False),
-                flexibility_ratio=getattr(dcfg, 'flexibility_ratio', 0.0),
-                criticality=str(getattr(dcfg, 'criticality', 'medium')),
-                delay_tolerance=getattr(dcfg, 'delay_tolerance', 0),
-                price_sensitivity=getattr(dcfg, 'price_sensitivity', 0.0),
                 demand=list(getattr(dcfg, 'demand', [])),
             )
 
@@ -1425,6 +1445,10 @@ def _system_to_gui_state(sys: SystemConfig,
                     base = _node_coords.get(buses[bus_id].parent_node, (0.0, 0.0))
                     buses[bus_id].latitude = base[0] + coords[0]
                     buses[bus_id].longitude = base[1] + coords[1]
+        # Roles the user picked in the bus form (kept by the save-time repair).
+        for bus_id in gui_layout.get("user_set_bus_roles", []) or []:
+            if bus_id in buses:
+                buses[bus_id].role_user_set = True
         # For buses not in gui_layout, inherit parent node coordinates
         for bus_id, bus in buses.items():
             if bus_id not in gui_layout.get("buses", {}):
@@ -1460,10 +1484,28 @@ def _system_to_gui_state(sys: SystemConfig,
     investment_portfolio: dict[str, GuiInvestmentEntry] = {}
     inv_counter = 0
 
-    # Generators
+    # Generators: invest_cost only (it prices the master's life extension;
+    # new capacity is built from technologies)
     for key, gen in sys.generators.items():
         ic = getattr(gen, 'invest_cost', [])
-        im = getattr(gen, 'invest_max_power', [])
+        if any(i < len(ic) and ic[i] > 0 for i in range(n)):
+            entry_id = f"inv_{inv_counter}"
+            inv_counter += 1
+            nd_list = [
+                GuiInvestmentNodeData(node_index=i, invest_cost=ic[i])
+                for i in range(min(n, len(ic))) if ic[i] > 0
+            ]
+            investment_portfolio[entry_id] = GuiInvestmentEntry(
+                entry_id=entry_id, name=gen.name,
+                technology_type="generator", target_key=key,
+                node_data=nd_list,
+            )
+
+    # Batteries: invest_cost (life extension) and invest_max_power (places
+    # the battery at the node in the master)
+    for key, bat in sys.batteries.items():
+        ic = getattr(bat, 'invest_cost', [])
+        im = getattr(bat, 'invest_max_power', [])
         has_invest = any(
             (i < len(ic) and ic[i] > 0) or (i < len(im) and im[i] > 0)
             for i in range(n)
@@ -1480,47 +1522,9 @@ def _system_to_gui_state(sys: SystemConfig,
                         node_index=i, invest_cost=cost_val, invest_max=max_val,
                     ))
             investment_portfolio[entry_id] = GuiInvestmentEntry(
-                entry_id=entry_id, name=gen.name,
-                technology_type="generator", target_key=key,
-                node_data=nd_list,
-            )
-
-    # Batteries
-    for key, bat in sys.batteries.items():
-        ic = getattr(bat, 'invest_cost', [])
-        im = getattr(bat, 'invest_max_power', [])
-        ice = getattr(bat, 'invest_cost_energy', [])
-        imc = getattr(bat, 'invest_max_capacity', [])
-        has_invest = any(
-            (i < len(ic) and ic[i] > 0) or (i < len(im) and im[i] > 0)
-            or (i < len(ice) and ice[i] > 0) or (i < len(imc) and imc[i] > 0)
-            for i in range(n)
-        )
-        if has_invest:
-            entry_id = f"inv_{inv_counter}"
-            inv_counter += 1
-            nd_list = []
-            cost_energy: dict[int, float] = {}
-            max_capacity: dict[int, float] = {}
-            for i in range(n):
-                cost_val = ic[i] if i < len(ic) else 0.0
-                max_val = im[i] if i < len(im) else 0.0
-                ce = ice[i] if i < len(ice) else 0.0
-                mc = imc[i] if i < len(imc) else 0.0
-                if cost_val > 0 or max_val > 0 or ce > 0 or mc > 0:
-                    nd_list.append(GuiInvestmentNodeData(
-                        node_index=i, invest_cost=cost_val, invest_max=max_val,
-                    ))
-                    if ce > 0:
-                        cost_energy[i] = ce
-                    if mc > 0:
-                        max_capacity[i] = mc
-            investment_portfolio[entry_id] = GuiInvestmentEntry(
                 entry_id=entry_id, name=bat.name,
                 technology_type="battery", target_key=key,
                 node_data=nd_list,
-                invest_cost_energy=cost_energy,
-                invest_max_capacity=max_capacity,
             )
 
     # Electrolyzers
@@ -1945,14 +1949,34 @@ def _system_to_gui_state(sys: SystemConfig,
         for cc in (sys.custom_constraints or [])
     ]
 
-    outage_schedule = [
-        GuiOutageWindow(
-            element_type=ow.element_type, element_id=ow.element_id,
-            start_hour=ow.start_hour, end_hour=ow.end_hour,
-            availability=ow.availability, label=ow.label,
+    # The calendar addresses generator / battery instances (one per node of a
+    # unit); the config addresses the unit key plus an optional node. A
+    # window on the whole unit becomes one window per instance.
+    _instances = {"generator": generators, "battery": batteries}
+    outage_schedule = []
+    for ow in (getattr(sys, "outage_schedule", None) or []):
+        ids = [ow.element_id]
+        node = getattr(ow, "node", None)
+        # Elements without calendar instances keep the node on the window
+        # (e.g. a fuel_storage outage at one node only).
+        keep_node = node
+        insts = _instances.get(ow.element_type)
+        if insts is not None:
+            matched = [iid for iid, inst in insts.items()
+                       if inst.unit_key == ow.element_id
+                       and (node is None or inst.node == node)]
+            ids = matched or ids
+            keep_node = None if matched else node
+        outage_schedule.extend(
+            GuiOutageWindow(
+                element_type=ow.element_type, element_id=iid,
+                start_hour=ow.start_hour, end_hour=ow.end_hour,
+                availability=ow.availability, label=ow.label,
+                recurring=bool(getattr(ow, "recurring", False)),
+                node=keep_node,
+            )
+            for iid in ids
         )
-        for ow in (getattr(sys, "outage_schedule", None) or [])
-    ]
 
     state = GuiSystemState(
         name=sys.name,
@@ -2107,10 +2131,11 @@ def config_to_global_settings(
         t = config.temporal
         g.resolution_hours = getattr(t, 'resolution_hours', 1)
         g.rolling_horizon_hours = getattr(t, 'rolling_horizon_hours', 48)
-        g.overlap_hours = getattr(t, 'overlap_hours', 6)
+        g.overlap_hours = getattr(t, 'overlap_hours', 24)
         g.investment_resolution = getattr(t, 'investment_resolution', HOURS_STD_YEAR)
         g.primary_energy_resolution = getattr(t, 'primary_energy_resolution', 24)
         g.use_rolling_horizon = getattr(t, 'use_rolling_horizon', True)
+        g.model_clock = getattr(t, 'model_clock', 'auto') or 'auto'
 
     if hasattr(config, 'solver') and config.solver:
         sv = config.solver
@@ -2140,13 +2165,12 @@ def config_to_global_settings(
         g.solver_time_limit = getattr(sv, 'time_limit', 10800)
         g.solver_gap = getattr(sv, 'gap', 0.01)
         g.solver_verbose = getattr(sv, 'verbose', False)
-        g.solver_scale_constraints = getattr(sv, 'scale_constraints', True)
         g.solver_specific_options = dict(getattr(sv, 'options', {}))
 
     if hasattr(config, 'n1_security') and config.n1_security:
         n1 = config.n1_security
         g.n1_enabled = getattr(n1, 'enabled', False)
-        g.n1_apply_to_modes = list(getattr(n1, 'apply_to_modes', ['unit_commitment']))
+        g.n1_apply_to_modes = list(getattr(n1, 'apply_to_modes', ['development', 'unit_commitment']))
         g.n1_transmission_enabled = getattr(n1, 'transmission_enabled', True)
         g.n1_transmission_reserve_factor = getattr(n1, 'transmission_reserve_factor', 0.70)
         g.n1_critical_line_threshold = getattr(n1, 'critical_line_threshold', 0.0)
@@ -2154,9 +2178,8 @@ def config_to_global_settings(
         g.n1_generation_reserve_type = getattr(n1, 'generation_reserve_type', 'largest_unit')
         g.n1_generation_reserve_percentage = getattr(n1, 'generation_reserve_percentage', 0.15)
         g.n1_scopf_enabled = getattr(n1, 'scopf_enabled', False)
-        g.n1_scopf_max_iterations = getattr(n1, 'scopf_max_iterations', 5)
-        g.n1_scopf_violation_tolerance = getattr(n1, 'scopf_violation_tolerance', 0.01)
         g.n1_corrective_enabled = getattr(n1, 'corrective_enabled', False)
+        g.n1_compute_security_cost = getattr(n1, 'compute_security_cost', False)
         g.n1_contingency_depth = getattr(n1, 'contingency_depth', 'n1')
         g.n1_redistribution_mode = getattr(n1, 'redistribution_mode', 'pro_rata')
         g.n1_pi_screening_threshold = getattr(n1, 'pi_screening_threshold', 0.0)
@@ -2168,9 +2191,12 @@ def config_to_global_settings(
         g.mp_stochastic = getattr(mp, 'stochastic', False)
         g.mp_representative_days = getattr(mp, 'representative_days', 5)
         g.mp_min_day_separation = getattr(mp, 'min_day_separation', 5)
+        g.mp_critical_days = getattr(mp, 'critical_days', 3)
+        g.mp_storage_firm_hours = float(getattr(mp, 'storage_firm_hours', None) or 0.0)
         g.mp_solver_method = getattr(mp, 'solver_method', 'monolithic')
         g.mp_benders_max_iterations = getattr(mp, 'benders_max_iterations', 50)
         g.mp_benders_tolerance = getattr(mp, 'benders_tolerance', 1e-4)
+        g.mp_solver_options = dict(getattr(mp, 'solver_options', None) or {})
         g.mp_use_tsam = getattr(mp, 'use_tsam', False)
         g.mp_tsam_num_periods = getattr(mp, 'tsam_num_periods', 10)
         g.mp_tsam_method = getattr(mp, 'tsam_method', 'kmedoids')
@@ -2190,6 +2216,30 @@ def config_to_global_settings(
             g.mp_mga_num_alternatives = getattr(mga, 'num_alternatives', 10)
             g.mp_mga_slack_fraction = getattr(mga, 'slack_fraction', 0.05)
             g.mp_mga_investment_threshold = getattr(mga, 'investment_threshold', 0.1)
+
+    # Risk & Resilience: the fields global_settings_to_config_dict writes.
+    # Without reading them back, the next save reset them to the defaults.
+    rk = getattr(config, 'risk', None)
+    if isinstance(rk, RiskConfig):
+        g.risk_enabled = rk.enabled
+        g.risk_measure = rk.risk_measure
+        g.risk_cvar_alpha = rk.cvar_alpha
+        g.risk_cvar_lambda = rk.cvar_lambda
+        g.risk_combination_method = rk.combination_method
+        g.risk_voll_residential = rk.voll.residential
+        g.risk_voll_commercial = rk.voll.commercial
+        g.risk_voll_industrial = rk.voll.industrial
+        g.risk_voll_critical = rk.voll.critical
+        g.risk_base_temperature = rk.demand_base_temperature
+        g.risk_heating_coefficient = rk.demand_heating_coefficient
+        g.risk_cooling_coefficient = rk.demand_cooling_coefficient
+        g.risk_insurance_premium_rate = rk.insurance_premium_rate
+        g.risk_monte_carlo_samples = rk.monte_carlo_samples
+        g.risk_monte_carlo_seed = rk.monte_carlo_seed
+        g.risk_climate_scenarios = [
+            sc.model_dump(mode="python") for sc in rk.climate_scenarios]
+        g.risk_hazard_scenarios = [
+            sc.model_dump(mode="python") for sc in rk.hazard_scenarios]
 
     # visual_scaling is a GUI-only key not in the Pydantic schema,
     # so it must be read from the raw YAML dict.
@@ -2219,12 +2269,14 @@ def config_to_stochastic_scenarios(
     if primary is None:
         return scenarios
     for sc_cfg in getattr(primary, 'stochastic_scenarios', []):
-        # sc_cfg is StochasticScenarioConfig with .multipliers: ScenarioMultipliers
+        # sc_cfg is StochasticScenarioConfig with .multipliers: ScenarioMultipliers.
+        # Only the keys the file sets become rows (legacy keys already translated).
         multipliers: dict[str, float] = {}
         if hasattr(sc_cfg, 'multipliers') and sc_cfg.multipliers is not None:
             mult = sc_cfg.multipliers
-            for k in mult.model_fields:
-                multipliers[k] = float(getattr(mult, k, 1.0))
+            for k in type(mult).model_fields:
+                if k in mult.model_fields_set:
+                    multipliers[k] = float(getattr(mult, k, 1.0))
         sc = GuiStochasticScenario(
             name=sc_cfg.name,
             probability=sc_cfg.probability,
@@ -2255,6 +2307,7 @@ def global_settings_to_config_dict(
     config_dict["temporal"]["investment_resolution"] = g.investment_resolution
     config_dict["temporal"]["primary_energy_resolution"] = g.primary_energy_resolution
     config_dict["temporal"]["use_rolling_horizon"] = g.use_rolling_horizon
+    config_dict["temporal"]["model_clock"] = g.model_clock
 
     config_dict.setdefault("solver", {})
     config_dict["solver"]["name"] = g.solver_name
@@ -2262,7 +2315,6 @@ def global_settings_to_config_dict(
     config_dict["solver"]["time_limit"] = g.solver_time_limit
     config_dict["solver"]["gap"] = g.solver_gap
     config_dict["solver"]["verbose"] = g.solver_verbose
-    config_dict["solver"]["scale_constraints"] = g.solver_scale_constraints
     if g.solver_specific_options:
         config_dict["solver"]["options"] = dict(g.solver_specific_options)
 
@@ -2276,9 +2328,8 @@ def global_settings_to_config_dict(
     config_dict["n1_security"]["generation_reserve_type"] = g.n1_generation_reserve_type
     config_dict["n1_security"]["generation_reserve_percentage"] = g.n1_generation_reserve_percentage
     config_dict["n1_security"]["scopf_enabled"] = g.n1_scopf_enabled
-    config_dict["n1_security"]["scopf_max_iterations"] = g.n1_scopf_max_iterations
-    config_dict["n1_security"]["scopf_violation_tolerance"] = g.n1_scopf_violation_tolerance
     config_dict["n1_security"]["corrective_enabled"] = g.n1_corrective_enabled
+    config_dict["n1_security"]["compute_security_cost"] = g.n1_compute_security_cost
     config_dict["n1_security"]["contingency_depth"] = g.n1_contingency_depth
     config_dict["n1_security"]["redistribution_mode"] = g.n1_redistribution_mode
     config_dict["n1_security"]["pi_screening_threshold"] = g.n1_pi_screening_threshold
@@ -2289,9 +2340,15 @@ def global_settings_to_config_dict(
     config_dict["master_problem"]["stochastic"] = g.mp_stochastic
     config_dict["master_problem"]["representative_days"] = g.mp_representative_days
     config_dict["master_problem"]["min_day_separation"] = g.mp_min_day_separation
+    config_dict["master_problem"]["critical_days"] = g.mp_critical_days
+    # 0 in the form = derived from the data (None)
+    config_dict["master_problem"]["storage_firm_hours"] = (
+        g.mp_storage_firm_hours if g.mp_storage_firm_hours > 0 else None)
     config_dict["master_problem"]["solver_method"] = g.mp_solver_method
     config_dict["master_problem"]["benders_max_iterations"] = g.mp_benders_max_iterations
     config_dict["master_problem"]["benders_tolerance"] = g.mp_benders_tolerance
+    if g.mp_solver_options:
+        config_dict["master_problem"]["solver_options"] = dict(g.mp_solver_options)
     config_dict["master_problem"]["use_tsam"] = g.mp_use_tsam
     config_dict["master_problem"]["tsam_num_periods"] = g.mp_tsam_num_periods
     config_dict["master_problem"]["tsam_method"] = g.mp_tsam_method
@@ -2343,6 +2400,47 @@ def global_settings_to_config_dict(
     config_dict["risk"]["insurance_premium_rate"] = g.risk_insurance_premium_rate
     config_dict["risk"]["monte_carlo_samples"] = g.risk_monte_carlo_samples
     config_dict["risk"]["monte_carlo_seed"] = g.risk_monte_carlo_seed
+    config_dict["risk"]["climate_scenarios"] = _risk_scenario_dicts(
+        g.risk_climate_scenarios, "climate")
+    config_dict["risk"]["hazard_scenarios"] = _risk_scenario_dicts(
+        g.risk_hazard_scenarios, "hazard")
+
+
+def _risk_scenario_dicts(scenarios, kind: str) -> list[dict]:
+    """Workbench scenario dicts as the schema stores them: keys the schema
+    does not know (``delta_source`` …) are dropped, a scenario the schema
+    rejects is skipped with a warning, and climate probabilities are rescaled
+    to sum to 1, so the saved file still loads."""
+    import logging
+
+    from pydantic import ValidationError
+
+    from esfex.config.schema import ClimateScenarioConfig, HazardScenarioConfig
+
+    model = ClimateScenarioConfig if kind == "climate" else HazardScenarioConfig
+    out = []
+    for sc in scenarios or []:
+        if not isinstance(sc, dict):
+            sc = getattr(sc, "__dict__", {})
+        try:
+            cfg = model.model_validate(
+                {k: v for k, v in sc.items() if k in model.model_fields})
+        except ValidationError as exc:
+            logging.getLogger(__name__).warning(
+                "Risk %s scenario %r not saved: %s", kind, sc.get("name"), exc)
+            continue
+        out.append(cfg.model_dump(mode="python"))
+    # The schema requires climate probabilities to sum to 1 (they weigh the
+    # futures); after a scenario is removed in the workbench they may not,
+    # and the saved file would no longer load. Rescale them instead.
+    total = sum(sc["probability"] for sc in out)
+    if kind == "climate" and out and total > 0 and abs(total - 1.0) > 0.01:
+        logging.getLogger(__name__).warning(
+            "Risk climate scenario probabilities sum to %.4f; rescaled to 1 "
+            "on save.", total)
+        for sc in out:
+            sc["probability"] = sc["probability"] / total
+    return out
 
 
 def stochastic_scenarios_to_config_dict(
@@ -2355,18 +2453,50 @@ def stochastic_scenarios_to_config_dict(
     scenarios : list of GuiStochasticScenario
     sys_dict : dict
         The system-level dict (not top-level config dict).
+
+    An empty list writes ``stochastic_scenarios: []``, so deleting every
+    scenario in the Studio persists on save.
     """
-    if not scenarios:
-        return
+    # Legacy keys are written under their model names; keys with no effect
+    # are dropped with a warning.
     sys_dict["stochastic_scenarios"] = [
         {
             "name": sc.name,
             "probability": sc.probability,
             "description": sc.description,
-            "multipliers": dict(sc.multipliers),
+            "multipliers": normalize_scenario_multipliers(dict(sc.multipliers)),
         }
         for sc in scenarios
     ]
+
+
+def rename_system_in_config(
+    config: ESFEXConfig | None, old_name: str, new_name: str,
+) -> None:
+    """Rename a system everywhere in a loaded base config, in place.
+
+    The Studio saves on top of the loaded config, so a renamed system must
+    keep its non-GUI fields (they live under the old key) and its place in
+    ``meta_network.systems`` (the first entry is the primary system) and in
+    ``meta_network.systems_links``. Order of ``systems`` is preserved.
+    """
+    if config is None or old_name == new_name:
+        return
+    systems = getattr(config, "systems", None)
+    if isinstance(systems, dict) and old_name in systems:
+        renamed = {}
+        for name, sys_cfg in systems.items():
+            if name == old_name:
+                sys_cfg.name = new_name
+                renamed[new_name] = sys_cfg
+            else:
+                renamed[name] = sys_cfg
+        config.systems = renamed
+    meta = getattr(config, "meta_network", None)
+    if meta is not None:
+        meta.systems = [new_name if s == old_name else s for s in meta.systems]
+        for sl in meta.systems_links:
+            sl.systems = [new_name if s == old_name else s for s in sl.systems]
 
 
 def gui_state_to_yaml(
@@ -2377,21 +2507,36 @@ def gui_state_to_yaml(
     global_settings: GuiGlobalSettings | None = None,
     stochastic_scenarios: list[GuiStochasticScenario] | None = None,
     geo_assets: dict | None = None,
+    data_base_dir: str | Path | None = None,
+    last_results_file: str | Path | None = None,
 ) -> None:
     """Export GUI state to YAML, preserving non-GUI config fields.
 
     ``geo_assets`` (a ``{asset_id: _GeoAssetInfo-like}`` mapping) is written as a
     top-level GUI-only ``_geo_assets`` key with the GeoJSON inlined, so projects
-    stay self-contained (and ride along inside a ``.esfexp`` bundle)."""
+    stay self-contained (and ride along inside a ``.esfexp`` bundle).
+
+    ``data_base_dir`` is the directory the relative data paths of the states
+    resolve against (the folder the project was loaded from). When the output
+    file lives elsewhere, each relative demand / availability / inflow path is
+    rebased onto the output folder (or made absolute when the file is not
+    under it) so the written config still finds its data.
+
+    ``last_results_file`` (the project's remembered results file) is written as
+    the top-level GUI-only ``_last_results`` key, relative to the output folder
+    when the file lies under it, absolute otherwise."""
     config_dict = base_config.model_dump(mode="python", by_alias=True)
 
     # Update meta_network.systems — use selected systems if available,
     # otherwise include all GUI systems
+    # (names that are no longer GUI systems are dropped, so a stale selection
+    # can never point the run at a missing system).
     config_dict.setdefault("meta_network", {})
-    if global_settings and global_settings.systems_to_simulate:
-        config_dict["meta_network"]["systems"] = list(global_settings.systems_to_simulate)
-    else:
-        config_dict["meta_network"]["systems"] = list(states.keys())
+    selected = [
+        s for s in (global_settings.systems_to_simulate if global_settings else [])
+        if s in states
+    ]
+    config_dict["meta_network"]["systems"] = selected or list(states.keys())
 
     # Drop systems that were deleted in the GUI. config_dict is a full copy of
     # base_config, so a deleted system still carries its whole definition here;
@@ -2434,16 +2579,21 @@ def gui_state_to_yaml(
             config_dict["systems"][sys_name] = {"name": sys_name}
         sys_dict = config_dict["systems"][sys_name]
         _apply_gui_state_to_dict(state, sys_dict)
+        _drop_shadowed_aliases(SystemConfig, sys_dict)
 
-    if inter_system_links:
+    # ``None`` keeps the base config's entries; a list (even empty) replaces
+    # them, so deleting the last link or scenario in the GUI persists.
+    if inter_system_links is not None:
         inter_system_links_to_config_dict(inter_system_links, config_dict)
 
     if global_settings:
         global_settings_to_config_dict(global_settings, config_dict)
 
-    if stochastic_scenarios:
-        # Write stochastic scenarios to the primary (first) system dict
-        primary_name = next(iter(states), None)
+    if stochastic_scenarios is not None:
+        # Write stochastic scenarios to the primary system dict: the first
+        # simulated system, which is where config_to_stochastic_scenarios
+        # and the runner read them from.
+        primary_name = (config_dict["meta_network"]["systems"] or [None])[0]
         if primary_name and primary_name in config_dict.get("systems", {}):
             stochastic_scenarios_to_config_dict(
                 stochastic_scenarios, config_dict["systems"][primary_name]
@@ -2453,6 +2603,8 @@ def gui_state_to_yaml(
     config_dict = _to_native(config_dict)
 
     output_path = Path(output_path)
+    if data_base_dir is not None:
+        _rebase_data_paths(config_dict, Path(data_base_dir), output_path.parent)
     if geo_assets:
         config_dict["_geo_assets"] = {
             aid: {
@@ -2462,9 +2614,44 @@ def gui_state_to_yaml(
             }
             for aid, info in geo_assets.items()
         }
+    if last_results_file:
+        from esfex.visualization.data.project_results import (
+            RESULTS_KEY, results_ref_for,
+        )
+        config_dict[RESULTS_KEY] = results_ref_for(
+            last_results_file, output_path.parent)
 
     with open(output_path, "w", encoding="utf-8") as f:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+
+
+def _rebase_data_paths(config_dict: dict, src_dir: Path, dest_dir: Path) -> None:
+    """Rewrite relative data paths written for ``src_dir`` so they resolve the
+    same from ``dest_dir``: relative to ``dest_dir`` when the file lies under
+    it (the runner refuses ``../`` paths), absolute otherwise."""
+    import os
+
+    from esfex.visualization.data.project_bundle import map_data_paths
+
+    src = Path(os.path.abspath(src_dir))
+    dest = Path(os.path.abspath(dest_dir))
+    if src == dest:
+        return
+
+    def _rebase(raw: str, _kind: str):
+        p = Path(raw)
+        if p.is_absolute():
+            return None
+        target = Path(os.path.normpath(src / p))
+        if not target.exists() and (Path.cwd() / p).exists():
+            # Loaders fall back to the CWD for relative paths; keep that file.
+            target = Path(os.path.normpath(Path.cwd() / p))
+        try:
+            return target.relative_to(dest).as_posix()
+        except ValueError:
+            return str(target)
+
+    map_data_paths(config_dict, _rebase)
 
 
 def _to_native(obj):
@@ -2677,6 +2864,48 @@ def _build_fuel_transport_routes(state: GuiSystemState) -> list[dict]:
     return routes
 
 
+def _drop_shadowed_aliases(model, d: dict) -> None:
+    """Drop the alias key of every *model* field also present by name.
+
+    The base config is dumped by alias (``TARGET_RE_PENETRATION``) and the
+    Studio then writes its edited value by field name
+    (``target_re_penetration``); pydantic prefers the alias, so the stale
+    value would win on the next load.
+    """
+    for name, field in model.model_fields.items():
+        if field.alias and field.alias != name and name in d:
+            d.pop(field.alias, None)
+
+
+def _sync_nominal_frequency(state: GuiSystemState, sys_dict: dict) -> None:
+    """Make the system's ``frequency_nominal`` the frequency its buses run at.
+
+    The Grid Builder sets the mains frequency of the region on every bus,
+    generator and line, but nothing set the system-level nominal frequency,
+    so a 60 Hz grid kept the 50 Hz default. A nominal frequency that none of
+    the AC buses runs at becomes their most common frequency (one a mixed
+    50/60 Hz system's buses run at is kept), and ``frequency_nadir_limit``
+    moves with it so the margin below nominal is unchanged (49 Hz on 50 Hz
+    becomes 59 Hz on 60 Hz). ``rocof_limit`` is a protection setting in Hz/s
+    and stays as it is.
+    """
+    bus_freqs = {
+        float(b.frequency_hz) for b in state.buses.values()
+        if b.current_type != "DC" and (b.frequency_hz or 0) > 0
+    }
+    f_bus = majority_ac_frequency(state.buses.values())
+    if not f_bus:
+        return
+    f_old = float(sys_dict.get("frequency_nominal")
+                  or SystemConfig.model_fields["frequency_nominal"].default)
+    if f_old in bus_freqs:
+        return
+    nadir = float(sys_dict.get("frequency_nadir_limit")
+                  or SystemConfig.model_fields["frequency_nadir_limit"].default)
+    sys_dict["frequency_nominal"] = f_bus
+    sys_dict["frequency_nadir_limit"] = nadir + (f_bus - f_old)
+
+
 def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
     """Mutate *sys_dict* to reflect *state*."""
     n = len(state.nodes)
@@ -2704,12 +2933,27 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
         if any(c["latitude"] != 0.0 or c["longitude"] != 0.0 for c in coords):
             sys_dict["nodes"]["node_coordinates"] = coords
 
-    # Rebuild adjacency matrix (SUM parallel lines between same node pair)
+    # Rebuild adjacency matrix (SUM parallel lines and transformers between
+    # the same node pair: a transformer whose ends sit in two nodes carries
+    # power between them as much as a line does).
+    # Derive each end's node from its BUS (bus.parent_node is the authoritative
+    # mapping and is kept in sync when nodes are removed); the line's own
+    # from_node/to_node are deprecated mirrors that go stale on any index shift
+    # and would wire the matrix between the wrong node pairs entirely.
+    _bus_parent = {bid: int(b.parent_node) for bid, b in state.buses.items()}
     connections = [0.0] * (n * n)
     for line in state.transmission_lines:
-        if line.from_node < n and line.to_node < n:
-            connections[line.from_node * n + line.to_node] += line.capacity_mw
-            connections[line.to_node * n + line.from_node] += line.capacity_mw
+        fn = _bus_parent.get(line.from_bus, line.from_node)
+        tn = _bus_parent.get(line.to_bus, line.to_node)
+        if 0 <= fn < n and 0 <= tn < n:
+            connections[fn * n + tn] += line.capacity_mw
+            connections[tn * n + fn] += line.capacity_mw
+    for tr in state.transformers:
+        fn = _bus_parent.get(tr.from_bus, tr.from_node)
+        tn = _bus_parent.get(tr.to_bus, tr.to_node)
+        if fn != tn and 0 <= fn < n and 0 <= tn < n:
+            connections[fn * n + tn] += tr.rated_power_mva
+            connections[tn * n + fn] += tr.rated_power_mva
     sys_dict.setdefault("nodes", {})
     sys_dict["nodes"]["nodes_connections"] = connections
     sys_dict["nodes"]["num_nodes"] = n
@@ -2776,28 +3020,31 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             gen_dict["cascade_delay_hours"] = int(getattr(rep, 'cascade_delay_hours', 0) or 0)
         # Rebuild per-node arrays
         for field_name in _GEN_SCALAR_FIELDS:
-            arr = [0] * n if field_name in ("life_time", "initial_age", "min_up", "min_down") else [0.0] * n
+            if field_name == "num_units":
+                arr = [1] * n   # at least one unit, also where there is none
+            elif field_name in ("life_time", "initial_age", "min_up", "min_down"):
+                arr = [0] * n
+            else:
+                arr = [0.0] * n
             for node_idx, inst in node_instances.items():
                 arr[node_idx] = getattr(inst, field_name)
             gen_dict[field_name] = arr
-        # Add invest fields from portfolio
+        # Add invest cost from portfolio
         inv_cost_arr = [0.0] * n
-        inv_max_arr = [0.0] * n
         for entry in state.investment_portfolio.values():
             if entry.technology_type == "generator" and entry.target_key == unit_key:
                 for nd in entry.node_data:
                     if 0 <= nd.node_index < n:
                         inv_cost_arr[nd.node_index] = nd.invest_cost
-                        inv_max_arr[nd.node_index] = nd.invest_max
         gen_dict["invest_cost"] = inv_cost_arr
-        gen_dict["invest_max_power"] = inv_max_arr
         # Export fuel cost curve if any instance uses non-flat
         _has_curve = any(
             getattr(inst, 'fuel_cost_curve_type', 'flat') != 'flat'
             for inst in node_instances.values()
         )
         if _has_curve:
-            _curve_arr = [None] * n
+            # Nodes without an instance get a flat curve (None does not load)
+            _curve_arr = [{"curve_type": "flat"} for _ in range(n)]
             for _ni, _inst in node_instances.items():
                 _ct = getattr(_inst, 'fuel_cost_curve_type', 'flat')
                 _cd = getattr(_inst, 'fuel_cost_curve_data', None)
@@ -2845,31 +3092,21 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
         # Add invest fields from portfolio
         inv_cost_arr = [0.0] * n
         inv_max_arr = [0.0] * n
-        inv_cost_energy_arr = [0.0] * n
-        inv_max_cap_arr = [0.0] * n
         for entry in state.investment_portfolio.values():
             if entry.technology_type == "battery" and entry.target_key == unit_key:
                 for nd in entry.node_data:
                     if 0 <= nd.node_index < n:
                         inv_cost_arr[nd.node_index] = nd.invest_cost
                         inv_max_arr[nd.node_index] = nd.invest_max
-                for ni, val in entry.invest_cost_energy.items():
-                    if 0 <= ni < n:
-                        inv_cost_energy_arr[ni] = val
-                for ni, val in entry.invest_max_capacity.items():
-                    if 0 <= ni < n:
-                        inv_max_cap_arr[ni] = val
         bat_dict["invest_cost"] = inv_cost_arr
         bat_dict["invest_max_power"] = inv_max_arr
-        bat_dict["invest_cost_energy"] = inv_cost_energy_arr
-        bat_dict["invest_max_capacity"] = inv_max_cap_arr
         # Export discharge cost curve if any instance uses non-flat
         _has_dc_curve = any(
             getattr(inst, 'discharge_cost_curve_type', 'flat') != 'flat'
             for inst in node_instances.values()
         )
         if _has_dc_curve:
-            _dc_arr = [None] * n
+            _dc_arr = [{"curve_type": "flat"} for _ in range(n)]
             for _ni, _inst in node_instances.items():
                 _ct = getattr(_inst, 'discharge_cost_curve_type', 'flat')
                 _cd = getattr(_inst, 'discharge_cost_curve_data', None)
@@ -2952,6 +3189,19 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
         zero_capacity = (getattr(ln, "capacity_mw", 0) or 0) <= 0
         return has_eq_endpoint and zero_capacity
 
+    def _line_node(ln, end: str) -> int:
+        """Node index of one end of *ln*, from its bus (the authoritative map).
+
+        ``from_node``/``to_node`` on the line are deprecated mirrors that go
+        stale whenever node indices shift; ``bus.parent_node`` is maintained.
+        Falls back to the stored value only when the bus is unknown.
+        """
+        bus_id = ln.from_bus if end == "from" else ln.to_bus
+        bus = state.buses.get(bus_id) if bus_id else None
+        if bus is not None:
+            return int(bus.parent_node)
+        return int(ln.from_node if end == "from" else ln.to_node)
+
     real_lines = [
         ln for ln in state.transmission_lines if not _is_wire_line(ln)
     ]
@@ -2961,8 +3211,16 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
                 k: v
                 for k, v in {
                     "line_id": ln.line_id,
-                    "from_node": ln.from_node,
-                    "to_node": ln.to_node,
+                    # from_node/to_node are DEPRECATED mirrors of the line's
+                    # buses (see GuiTransmissionLine): derive them from
+                    # ``bus.parent_node``, the authoritative mapping, instead
+                    # of trusting the stored ints. Node indices shift whenever
+                    # a node is removed, and the stored copies do not follow —
+                    # 614 of 673 Japan lines pointed at the wrong node pair
+                    # after the build pruned 7 bus-less nodes, scrambling the
+                    # node adjacency the whole model is built on.
+                    "from_node": _line_node(ln, "from"),
+                    "to_node": _line_node(ln, "to"),
                     "from_bus": _bus_id_to_idx.get(ln.from_bus) if ln.from_bus else None,
                     "to_bus": _bus_id_to_idx.get(ln.to_bus) if ln.to_bus else None,
                     "capacity_mw": ln.capacity_mw,
@@ -2970,7 +3228,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
                     "voltage_kv": ln.voltage_kv,
                     "line_type": ln.line_type,
                     "length_km": ln.length_km,
-                    "base_impedance": ln.base_impedance,
                     "reactance_per_km": ln.reactance_per_km,
                     "reactance_pu": ln.reactance_pu,
                     "resistance_pu": ln.resistance_pu,
@@ -3009,6 +3266,7 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             }
             for bus in state.buses.values()
         ]
+        _sync_nominal_frequency(state, sys_dict)
 
     # Transformers
     if state.transformers:
@@ -3141,8 +3399,10 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
 
     # Deterministic scheduled interruptions (outage calendar)
     if getattr(state, "outage_schedule", None):
-        sys_dict["outage_schedule"] = [
-            {
+        _instances = {"generator": state.generators, "battery": state.batteries}
+        sys_dict["outage_schedule"] = []
+        for ow in state.outage_schedule:
+            od = {
                 "element_type": ow.element_type,
                 "element_id": ow.element_id,
                 "start_hour": int(ow.start_hour),
@@ -3150,8 +3410,16 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
                 "availability": float(ow.availability),
                 "label": ow.label,
             }
-            for ow in state.outage_schedule
-        ]
+            if getattr(ow, "recurring", False):
+                od["recurring"] = True
+            # Calendar ids are instance ids; the config uses unit key + node.
+            inst = (_instances.get(ow.element_type) or {}).get(ow.element_id)
+            if inst is not None:
+                od["element_id"] = inst.unit_key
+                od["node"] = int(inst.node)
+            elif getattr(ow, "node", None) is not None:
+                od["node"] = int(ow.node)
+            sys_dict["outage_schedule"].append(od)
 
     # Development zones
     if state.development_zones:
@@ -3343,15 +3611,23 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
     sys_dict["demand_scale"] = s.demand_scale
     sys_dict["discount_rate"] = s.discount_rate
     sys_dict["base_lcoe"] = s.base_lcoe
+    sys_dict["npv_annual_return_rate"] = s.npv_annual_return_rate
+    sys_dict["npv_retirement"] = s.npv_retirement
+    sys_dict["npv_retirement_max_iterations"] = s.npv_retirement_max_iterations
+    sys_dict["npv_retirement_threshold"] = s.npv_retirement_threshold
     sys_dict["target_re_penetration"] = s.target_re_penetration
     sys_dict["min_annual_increment"] = s.min_annual_increment
     sys_dict["max_annual_increment"] = s.max_annual_increment
-    sys_dict["max_annual_system_cost"] = s.max_annual_system_cost
-    sys_dict["max_npv_penalty_per_mw"] = s.max_npv_penalty_per_mw
-    sys_dict["max_decommission_cost_per_mw"] = s.max_decommission_cost_per_mw
-    sys_dict["force_replacement"] = s.force_replacement
+    sys_dict["max_annual_investment"] = s.max_annual_investment
+    sys_dict["budget_scope"] = s.budget_scope
+    if s.max_annual_operating_cost:
+        sys_dict["max_annual_operating_cost"] = s.max_annual_operating_cost
+    else:
+        sys_dict.pop("max_annual_operating_cost", None)   # off
+    # Saved under the new name only (max_annual_system_cost is read as it)
+    for old_key in LEGACY_SYSTEM_KEYS:
+        sys_dict.pop(old_key, None)
     sys_dict["life_extension_cost_factor"] = s.life_extension_cost_factor
-    sys_dict["LOSS_DEMAND_TRHESHOLD"] = s.loss_demand_threshold
     sys_dict["inertia_limit_threshold"] = s.inertia_limit_threshold
     sys_dict["sim_rooftop"] = s.sim_rooftop
 
@@ -3363,7 +3639,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
         "LOSS_OF_RESERVE_DYNAMIC": p.loss_of_reserve_dynamic,
         "LOSS_OF_INERTIA": p.loss_of_inertia,
         "TransferMargin": p.transfer_margin,
-        "Curtailment": p.curtailment,
         "max_curtailment_ratio": p.max_curtailment_ratio,
         "rooftop_curtailment": p.rooftop_curtailment,
         "CO2_cost": p.co2_cost,
@@ -3371,13 +3646,8 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
         "FRE_penetration_loss": p.fre_penetration_loss,
         "EV_loss": p.ev_loss,
         "loss_of_fuel_supply": p.loss_of_fuel_supply,
-        "coupling_slack_penalty": p.coupling_slack_penalty,
-        "transport_congestion": p.transport_congestion,
-        "storage_violation": p.storage_violation,
         "non_electric_demand_loss": p.non_electric_demand_loss,
         "curtailment_cost": p.curtailment_cost,
-        "curtailment_excess_penalty": p.curtailment_excess_penalty,
-        "re_excess_penalty": p.re_excess_penalty,
     }
 
     # CO2 Budget (from settings)
@@ -3434,11 +3704,9 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             entry: dict[str, Any] = {
                 "name": rep.name,
                 "fuel": rep.fuel,
-                "technology": rep.technology,
             }
             for fld in (
-                'life_time', 'initial_age', 'degradation_rate',
-                'rated_power', 'min_power', 'ramp_up', 'ramp_down',
+                'life_time', 'rated_power', 'ramp_up', 'ramp_down',
                 'eff_at_rated', 'eff_at_min',
                 'fixed_cost', 'variable_cost',
             ):
@@ -3499,9 +3767,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             "simulation_seed": rt.simulation_seed,
             "performance_ratio": rt.performance_ratio,
             "degradation_rate": rt.degradation_rate,
-            "cost_per_kw": rt.cost_per_kw,
-            "cost_reduction_rate": rt.cost_reduction_rate,
-            "o_and_m_cost": rt.o_and_m_cost,
             "base_year": rt.base_year,
             "target_year": rt.target_year,
             "systems_per_node": rt.systems_per_node,
@@ -3519,7 +3784,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
                 "flexibility_ratio": sec.flexibility_ratio,
                 "criticality": sec.criticality,
                 "delay_tolerance": sec.delay_tolerance,
-                "price_sensitivity": sec.price_sensitivity,
             }
             for sid, sec in state.demand_sectors.items()
         }
@@ -3536,11 +3800,6 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
             did: {
                 "fuel": ned.fuel,
                 "unit": ned.unit,
-                "is_flexible": ned.is_flexible,
-                "flexibility_ratio": ned.flexibility_ratio,
-                "criticality": ned.criticality,
-                "delay_tolerance": ned.delay_tolerance,
-                "price_sensitivity": ned.price_sensitivity,
                 "demand": ned.demand,
             }
             for did, ned in state.non_electric_demand.items()
@@ -3579,6 +3838,10 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
     for i, fe in enumerate(state.fuel_entry_points):
         if fe.coordinate and (fe.coordinate.lat != 0.0 or fe.coordinate.lng != 0.0):
             layout.setdefault("fuel_entries", {})[str(i)] = [fe.coordinate.lat, fe.coordinate.lng]
+    user_roles = sorted(
+        bid for bid, bus in state.buses.items() if bus.role_user_set)
+    if user_roles:
+        layout["user_set_bus_roles"] = user_roles
     if layout:
         sys_dict["_gui_layout"] = layout
 

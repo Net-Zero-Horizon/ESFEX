@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from esfex.utils.temporal import year_series_8760
 from esfex.visualization.i18n import tr
 from esfex.visualization.ui_scale import scale_qss_fonts
 
@@ -199,12 +200,12 @@ class SolarCharacterizationStep(QWidget):
         }
 
         lines = [
-            f"<b>{tr('wizard_solar_pv.mean_ghi')}:</b> {mean_ghi_wm2:.0f} W/m\u00b2 "
-            f"({float(np.nansum(ghi)) / 1000.0:.0f} kWh/m\u00b2/yr)",
-            f"<b>{tr('wizard_solar_pv.peak_sun_hours')}:</b> {psh:.1f} h/day",
-            f"<b>{tr('wizard_solar_pv.performance_ratio')}:</b> {pr:.3f} ({pr * 100:.1f}%)",
-            f"<b>{tr('wizard_solar_pv.clearness_index')}:</b> {kt:.3f}",
-            f"<b>{tr('wizard_solar_pv.mean_cell_temp')}:</b> {mean_cell_temp:.1f} \u00b0C",
+            tr("wizard_solar_pv.stat_mean_ghi", ghi=f"{mean_ghi_wm2:.0f}",
+               annual=f"{float(np.nansum(ghi)) / 1000.0:.0f}"),
+            tr("wizard_solar_pv.stat_psh", v=f"{psh:.1f}"),
+            tr("wizard_solar_pv.stat_pr", v=f"{pr:.3f}", pct=f"{pr * 100:.1f}"),
+            tr("wizard_solar_pv.stat_kt", v=f"{kt:.3f}"),
+            tr("wizard_solar_pv.stat_cell_temp", v=f"{mean_cell_temp:.1f}"),
         ]
         self._stats_label.setText("<br>".join(lines))
 
@@ -232,7 +233,7 @@ class SolarCharacterizationStep(QWidget):
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
             from matplotlib.figure import Figure
         except ImportError:
-            self._chart_layout.addWidget(QLabel("matplotlib not available"))
+            self._chart_layout.addWidget(QLabel(tr("wizard_solar_pv.no_matplotlib")))
             return
 
         fig = Figure(figsize=(10, 7))
@@ -249,7 +250,7 @@ class SolarCharacterizationStep(QWidget):
             ax1.hist(ghi_day, bins=bins, density=True, alpha=0.6,
                      color="#f39c12", edgecolor="white", linewidth=0.5)
         ax1.set_xlabel("GHI (W/m\u00b2)", color="black")
-        ax1.set_ylabel("Probability Density", color="black")
+        ax1.set_ylabel(tr("wizard_solar_pv.axis_prob_density"), color="black")
         ax1.set_title(tr("wizard_solar_pv.ghi_distribution"), color="black", fontsize=10)
 
         # 2. Monthly irradiance
@@ -262,14 +263,11 @@ class SolarCharacterizationStep(QWidget):
                 months, totals = compute_monthly_irradiance(
                     np.asarray(hd.ghi), hd.timestamps,
                 )
-                month_labels = [
-                    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-                ]
+                month_labels = tr("wizard_solar_pv.month_abbr").split(",")
                 ax2.bar(months, totals, color="#e67e22", edgecolor="white", alpha=0.85)
                 ax2.set_xticks(months)
                 ax2.set_xticklabels(month_labels, fontsize=7)
-                ax2.set_xlabel("Month", color="black")
+                ax2.set_xlabel(tr("wizard_solar_pv.axis_month"), color="black")
                 ax2.set_ylabel("GHI (kWh/m\u00b2)", color="black")
         ax2.set_title(tr("wizard_solar_pv.monthly_irradiance"), color="black", fontsize=10)
 
@@ -286,8 +284,8 @@ class SolarCharacterizationStep(QWidget):
                 ax3.plot(hours, hourly_means, "o-", color="#f39c12",
                          markersize=4, linewidth=1.5)
                 ax3.fill_between(hours, 0, hourly_means, alpha=0.2, color="#f39c12")
-                ax3.set_xlabel("Hour of Day", color="black")
-                ax3.set_ylabel("Mean GHI (W/m\u00b2)", color="black")
+                ax3.set_xlabel(tr("wizard_solar_pv.axis_hour_of_day"), color="black")
+                ax3.set_ylabel(tr("wizard_solar_pv.axis_mean_ghi"), color="black")
                 ax3.set_xlim(-0.5, 23.5)
                 ax3.set_xticks(range(0, 24, 3))
         ax3.set_title(tr("wizard_solar_pv.diurnal_irradiance"), color="black", fontsize=10)
@@ -308,7 +306,8 @@ class SolarCharacterizationStep(QWidget):
                 mask = ghi_cell[::step] > 10  # daytime only
                 ax4.scatter(
                     temp_cell[::step][mask], t_cell[::step][mask],
-                    s=3, alpha=0.3, color="#e74c3c", label="Cell temp",
+                    s=3, alpha=0.3, color="#e74c3c",
+                    label=tr("wizard_solar_pv.legend_cell_temp"),
                 )
                 # Reference line
                 t_range = np.linspace(
@@ -316,8 +315,8 @@ class SolarCharacterizationStep(QWidget):
                 )
                 ax4.plot(t_range, t_range, "--", color="#888", linewidth=1,
                          label="T_cell = T_amb")
-                ax4.set_xlabel("Ambient Temperature (\u00b0C)", color="black")
-                ax4.set_ylabel("Cell Temperature (\u00b0C)", color="black")
+                ax4.set_xlabel(tr("wizard_solar_pv.axis_ambient_temp"), color="black")
+                ax4.set_ylabel(tr("wizard_solar_pv.axis_cell_temp"), color="black")
                 ax4.legend(fontsize=7, facecolor="white", edgecolor="#ccc",
                            labelcolor="black")
         ax4.set_title(tr("wizard_solar_pv.temp_analysis"), color="black", fontsize=10)
@@ -522,7 +521,7 @@ class SolarFinancialStep(QWidget):
         self._sens_param.addItem(tr("wizard_solar_pv.capex"), "capex_per_kw")
         self._sens_param.addItem(tr("wizard_solar_pv.discount_rate"), "discount_rate")
         self._sens_param.addItem(tr("wizard_solar_pv.elec_price"), "electricity_price")
-        self._sens_param.addItem("CF", "capacity_factor")
+        self._sens_param.addItem(tr("wizard_solar_pv.sens_cf"), "capacity_factor")
         self._sens_param.currentIndexChanged.connect(self._update_sensitivity)
         sens_row.addWidget(self._sens_param, 1)
         layout.addLayout(sens_row)
@@ -568,16 +567,15 @@ class SolarFinancialStep(QWidget):
         results = compute_pv_financials(inputs)
         self._financial_results = results
 
-        lines = [
-            f"<b>{tr('wizard_solar_pv.lcoe')}:</b> {results.lcoe:.2f} $/MWh",
-            f"<b>{tr('wizard_solar_pv.npv')}:</b> ${results.npv:,.0f}",
-            f"<b>{tr('wizard_solar_pv.irr')}:</b> {results.irr * 100:.1f}%",
-            f"<b>{tr('wizard_solar_pv.payback')}:</b> {results.payback_years:.1f} yr",
-            f"<b>{tr('wizard_solar_pv.annual_gen')}:</b> "
-            f"{results.annual_revenue / inputs.electricity_price:,.0f} MWh/yr",
-            f"<b>CAPEX:</b> ${results.capex_total:,.0f}",
-        ]
-        self._results_label.setText("<br>".join(lines))
+        self._results_label.setText(tr(
+            "wizard_solar_pv.fin_results_html",
+            lcoe=f"{results.lcoe:.2f}",
+            npv=f"{results.npv:,.0f}",
+            irr=f"{results.irr * 100:.1f}",
+            payback=f"{results.payback_years:.1f}",
+            gen=f"{results.annual_revenue / inputs.electricity_price:,.0f}",
+            capex=f"{results.capex_total:,.0f}",
+        ))
         self._btn_export.setEnabled(True)
         self._update_sensitivity()
 
@@ -629,11 +627,11 @@ class SolarFinancialStep(QWidget):
 
         ax.plot(sweep, lcoes, "-", color="#e74c3c", linewidth=2)
         ax.axvline(current_val, color="#2980b9", linestyle="--", linewidth=1,
-                   label=f"Current: {current_val:.3g}")
+                   label=tr("wizard_solar_pv.sens_current", v=f"{current_val:.3g}"))
         ax.axhline(self._financial_results.lcoe, color="#888", linestyle=":",
                    linewidth=1)
         ax.set_xlabel(self._sens_param.currentText(), color="black")
-        ax.set_ylabel("LCOE ($/MWh)", color="black")
+        ax.set_ylabel(tr("wizard_solar_pv.axis_lcoe"), color="black")
         ax.set_title(tr("wizard_solar_pv.sensitivity"), color="black", fontsize=10)
         ax.legend(fontsize=8, facecolor="white", edgecolor="#ccc", labelcolor="black")
 
@@ -814,20 +812,18 @@ class SolarArrayStep(QWidget):
         net_cf = self._capacity_factor * net_factor
 
         lines = [
-            f"<b>{tr('wizard_solar_pv.gcr')}:</b> {gcr:.2f}",
-            f"<b>{tr('wizard_solar_pv.shading_loss')}:</b> {loss * 100:.1f}%",
+            tr("wizard_solar_pv.arr_gcr", v=f"{gcr:.2f}"),
+            tr("wizard_solar_pv.arr_shading", v=f"{loss * 100:.1f}"),
         ]
         if bifi_gain > 0:
-            lines.append(
-                f"<b>{tr('wizard_solar_pv.bifacial_gain')}:</b> +{bifi_gain * 100:.1f}%"
-            )
+            lines.append(tr("wizard_solar_pv.arr_bifacial", v=f"{bifi_gain * 100:.1f}"))
         lines.extend([
-            f"<b>{tr('wizard_solar_pv.net_efficiency')}:</b> {net_factor * 100:.1f}%",
-            f"<b>Gross CF:</b> {self._capacity_factor:.3f} "
-            f"({self._capacity_factor * 100:.1f}%)",
-            f"<b>Net CF:</b> {net_cf:.3f} ({net_cf * 100:.1f}%)",
-            f"<b>{tr('wizard_solar_pv.annual_gen')}:</b> "
-            f"{self._capacity_mw * net_cf * 8760:,.0f} MWh/yr",
+            tr("wizard_solar_pv.arr_net_eff", v=f"{net_factor * 100:.1f}"),
+            tr("wizard_solar_pv.arr_gross_cf", v=f"{self._capacity_factor:.3f}",
+               pct=f"{self._capacity_factor * 100:.1f}"),
+            tr("wizard_solar_pv.arr_net_cf", v=f"{net_cf:.3f}", pct=f"{net_cf * 100:.1f}"),
+            tr("wizard_solar_pv.arr_annual_gen",
+               v=f"{self._capacity_mw * net_cf * 8760:,.0f}"),
         ])
         self._results_label.setText("<br>".join(lines))
         self._btn_export.setEnabled(True)
@@ -858,15 +854,16 @@ class SolarArrayStep(QWidget):
         ax.plot(gcrs, [l * 100 for l in losses], "o-",
                 color="#e67e22", linewidth=2, markersize=5)
         ax.axvline(current_gcr, color="#e74c3c", linestyle="--",
-                   linewidth=1.5, label=f"Selected: {current_gcr:.2f}")
+                   linewidth=1.5,
+                   label=tr("wizard_solar_pv.gcr_selected", v=f"{current_gcr:.2f}"))
 
         # Mark current point
         idx = np.argmin(np.abs(np.array(gcrs) - current_gcr))
         ax.plot(gcrs[idx], losses[idx] * 100, "s",
                 color="#e74c3c", markersize=10, zorder=5)
 
-        ax.set_xlabel(tr("wizard_solar_pv.gcr"), color="black")
-        ax.set_ylabel(tr("wizard_solar_pv.shading_loss") + " (%)", color="black")
+        ax.set_xlabel(tr("wizard_solar_pv.axis_gcr"), color="black")
+        ax.set_ylabel(tr("wizard_solar_pv.axis_shading_loss"), color="black")
         ax.set_title(tr("wizard_solar_pv.gcr_curve"), color="black", fontsize=10)
         ax.legend(fontsize=8, facecolor="white", edgecolor="#ccc", labelcolor="black")
 
@@ -948,8 +945,12 @@ class _SolarProfileWorker(QThread):
         output_dir,
         year,
         parent=None,
+        model_clock=None,
     ):
         super().__init__(parent)
+        # Weather comes in UTC (NASA POWER: local solar time): the profiles
+        # are saved on this clock (None: as they come).
+        self._clock = model_clock
         self._gen_groups = gen_groups
         self._hourly_data = hourly_data
         self._solar_config = solar_config
@@ -964,9 +965,7 @@ class _SolarProfileWorker(QThread):
             from solarex import compute_solar_hourly_cf
             from solarex.core.capacity_factor import _irradiance_to_hourly_cf
         except ImportError:
-            self.error.emit(
-                "Could not import solar CF functions from solarex"
-            )
+            self.error.emit(tr("wizard_solar_pv.avail_import_error"))
             return
 
         try:
@@ -999,11 +998,13 @@ class _SolarProfileWorker(QThread):
                     pct = int(100 * done / total)
 
                     if abs(lat) < 0.01 and abs(lon) < 0.01:
-                        self.progress.emit(pct, f"Skipping {iid} (no position)")
+                        self.progress.emit(
+                            pct, tr("wizard_solar_pv.avail_progress_skip", id=iid))
                         results[iid] = {"status": "skipped", "mean_cf": 0.0}
                         continue
 
-                    self.progress.emit(pct, f"Computing CF for {iid}...")
+                    self.progress.emit(
+                        pct, tr("wizard_solar_pv.avail_progress_compute", id=iid))
 
                     cf = None
 
@@ -1032,13 +1033,11 @@ class _SolarProfileWorker(QThread):
                             tracking=tracking,
                         )
 
-                    cf = np.asarray(cf, dtype=float)
-                    if len(cf) > 8760:
-                        cf = cf[:8760]
-                    elif len(cf) < 8760:
-                        padded = np.zeros(8760)
-                        padded[: len(cf)] = cf
-                        cf = padded
+                    cf = year_series_8760(cf, self._year)
+                    if self._clock is not None:
+                        from esfex.utils.model_clock import weather_to_model_clock
+                        cf = weather_to_model_clock(
+                            cf, data_source, lon, self._clock, self._year)
 
                     profile_array[:, node] = cf
                     mean_cf = float(np.mean(cf))
@@ -1148,7 +1147,7 @@ class SolarAvailabilityStep(QWidget):
             layout.addWidget(self._canvas, 1)
         except ImportError:
             self._canvas = None
-            layout.addWidget(QLabel("(matplotlib not available)"))
+            layout.addWidget(QLabel(tr("wizard_solar_pv.no_matplotlib_paren")))
 
         # Generate button + progress
         gen_row = QHBoxLayout()
@@ -1323,6 +1322,20 @@ class SolarAvailabilityStep(QWidget):
         self._progress.setVisible(True)
         self._progress.setValue(0)
 
+        # Save the profiles on the model clock and record it.
+        clock = None
+        g = getattr(self._model, "global_settings", None)
+        if g is not None:
+            from esfex.utils.model_clock import (
+                resolve_for_nodes,
+                resolve_model_clock,
+            )
+            nodes = list(self._model.state.nodes)
+            clock = (resolve_for_nodes(g.model_clock, nodes) if nodes else
+                     resolve_model_clock(g.model_clock,
+                                         [(i["lat"], i["lon"]) for i in selected]))
+            g.model_clock = clock.zone
+
         self._worker = _SolarProfileWorker(
             dict(groups),
             self._hourly_data,
@@ -1330,6 +1343,7 @@ class SolarAvailabilityStep(QWidget):
             output_dir,
             year,
             parent=self,
+            model_clock=clock,
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
@@ -1424,8 +1438,8 @@ class SolarAvailabilityStep(QWidget):
                 continue
             break  # only preview first
 
-        self._ax.set_xlabel("Hour of year", fontsize=9, color="black")
-        self._ax.set_ylabel("Capacity Factor", fontsize=9, color="black")
+        self._ax.set_xlabel(tr("wizard_solar_pv.axis_hour_of_year"), fontsize=9, color="black")
+        self._ax.set_ylabel(tr("wizard_solar_pv.axis_capacity_factor"), fontsize=9, color="black")
         self._ax.set_title(
             tr("wizard_solar_pv.avail_preview"),
             fontsize=10, color="black",

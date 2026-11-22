@@ -13,8 +13,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
+from esfex.config.legacy_keys import rename_legacy_system_keys
 from esfex.utils.temporal import HOURS_STD_YEAR
 
 
@@ -35,7 +36,22 @@ class FuelConfig(BaseModel):
     # A ge=0 floor here rejected such configs on load/import.
     price_base: float = Field(description="Base price (USD/unit; may be negative, "
                               "e.g. waste-to-energy tipping fees)")
-    price_growth_rate: float = Field(default=0, description="Annual price growth rate")
+    price_growth_rate: float = Field(
+        default=0,
+        description="Annual price growth rate from the first planning year (0.02 = +2 %/year); "
+                    "scales the fuel balance price and the fuel_cost of every unit burning "
+                    "this fuel")
+
+
+def fuel_price_factor(fuels: Optional[dict[str, FuelConfig]], fuel: Optional[str],
+                      year: int, base_year: int) -> float:
+    """Growth of *fuel*'s price from *base_year* (the run's first planning
+    year) to *year*: ``(1 + price_growth_rate) ** (year - base_year)`` of
+    ``fuels[fuel]``; 1 when *fuels* has no such fuel. Same rule as Julia's
+    ``fuel_price_factor`` (primary energy and the master)."""
+    entry = (fuels or {}).get(fuel) if fuel else None
+    rate = float(entry.price_growth_rate) if entry is not None else 0.0
+    return (1.0 + rate) ** (year - base_year) if rate else 1.0
 
 
 class PenaltiesConfig(BaseModel):
@@ -46,22 +62,27 @@ class PenaltiesConfig(BaseModel):
     loss_of_reserve_dynamic: float = Field(default=100, description="$/MW dynamic reserve deficit")
     loss_of_inertia: float = Field(default=200, description="$/MW-s inertia deficit")
     transfer_margin: float = Field(default=100, description="$/MW transfer margin violation")
-    max_curtailment_ratio: float = Field(default=0.05, ge=0, le=1, description="Max curtailment as fraction of RE generation (0.05 = 5%)")
+    max_curtailment_ratio: float = Field(default=0.05, ge=0, le=1, description="Annual cap on curtailment, per system, as a fraction of its RE generation over the year (0.05 = 5%); master only, the dispatch prices curtailment")
     curtailment_cost: float = Field(default=20.0, ge=0, description="$/MWh penalty for curtailed RE energy")
-    curtailment_excess_penalty: float = Field(default=500.0, ge=0, description="$/MWh penalty for curtailment exceeding ratio limit")
-    re_excess_penalty: float = Field(default=100.0, ge=0, description="$/MWh penalty for RE generation exceeding target")
     rooftop_curtailment: float = Field(default=5, description="$/MWh rooftop curtailed")
     co2_cost: float = Field(default=10, description="$/tCO2")
     co2_budget_violation: float = Field(default=500, description="$/tCO2 over budget")
     fre_penetration_loss: float = Field(default=100, description="$/MWh RE shortfall")
-    ev_loss: float = Field(default=10, description="$/MWh EV demand not met")
-    loss_of_fuel_supply: float = Field(default=100, description="$/unit fuel deficit")
-    coupling_slack_penalty: float = Field(default=1.0, description="$/unit PE periodic-hourly coupling slack")
-    transport_congestion: float = Field(default=100, description="$/MW congestion")
-    storage_violation: float = Field(default=100, description="$/MW storage violation")
+    ev_loss: Optional[float] = Field(
+        default=None,
+        description="$/MWh EV driving energy not supplied (default: loss_of_load)",
+    )
+    loss_of_fuel_supply: float = Field(default=100, description="$/unit fuel deficit (at least 10 × the fuel's price plus its largest import cost) and excess supply")
     non_electric_demand_loss: float = Field(default=100, description="$/unit fuel demand unmet")
     soc_violation: float = Field(default=1e6, description="$/MWh SOC limit violation")
-    delay_retirement_per_mw: float = Field(default=50000, description="$/MW delay retirement penalty")
+
+    @model_validator(mode="after")
+    def _default_ev_loss(self) -> "PenaltiesConfig":
+        # Driving energy the fleet cannot supply is unserved demand; a cheap
+        # default makes leaving EVs uncharged cheaper than generating.
+        if self.ev_loss is None:
+            self.ev_loss = self.loss_of_load
+        return self
 
 
 class CO2BudgetConfig(BaseModel):
@@ -69,6 +90,27 @@ class CO2BudgetConfig(BaseModel):
 
     enabled: bool = True
     annual_budget: float = Field(default=1e6, ge=0, description="tonnes CO2 per year")
+
+
+class SystemCO2Budget(BaseModel):
+    """One system's CO2 budget inside a merged multi-system run.
+
+    Built by the multi-system merge (not a YAML key): each original system
+    keeps its own ``co2_budget`` and ``penalties.co2_budget_violation``
+    over its own nodes (``first_node`` .. ``first_node + num_nodes - 1``,
+    0-indexed in the merged network, plus ``extra_nodes``).
+    """
+
+    system: str
+    first_node: int = Field(ge=0)
+    num_nodes: int = Field(ge=0)
+    # Nodes outside the contiguous range that also belong to this system:
+    # development-zone nodes, appended after every system's nodes, join the
+    # system of the bus they connect to.
+    extra_nodes: list[int] = Field(default_factory=list)
+    enabled: bool = True
+    annual_budget: float = Field(ge=0, description="tonnes CO2 per year")
+    violation_penalty: float = Field(description="$/tCO2 over budget")
 
 
 class CriticalityPenalties(BaseModel):
@@ -147,6 +189,8 @@ class TransmissionLineGeo(BaseModel):
     to_node: int = Field(ge=0)
     from_bus: Optional[int] = None   # Bus index (0-indexed), preferred over from_node
     to_bus: Optional[int] = None     # Bus index (0-indexed), preferred over to_node
+    # capacity_mw, reactance_pu, resistance_pu and susceptance_pu are those of
+    # the whole line, all its num_circuits circuits together
     capacity_mw: Optional[float] = None
     waypoints: list[GeoCoordinate] = Field(
         default_factory=list,
@@ -157,9 +201,24 @@ class TransmissionLineGeo(BaseModel):
     # Power flow properties (per-line overrides for global DC power flow defaults)
     length_km: Optional[float] = None
     reactance_pu: Optional[float] = None
+    reactance_per_km: Optional[float] = Field(
+        default=None, ge=0,
+        description="Series reactance of one circuit (ohm/km) used to derive "
+                    "reactance_pu from length_km (divided by num_circuits) "
+                    "when reactance_pu is not set; "
+                    "None or 0 = dc_power_flow.reactance_per_km",
+    )
     resistance_pu: Optional[float] = None
     susceptance_pu: Optional[float] = None
-    num_circuits: int = 1
+    num_circuits: int = Field(
+        default=1,
+        description="Parallel circuits. Descriptive: capacity_mw and the "
+                    "impedances already include every circuit and are not "
+                    "rescaled by it",
+    )
+    # Operating cost of the flow ($ per MWh per km), set on inter-system
+    # links: the master and the dispatch charge length_km × cost_per_mw_km × |flow|
+    cost_per_mw_km: float = Field(default=0.0, ge=0)
 
     # Electrical properties
     frequency_hz: float = Field(default=50.0, gt=0, description="Operating frequency (Hz)")
@@ -328,7 +387,7 @@ class NodeConfig(BaseModel):
     reserve_dynamic: list[float] = Field(default_factory=list, description="Dynamic reserve requirement per node (MW)")
     reserve_duration: list[int] = Field(default_factory=list, description="Reserve duration per node (hours)")
     losses: list[float] = Field(default_factory=list, description="Transmission losses per node (fraction)")
-    transference_invest_cost: list[float] = Field(default_factory=list, description="Transmission investment cost ($/MW)")
+    transference_invest_cost: list[float] = Field(default_factory=list, description="Transmission investment cost per node ($/MW); a corridor costs the higher of its two ends")
     transference_invest_max: list[float] = Field(default_factory=list, description="Max transmission investment (MW)")
 
     # GIS metadata (optional, backward-compatible)
@@ -367,9 +426,11 @@ class NodeConfig(BaseModel):
 class DCPowerFlowConfig(BaseModel):
     """DC power flow model parameters."""
 
-    base_impedance: float = Field(default=100.0, description="Base impedance (Ohm)")
     reactance_per_km: float = Field(default=0.4, description="Line reactance (Ohm/km)")
-    voltage_level_kv: float = Field(default=220.0, description="Nominal voltage (kV)")
+    voltage_level_kv: float = Field(
+        default=220.0,
+        description="Nominal voltage (kV), used for lines without voltage_kv",
+    )
     # NOTE: DC angle-difference limits were removed — in this DC formulation
     # they impose a non-physical pf ≤ b_line·max_angle throttle.  DC flows are
     # bounded by the explicit thermal pf ≤ line_capacity constraints.
@@ -545,6 +606,67 @@ def normalize_cost_curve(
 # =============================================================================
 
 
+# Accepted spellings of the unit type, lower-cased. Projects saved from a
+# non-English Studio (before the type combo was fixed) may hold a localized
+# label; hand-written configs often use lower case.
+_UNIT_TYPE_ALIASES = {
+    "renewable": "Renewable", "renovable": "Renewable",
+    "renouvelable": "Renewable", "renovável": "Renewable", "再生可能": "Renewable",
+    "non-renewable": "Non-renewable", "non renewable": "Non-renewable",
+    "nonrenewable": "Non-renewable", "no renovable": "Non-renewable",
+    "non renouvelable": "Non-renewable", "não renovável": "Non-renewable",
+    "非再生可能": "Non-renewable",
+    "storage": "Storage", "electrolyzer": "Electrolyzer",
+}
+
+
+def canonical_unit_type(value):
+    """Map a unit type label to its English literal ("Renewable",
+    "Non-renewable", "Storage", "Electrolyzer"); unknown values are
+    returned unchanged."""
+    if isinstance(value, str):
+        return _UNIT_TYPE_ALIASES.get(value.strip().lower(), value)
+    return value
+
+
+# Fuels of variable renewables (spaces, '_' and '-' removed, lower case);
+# water / hydro only without a reservoir. Same sets as the Julia model
+# (``VARIABLE_RENEWABLE_FUELS`` / ``HYDRO_FUELS`` in types.jl).
+VARIABLE_RENEWABLE_FUELS = frozenset({
+    "sun", "solar", "pv", "solarpv", "photovoltaic",
+    "wind", "windonshore", "windoffshore", "onshorewind", "offshorewind",
+    "otec", "wave", "tidal", "none", "",
+})
+HYDRO_FUELS = frozenset({"water", "hydro", "runofriver"})
+
+
+def is_variable_renewable(unit_type, fuel, reservoir_capacity: float = 0.0) -> bool:
+    """Whether a unit is a variable renewable at a node: type ``Renewable``
+    and a fuel-less resource whose output follows its availability profile
+    (sun, wind, ocean, no fuel, or water / hydro without a reservoir there).
+
+    A variable renewable is not committed in unit commitment (no on/off
+    status or start-ups), holds no reserve and is what curtailment
+    measures; every other unit (biomass, geothermal, reservoir hydro,
+    thermal) is dispatchable. Mirrors ``is_variable_renewable`` in the
+    Julia model.
+    """
+    if canonical_unit_type(unit_type) != "Renewable":
+        return False
+    key = "".join(str(fuel or "").lower().split()).replace("_", "").replace("-", "")
+    if key in VARIABLE_RENEWABLE_FUELS:
+        return True
+    return key in HYDRO_FUELS and not (reservoir_capacity or 0.0) > 0
+
+
+def is_committed_unit(unit_type, fuel, reservoir_capacity=None) -> bool:
+    """Whether a generator is committed in unit commitment at any node:
+    it is not a variable renewable at one of them at least
+    (``reservoir_capacity`` per node, or none)."""
+    res = list(reservoir_capacity or []) or [0.0]
+    return any(not is_variable_renewable(unit_type, fuel, r) for r in res)
+
+
 class GeneratorConfig(BaseModel):
     """Generator unit configuration."""
 
@@ -559,45 +681,46 @@ class GeneratorConfig(BaseModel):
     @field_validator("type", mode="before")
     @classmethod
     def _normalize_type(cls, v):
-        # Projects saved from a non-English Studio (before the type combo was
-        # fixed) may hold a localized label; map it back to the English literal
-        # so those configs still load.
-        if isinstance(v, str):
-            return {
-                "renovable": "Renewable", "renouvelable": "Renewable",
-                "renovável": "Renewable", "再生可能": "Renewable",
-                "no renovable": "Non-renewable",
-                "non renouvelable": "Non-renewable",
-                "não renovável": "Non-renewable", "非再生可能": "Non-renewable",
-            }.get(v.strip().lower(), v)
+        return canonical_unit_type(v)
+
+    @field_validator("num_units")
+    @classmethod
+    def _check_num_units(cls, v):
+        if any(n < 1 for n in v):
+            raise ValueError("num_units must be at least 1 at every node")
         return v
 
     # Per-node arrays (length = num_nodes)
     life_time: list[int] = Field(description="Lifetime per node (years)")
     initial_age: list[int] = Field(description="Initial age per node (years)")
-    degradation_rate: list[float] = Field(description="Degradation rate per node (%/year)")
+    degradation_rate: list[float] = Field(description="Degradation rate per node (fraction per year, 0.005 = 0.5 %/yr)")
     decommissioning_cost: list[float] = Field(description="Decommissioning cost per node ($/MW)")
     rated_power: list[float] = Field(description="Installed capacity per node (MW)")
-    min_power: list[float] = Field(description="Minimum output fraction per node")
+    num_units: list[int] = Field(
+        default_factory=lambda: [1],
+        description="Identical units the capacity at each node is made of (≥ 1). "
+        "Unit commitment commits a whole number of them (each rated_power / num_units "
+        "MW, with its own minimum output, start-ups and min up/down times); "
+        "1 = the node's capacity is one unit")
+    min_power: list[float] = Field(description="Minimum output fraction per node (of each unit's rating in unit commitment)")
     min_up: list[int] = Field(description="Minimum up time per node (hours)")
     min_down: list[int] = Field(description="Minimum down time per node (hours)")
-    ramp_up: list[float] = Field(description="Ramp up rate per node (pu/min)")
-    ramp_down: list[float] = Field(description="Ramp down rate per node (pu/min)")
+    ramp_up: list[float] = Field(description="Ramp up limit per node (fraction of capacity per hour, scaled to the time step; 0 = no limit)")
+    ramp_down: list[float] = Field(description="Ramp down limit per node (fraction of capacity per hour, scaled to the time step; 0 = no limit)")
     eff_at_rated: list[float] = Field(description="Efficiency at rated power per node")
     eff_at_min: list[float] = Field(description="Efficiency at minimum power per node")
     inertia: list[float] = Field(description="Inertia constant H per node (s)")
     droop: list[float] = Field(default_factory=lambda: [0.05], description="Governor droop characteristic per node (pu), e.g. 0.05 = 5%")
     governor_time_const: list[float] = Field(default_factory=lambda: [5.0], description="Governor time constant per node (seconds)")
-    start_up_cost: list[float] = Field(description="Startup cost per node ($)")
+    start_up_cost: list[float] = Field(description="Startup cost per node ($ per start of the node's whole capacity; one of num_units units costs start_up_cost / num_units)")
     fuel_cost: list[float] = Field(description="Fuel cost per node ($/MWh)")
     fuel_cost_curve: Optional[list[CostCurveConfig]] = Field(
         default=None,
         description="Per-node bidding/offer curve for fuel cost. Overrides flat fuel_cost when present.",
     )
-    fixed_cost: list[float] = Field(description="Fixed O&M cost per node ($/MWh)")
+    fixed_cost: list[float] = Field(description="Fixed O&M per node ($/MW of power in service per year, charged whether or not the unit runs)")
     maintenance_cost: list[float] = Field(description="Maintenance cost per node ($/MWh)")
-    invest_cost: list[float] = Field(default_factory=lambda: [0.0], description="Investment cost per node ($/MW) [DEPRECATED: use technologies section]")
-    invest_max_power: list[float] = Field(default_factory=lambda: [0.0], description="Max investment per node (MW) [DEPRECATED: use technologies section]")
+    invest_cost: list[float] = Field(default_factory=lambda: [0.0], description="Investment cost per node ($/MW): prices life extension (× life_extension_cost_factor); 0 = taken from the technology with the same fuel and type")
 
     # Electrical properties
     frequency_hz: float = Field(default=50.0, gt=0, description="Operating frequency (Hz)")
@@ -668,11 +791,16 @@ class GeneratorConfig(BaseModel):
 class BatteryConfig(BaseModel):
     """Battery/storage unit configuration."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     name: str
     type: Literal["Storage"] = "Storage"
     fuel: str = "None"
-    technology: Optional[str] = None
-    reservable: bool = True
+    technology: Optional[str] = Field(
+        default=None,
+        description="Battery technology (key or name) whose invest_cost_power prices life "
+        "extension where invest_cost is 0 (no match: the system's first battery technology)")
+    reservable: bool = Field(default=True, description="Headroom counts towards reserves")
     spillage: bool = True
     min_duration_hours: Optional[int] = None
     max_duration_hours: Optional[int] = None
@@ -683,17 +811,20 @@ class BatteryConfig(BaseModel):
     degradation_rate: list[float]
     decommissioning_cost: list[float]
     rated_power: list[float] = Field(description="Power rating per node (MW)")
-    min_power: list[float]
-    min_up: list[int]
-    min_down: list[int]
-    ramp_up: list[float]
-    ramp_down: list[float]
-    eff_at_rated: list[float]
-    eff_at_min: list[float]
+    ramp_up: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Ramp up limit per node: how fast charge or discharge power may rise "
+        "(fraction of MaxChargePower / MaxDischargePower per hour, scaled to the time step; "
+        "0 = no limit)")
+    ramp_down: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Ramp down limit per node: how fast charge or discharge power may fall "
+        "(fraction of MaxChargePower / MaxDischargePower per hour, scaled to the time step; "
+        "0 = no limit)")
     inertia: list[float]
-    start_up_cost: list[float]
-    fuel_cost: list[float]
-    fixed_cost: list[float]
+    fixed_cost: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Fixed O&M per node ($/MW of MaxDischargePower per year)")
     maintenance_cost: list[float]
     throughput_degradation_cost: Optional[list[float]] = Field(
         default=None,
@@ -706,10 +837,8 @@ class BatteryConfig(BaseModel):
         default=None,
         description="Per-node discharge cost curve. Overrides flat throughput_degradation_cost when present.",
     )
-    invest_cost: list[float] = Field(default_factory=lambda: [0.0], description="Power investment cost ($/MW) [DEPRECATED: use battery_technologies]")
-    invest_cost_energy: list[float] = Field(default_factory=lambda: [0.0], description="Energy investment cost ($/MWh) [DEPRECATED: use battery_technologies]")
-    invest_max_power: list[float] = Field(default_factory=lambda: [0.0], description="Max power investment (MW) [DEPRECATED: use battery_technologies]")
-    invest_max_capacity: list[float] = Field(default_factory=lambda: [0.0], description="Max capacity investment (MWh) [DEPRECATED: use battery_technologies]")
+    invest_cost: list[float] = Field(default_factory=lambda: [0.0], description="Power investment cost ($/MW): prices life extension; 0 = taken from the battery technology")
+    invest_max_power: list[float] = Field(default_factory=lambda: [0.0], description="Power (MW) per node; > 0 places the battery at the node in the master's representative days even without existing power there. New storage is built from battery_technologies")
 
     # Storage-specific parameters
     efficiency_charge: list[float]
@@ -723,7 +852,9 @@ class BatteryConfig(BaseModel):
     # Electrical properties
     current_type: Literal["AC", "DC"] = Field(default="DC", description="Current type")
 
-    availability_file: Optional[str] = Field(None, alias="Availability")
+    availability_file: Optional[str] = Field(
+        None, alias="Availability",
+        description="Availability profile: hourly factor (0-1) on the charge and discharge power")
 
     # Physical bus anchoring (see GeneratorConfig for semantics).
     bus_index: Optional[int] = Field(None, description="Global 0-based bus index (single-bus units)")
@@ -751,26 +882,46 @@ class TechnologyConfig(BaseModel):
     name: str
     type: Literal["Renewable", "Non-renewable"]
     fuel: str
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _normalize_type(cls, v):
+        return canonical_unit_type(v)
+
+    @field_validator("unit_size")
+    @classmethod
+    def _check_unit_size(cls, v):
+        if any(s < 0 for s in v):
+            raise ValueError("unit_size cannot be negative")
+        return v
+
     invest_cost: list[float] = Field(description="Investment cost per node ($/MW)")
     invest_max_power: list[float] = Field(description="Max investment per node (MW)")
     availability_file: Optional[str] = Field(None, alias="Availability")
     eff_at_rated: list[float] = Field(description="Efficiency at rated power per node")
-    degradation_rate: list[float] = Field(description="Degradation rate per node (%/year)")
+    degradation_rate: list[float] = Field(description="Degradation rate per node (fraction per year, 0.005 = 0.5 %/yr)")
     lifetime: int = Field(description="Economic lifetime (years)")
     min_output: list[float] = Field(default_factory=lambda: [0.0], description="Min output fraction per node")
-    ramp_up: list[float] = Field(default_factory=lambda: [1.0], description="Ramp up rate per node (pu/min)")
-    ramp_down: list[float] = Field(default_factory=lambda: [1.0], description="Ramp down rate per node (pu/min)")
-    fuel_cost: list[float] = Field(default_factory=lambda: [0.0], description="Fuel cost per node ($/MWh)")
+    ramp_up: list[float] = Field(default_factory=lambda: [1.0], description="Ramp up limit per node (fraction of capacity per hour, scaled to the time step; 0 = no limit)")
+    ramp_down: list[float] = Field(default_factory=lambda: [1.0], description="Ramp down limit per node (fraction of capacity per hour, scaled to the time step; 0 = no limit)")
+    fuel_cost: list[float] = Field(default_factory=lambda: [0.0], description=(
+        "Fuel cost per node ($/MWh). If all zero and fuel is in fuels, the loader "
+        "computes price_base / energy_content / eff_at_rated"))
     fuel_cost_curve: Optional[list[CostCurveConfig]] = Field(
         default=None,
         description="Per-node bidding/offer curve for fuel cost. Overrides flat fuel_cost when present.",
     )
-    fixed_cost: list[float] = Field(default_factory=lambda: [0.0], description="Fixed O&M cost per node ($/MWh)")
+    fixed_cost: list[float] = Field(default_factory=lambda: [0.0], description="Fixed O&M per node ($/MW of power built and in service per year)")
     maintenance_cost: list[float] = Field(default_factory=lambda: [0.0], description="Maintenance cost per node ($/MWh)")
     inertia: list[float] = Field(default_factory=lambda: [0.0], description="Inertia constant H per node (s)")
     droop: list[float] = Field(default_factory=lambda: [0.05], description="Governor droop characteristic per node (pu), e.g. 0.05 = 5%")
     governor_time_const: list[float] = Field(default_factory=lambda: [5.0], description="Governor time constant per node (seconds)")
-    start_up_cost: list[float] = Field(default_factory=lambda: [0.0], description="Startup cost per node ($)")
+    start_up_cost: list[float] = Field(default_factory=lambda: [0.0], description="Startup cost per node ($ per start of a built plant; one of its units costs start_up_cost / number of units)")
+    unit_size: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Size of one unit per node (MW). The capacity the master builds at a "
+        "bus reaches unit commitment as ceil(capacity / unit_size) identical units; "
+        "0 = one unit")
     eff_at_min: list[float] = Field(default_factory=lambda: [0.0], description="Efficiency at min power per node")
     min_up: list[int] = Field(default_factory=lambda: [0], description="Min up time per node (hours)")
     min_down: list[int] = Field(default_factory=lambda: [0], description="Min down time per node (hours)")
@@ -799,7 +950,7 @@ class BatteryTechnologyConfig(BaseModel):
     max_duration_hours: float = Field(default=24.0, ge=0, description="Max energy-to-power ratio (hours)")
     efficiency_charge: list[float] = Field(description="Charge efficiency per node (0-1)")
     efficiency_discharge: list[float] = Field(description="Discharge efficiency per node (0-1)")
-    degradation_rate: list[float] = Field(description="Degradation rate per node (%/year)")
+    degradation_rate: list[float] = Field(description="Degradation rate per node (fraction per year, 0.005 = 0.5 %/yr)")
     lifetime: int = Field(description="Economic lifetime (years)")
     soc_initial: list[float] = Field(default_factory=lambda: [0.5], description="Initial SOC fraction per node")
     max_DoD: list[float] = Field(default_factory=lambda: [0.9], description="Max depth of discharge per node")
@@ -819,7 +970,25 @@ class BatteryTechnologyConfig(BaseModel):
         description="Per-node geographic risk derating (0-1). Reduces effective capacity "
         "credit to account for hazard exposure.",
     )
+    # Operating fields of the batteries it builds (as in BatteryConfig)
+    ramp_up: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Ramp up limit per node: how fast charge or discharge power may rise "
+        "(fraction of the power built per hour, scaled to the time step; 0 = no limit)")
+    ramp_down: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Ramp down limit per node: how fast charge or discharge power may fall "
+        "(fraction of the power built per hour, scaled to the time step; 0 = no limit)")
+    fixed_cost: list[float] = Field(
+        default_factory=lambda: [0.0],
+        description="Fixed O&M per node ($/MW of power built per year)")
+    reservable: bool = Field(default=True, description="Headroom counts towards reserves")
+    availability_file: Optional[str] = Field(
+        None, alias="Availability",
+        description="Availability profile: hourly factor (0-1) on the charge and discharge power")
     color: Optional[str] = Field(default=None, description="Display color hex code (e.g. '#FF0000') for results visualization")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class ElectrolyzerConfig(BaseModel):
@@ -828,19 +997,16 @@ class ElectrolyzerConfig(BaseModel):
     name: str
     type: Literal["Electrolyzer"] = "Electrolyzer"
     fuel: str = "Hydrogen"
-    technology: Literal["PEM", "Alkaline", "SOE"] = "PEM"
 
     life_time: list[int]
-    initial_age: list[int]
-    degradation_rate: list[float]
     rated_power: list[float]
-    min_power: list[float]
     ramp_up: list[float]
     ramp_down: list[float]
     eff_at_rated: list[float]
     eff_at_min: list[float]
     energy_per_kg_h2: float = Field(default=50.0, description="kWh/kg H2")
-    fixed_cost: list[float]
+    fixed_cost: list[float] = Field(
+        description="Fixed O&M per node ($/MW of rated power per year)")
     variable_cost: list[float]
     water_cost: float = Field(default=0.001, description="$/kg H2")
     invest_cost: list[float]
@@ -862,26 +1028,23 @@ class PrimaryEnergySourceConfig(BaseModel):
     storage_capacity: list[float] = Field(description="Storage capacity per node (units)")
     initial_storage_level: list[float] = Field(description="Initial storage fraction per node")
     min_storage_level: float = Field(default=0.1, ge=0, le=1)
-    storage_investment_cost: float = Field(description="$/unit storage capacity")
-    transport_cost: float = Field(description="$/unit/km transport cost")
-    transport_losses: float = Field(description="Loss fraction per 100km")
     transport_transit_days_per_100km: float = Field(
         default=0.0, ge=0,
         description="Source->tank replenishment lead time, in days per 100 km "
         "of route distance. 0 = instantaneous transport.")
     disruption_start_hour: int = Field(
         default=0, ge=0,
-        description="Supply-disruption window start hour (inclusive).")
+        description="Supply-disruption window start, absolute horizon hour "
+        "(hour 0 = Jan 1 of base_year, 8760 h per year), inclusive.")
     disruption_end_hour: int = Field(
         default=0, ge=0,
-        description="Supply-disruption window end hour (exclusive). "
+        description="Supply-disruption window end, absolute horizon hour "
+        "(exclusive). "
         "end <= start disables the disruption.")
     disruption_availability: float = Field(
         default=1.0, ge=0, le=1,
         description="Availability fraction during the disruption window "
         "(0 = full cut, 1 = none).")
-    max_storage_investment_per_node: float
-    max_transport_investment_per_arc: float
 
 
 class ConversionTechnologyConfig(BaseModel):
@@ -911,7 +1074,6 @@ class DemandSectorConfig(BaseModel):
     flexibility_ratio: float = Field(default=0.0, ge=0, le=1)
     criticality: Literal["critical", "high", "medium", "low"] = "medium"
     delay_tolerance: int = Field(default=0, ge=0, description="Max delay hours")
-    price_sensitivity: float = Field(default=0.0, ge=0, le=1)
 
 
 class NonElectricDemandConfig(BaseModel):
@@ -919,11 +1081,6 @@ class NonElectricDemandConfig(BaseModel):
 
     fuel: str
     unit: str
-    is_flexible: bool = False
-    flexibility_ratio: float = 0.0
-    criticality: Literal["critical", "high", "medium", "low"] = "medium"
-    delay_tolerance: int = 0
-    price_sensitivity: float = 0.0
     demand: list[int] = Field(description="Annual demand per node (units)")
 
 
@@ -956,23 +1113,34 @@ class EVCategoryConfig(BaseModel):
 
 
 class RooftopSolarConfig(BaseModel):
-    """Rooftop solar simulation configuration."""
+    """Rooftop solar simulation configuration.
+
+    The runner passes adoption_scenario, weather_variability,
+    simulation_seed, performance_ratio, systems_per_node, avg_system_size,
+    initial_adoption, max_adoption and adoption_rates to rooftex (unset or
+    empty: rooftex defaults), and uses base_year, target_year and
+    degradation_rate for the yearly capacity. max_adoption and
+    adoption_rates are keyed by adoption scenario ("low", "medium",
+    "high"). The cost fields are kept for the GUI and the standalone
+    rooftex workflow: rooftop solar is behind the meter, with no investment
+    decision in the model to price.
+    """
 
     adoption_scenario: Literal["low", "medium", "high"] = "medium"
     weather_variability: Literal["low", "normal", "high"] = "normal"
     simulation_seed: int = 42
-    systems_per_node: list[int]
-    avg_system_size: list[float] = Field(description="kW per system")
+    # Per-node lists; a None entry takes rooftex's default at that node (a
+    # merged multi-system run sets it at the nodes of a system that leaves
+    # the list unset).
+    systems_per_node: Optional[list[Optional[int]]] = None
+    avg_system_size: Optional[list[Optional[float]]] = Field(default=None, description="kW per system")
     performance_ratio: float = Field(default=0.75, ge=0, le=1)
     degradation_rate: float = Field(default=0.005, ge=0)
-    cost_per_kw: float = 1200
-    cost_reduction_rate: float = 0.08
-    o_and_m_cost: float = 20
     base_year: int = 2025
     target_year: int = 2050
-    initial_adoption: list[float]
-    max_adoption: dict[str, float]
-    adoption_rates: dict[str, float]
+    initial_adoption: Optional[list[Optional[float]]] = None
+    max_adoption: Optional[dict[str, float]] = None
+    adoption_rates: Optional[dict[str, float]] = None
 
 
 # =============================================================================
@@ -981,7 +1149,13 @@ class RooftopSolarConfig(BaseModel):
 
 
 class ScenarioMultipliers(BaseModel):
-    """Cost and demand multipliers for stochastic scenarios."""
+    """Cost and demand multipliers for stochastic scenarios.
+
+    Every field scales a term of the stochastic master problem (see
+    ``scenario_master_input`` and ``build_investment_cost_expression`` in
+    ``master_problem.jl``). Keys in :data:`SCENARIO_MULTIPLIER_ALIASES` are
+    translated to these fields; any other key is dropped with a warning.
+    """
 
     invest_cost_renewables: float = 1.0
     invest_cost_storage: float = 1.0
@@ -993,6 +1167,157 @@ class ScenarioMultipliers(BaseModel):
     demand_growth: float = 1.0
     fuel_price_growth: float = 1.0
     carbon_price: float = 1.0
+    # Fixed O&M ($/MW/year) of generators, candidate technologies, batteries
+    # and battery technologies
+    gen_fixed_cost: float = 1.0
+    # Decommissioning of existing generators / batteries
+    gen_decommissioning_cost: float = 1.0
+    bat_decommissioning_cost: float = 1.0
+    # Battery technology investment, on top of invest_cost_storage
+    bat_invest_cost_power: float = 1.0
+    bat_invest_cost_capacity: float = 1.0
+    # Penalties of the scenario's operation
+    penalty_loss_of_load: float = 1.0
+    penalty_loss_of_reserve: float = 1.0
+    penalty_curtailment: float = 1.0
+    penalty_fre_penetration: float = 1.0
+    # --- Start-ups, battery maintenance, MW·km flows, converters, CO2 budget ---
+    # Start-up cost of generators (LP start-ups of the master; only when the
+    # dispatch commits units, master_problem.use_uc_in_dispatch)
+    gen_start_up_cost: float = 1.0
+    # Maintenance of batteries and battery technologies, × maintenance_cost
+    bat_maintenance_cost: float = 1.0
+    # Flow cost of inter-system links (distance × cost_per_mw_km × |flow|)
+    transmission_cost_per_mw_km: float = 1.0
+    # AC/DC and frequency converters: investment / variable cost
+    converter_invest_cost: float = 1.0
+    converter_variable_cost: float = 1.0
+    # Penalty per tonne over each system's CO2 budget
+    penalty_co2_budget_violation: float = 1.0
+    # --- end ---
+    # ── Fuel chain and electrolyzers of the master's fuel block (#89) ──
+    # Per-node fuel import cost
+    fuel_import_cost: float = 1.0
+    # Fuel shortfall and excess-supply penalty (loss_of_fuel_supply)
+    penalty_loss_of_fuel_supply: float = 1.0
+    # Fuel storage investment
+    fuel_storage_invest_cost: float = 1.0
+    # Route transport cost per unit·km and route investment
+    fuel_transport_cost: float = 1.0
+    # Electrolyzer investment, fixed, variable (per MWh) and water (per kg H2) cost
+    electrolyzer_invest_cost: float = 1.0
+    electrolyzer_fixed_cost: float = 1.0
+    electrolyzer_variable_cost: float = 1.0
+    electrolyzer_water_cost: float = 1.0
+    # ── end fuel block ──
+
+    @model_validator(mode="before")
+    @classmethod
+    def _translate_keys(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            return normalize_scenario_multipliers(data)
+        return data
+
+
+# Keys the Studio offered before its catalog matched the model, mapped to the
+# fields they scale. gen_invest_cost scales both technology classes.
+SCENARIO_MULTIPLIER_ALIASES: dict[str, tuple[str, ...]] = {
+    "gen_invest_cost": ("invest_cost_renewables", "invest_cost_conventional"),
+    "gen_fuel_cost": ("fuel_cost",),
+    "fuel_price": ("fuel_cost",),
+    "gen_maintenance_cost": ("maintenance_cost",),
+    "transmission_invest_cost": ("invest_cost_transmission",),
+    "fuel_price_growth_rate": ("fuel_price_growth",),
+    "penalty_co2_cost": ("carbon_price",),
+}
+
+
+def normalize_scenario_multipliers(raw: dict[str, Any]) -> dict[str, Any]:
+    """Map a scenario's multiplier keys onto :class:`ScenarioMultipliers` fields.
+
+    Aliases are translated; when several keys scale the same field their values
+    multiply (``gen_invest_cost: 1.1`` with ``invest_cost_renewables: 0.8``
+    gives renewables 0.88 and conventional 1.1). Unknown keys are dropped,
+    each with a warning.
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+    fields = ScenarioMultipliers.model_fields
+    out: dict[str, Any] = {}
+    sources: dict[str, list[str]] = {}
+    for key, value in raw.items():
+        if key in fields:
+            targets: tuple[str, ...] = (key,)
+        elif key in SCENARIO_MULTIPLIER_ALIASES:
+            targets = SCENARIO_MULTIPLIER_ALIASES[key]
+        else:
+            log.warning("Stochastic scenario multiplier '%s' ignored: unknown key", key)
+            continue
+        for field in targets:
+            if field in out:
+                out[field] = float(out[field]) * float(value)
+            else:
+                out[field] = value
+            sources.setdefault(field, []).append(key)
+    for field, keys in sources.items():
+        if len(keys) > 1:
+            log.warning("Stochastic scenario multipliers %s all scale '%s'; "
+                        "using their product %g", ", ".join(keys), field,
+                        float(out[field]))
+    return out
+
+
+_FUEL_BLOCK_MULTIPLIERS: tuple[str, ...] = (
+    "fuel_import_cost", "penalty_loss_of_fuel_supply", "fuel_storage_invest_cost",
+    "fuel_transport_cost", "electrolyzer_invest_cost", "electrolyzer_fixed_cost",
+    "electrolyzer_variable_cost", "electrolyzer_water_cost",
+)
+
+
+def ineffective_scenario_multipliers(config: "ESFEXConfig") -> list[tuple[str, str, str]]:
+    """Scenario multipliers set (≠ 1) whose term this configuration lacks.
+
+    Only the first system's ``stochastic_scenarios`` reach the master, and
+    only with ``master_problem.stochastic``. A key whose term exists only in
+    some configurations has no effect without it: ``gen_start_up_cost``
+    without ``master_problem.use_uc_in_dispatch`` (no start-ups in the
+    master), the fuel-chain and electrolyzer keys with primary energy off,
+    and ``transmission_cost_per_mw_km`` with no line or electrical
+    inter-system link carrying a per-MW·km cost. Returns ``(scenario, key,
+    reason)`` for each one.
+    """
+    if config.simulation_mode != "development" or not config.master_problem.stochastic:
+        return []
+    scenarios = config.primary_system.stochastic_scenarios or []
+    if not scenarios:
+        return []
+    systems = [config.systems[n] for n in config.meta_network.systems if n in config.systems]
+    pe_on = config.enable_primary_energy and any(
+        s.primary_energy_sources or s.fuel_entry_points for s in systems)
+    flow_cost = any(
+        link.link_type == "transmission" and any(c > 0 for c in link.cost_per_mw_km)
+        for link in config.meta_network.systems_links
+    ) or any(
+        ln.cost_per_mw_km > 0 and (ln.length_km or 0) > 0
+        for s in systems for ln in (s.transmission_lines_geo or [])
+    )
+    missing: dict[str, str] = {}
+    if not config.master_problem.use_uc_in_dispatch:
+        missing["gen_start_up_cost"] = (
+            "the master models start-ups only with master_problem.use_uc_in_dispatch")
+    if not pe_on:
+        for key in _FUEL_BLOCK_MULTIPLIERS:
+            missing[key] = "primary energy is off (no fuel block in the master)"
+    if not flow_cost:
+        missing["transmission_cost_per_mw_km"] = (
+            "no line or electrical inter-system link has a cost_per_mw_km")
+    out = []
+    for sc in scenarios:
+        for key, reason in missing.items():
+            if getattr(sc.multipliers, key, 1.0) != 1.0:
+                out.append((sc.name, key, reason))
+    return out
 
 
 class StochasticScenarioConfig(BaseModel):
@@ -1044,56 +1369,6 @@ class ClimateScenarioConfig(BaseModel):
     )
 
 
-class FragilityCurveConfig(BaseModel):
-    """Lognormal fragility curve parameters for a single damage state.
-
-    The probability of reaching or exceeding the damage state given
-    intensity measure *im* is:  P = Φ( (ln(im) − ln(im_median)) / beta )
-    """
-
-    damage_state: Literal["slight", "moderate", "extensive", "complete"] = "complete"
-    im_median: float = Field(gt=0, description="Median intensity measure for this damage state")
-    beta: float = Field(gt=0, le=2.0, description="Log-standard deviation (aleatory)")
-    beta_epistemic: float = Field(
-        default=0.0, ge=0, le=2.0,
-        description="Epistemic uncertainty (β_u); total β = sqrt(β² + β_u²)",
-    )
-    source_quality: Literal[
-        "empirical", "analytical", "expert_judgment", "proxy_derived",
-    ] = Field(default="analytical", description="Quality classification of fragility source")
-    description: str = ""
-
-
-class ComponentFragilityConfig(BaseModel):
-    """Fragility assignment for a component type under a specific hazard."""
-
-    component_type: Literal[
-        "solar_pv",
-        "wind_turbine",
-        "diesel_gen",
-        "gas_turbine",
-        "substation",
-        "transmission_line",
-        "battery",
-        "transformer",
-        "hydroelectric",
-        "biomass",
-        "otec",
-        "electrolyzer",
-    ]
-    hazard_type: Literal[
-        "earthquake",
-        "cyclone",
-        "flood",
-        "tsunami",
-        "wildfire",
-        "volcanic",
-        "sea_level_rise",
-    ]
-    curves: list[FragilityCurveConfig]
-    source: str = Field(default="", description="Literature source, e.g. 'NHESS-2024'")
-
-
 class HazardScenarioConfig(BaseModel):
     """Discrete disaster scenario for stochastic optimisation.
 
@@ -1125,27 +1400,6 @@ class HazardScenarioConfig(BaseModel):
     description: str = ""
 
 
-class HazardDataSourceConfig(BaseModel):
-    """Configuration for a hazard data source / API endpoint."""
-
-    hazard_type: str = Field(description="earthquake, cyclone, flood, …")
-    source: str = Field(
-        description="Data provider key: usgs, gem, ibtracs, storm, "
-        "fathom, wri_aqueduct, noaa_tsunami, firms, gvp, nasa_slr, thinkhazard",
-    )
-    return_periods: list[int] = Field(
-        default=[100, 500],
-        description="Return periods of interest (years)",
-    )
-    enabled: bool = True
-    api_key: str = Field(default="", description="API key if required by the source")
-    cache_dir: str = Field(default="", description="Local cache directory override")
-    options: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Source-specific options (e.g. dataset version, resolution)",
-    )
-
-
 class VOLLConfig(BaseModel):
     """Value of Lost Load by demand sector (USD/MWh)."""
 
@@ -1155,37 +1409,13 @@ class VOLLConfig(BaseModel):
     critical: float = Field(default=100_000.0, ge=0, description="$/MWh")
 
 
-class RiskCriteriaConfig(BaseModel):
-    """Configurable risk acceptability thresholds per ISO 31000 §6.5.
-
-    Implements the ALARP (As Low As Reasonably Practicable) framework:
-      negligible  → no action needed
-      tolerable   → ALARP zone — monitor, apply cost-benefit reduction
-      intolerable → action required regardless of cost
-    """
-
-    eal_negligible: float = Field(
-        default=1_000.0, ge=0,
-        description="EAL below this ($/yr) is negligible risk",
-    )
-    eal_tolerable: float = Field(
-        default=50_000.0, ge=0,
-        description="EAL below this ($/yr) is tolerable (ALARP zone)",
-    )
-    eal_intolerable: float = Field(
-        default=500_000.0, ge=0,
-        description="EAL above this ($/yr) is intolerable — action required",
-    )
-    composite_risk_low: float = Field(default=0.01, ge=0, le=1)
-    composite_risk_medium: float = Field(default=0.05, ge=0, le=1)
-    composite_risk_high: float = Field(default=0.15, ge=0, le=1)
-
-
 class RiskConfig(BaseModel):
     """Risk & Resilience Analysis configuration.
 
-    When ``enabled`` is *False* (default), the entire risk module is skipped
-    and no additional variables or constraints are added to the optimisation.
+    Settings of the Studio's Risk & Resilience Workbench (analysis and
+    post-processing). The optimisation does not read this block, ``enabled``
+    included; risk reaches it only through the per-element
+    ``risk_coefficient``.
     """
 
     enabled: bool = False
@@ -1211,20 +1441,11 @@ class RiskConfig(BaseModel):
     # ── Hazard scenarios ───────────────────────────────────────────────
     hazard_scenarios: list[HazardScenarioConfig] = Field(default_factory=list)
 
-    # ── Hazard data sources (for automated fetching) ───────────────────
-    hazard_data_sources: list[HazardDataSourceConfig] = Field(default_factory=list)
-
-    # ── Fragility library overrides ────────────────────────────────────
-    fragility_curves: list[ComponentFragilityConfig] = Field(default_factory=list)
-
     # ── Multi-hazard combination ───────────────────────────────────────
     combination_method: Literal["independent", "copula", "mcda"] = Field(
         default="independent",
         description="Method for combining multi-hazard failure probabilities",
     )
-
-    # ── Risk acceptability criteria (ISO 31000 §6.5, ALARP) ──────────
-    risk_criteria: RiskCriteriaConfig = Field(default_factory=RiskCriteriaConfig)
 
     # ── Value of Lost Load ─────────────────────────────────────────────
     voll: VOLLConfig = Field(default_factory=VOLLConfig)
@@ -1288,7 +1509,6 @@ class SolverConfig(BaseModel):
     time_limit: int = Field(default=10800, ge=0, description="Seconds (0 = unlimited)")
     gap: float = Field(default=0.01, ge=0, le=1, description="MIP optimality gap")
     verbose: bool = False
-    scale_constraints: bool = True
     options: dict[str, Any] = Field(
         default_factory=dict,
         description="Solver-specific options (e.g. presolve, lp_method)",
@@ -1300,10 +1520,41 @@ class TemporalConfig(BaseModel):
 
     resolution_hours: int = Field(default=1, ge=1, description="Hourly resolution")
     rolling_horizon_hours: int = Field(default=48, ge=1)
-    overlap_hours: int = Field(default=6, ge=0)
+    overlap_hours: int = Field(
+        default=24, ge=0,
+        description="Look-ahead hours solved but not kept in each window; must be "
+                    "< rolling_horizon_hours. Storage needs >= 24 h to see the next "
+                    "daily peak.",
+    )
     investment_resolution: int = Field(default=HOURS_STD_YEAR, description="Hours per investment period")
     primary_energy_resolution: int = Field(default=24, description="Hours")
     use_rolling_horizon: bool = True
+    model_clock: str = Field(
+        default="auto",
+        description="Time base of every hourly series (hour 0 = 1 Jan 00:00 on "
+                    "this clock; fixed offset, no daylight saving time): 'auto' "
+                    "(standard offset of the zone with most demand, set when the "
+                    "series are generated), an IANA zone used at its standard "
+                    "offset ('America/Havana'), 'UTC' or 'Etc/GMT+5'.",
+    )
+
+    @field_validator("model_clock", mode="before")
+    @classmethod
+    def _check_model_clock(cls, v):
+        from esfex.utils.model_clock import normalize_clock_setting
+        return normalize_clock_setting(v)
+
+    @model_validator(mode="after")
+    def _check_overlap(self):
+        if self.use_rolling_horizon and self.overlap_hours >= self.rolling_horizon_hours:
+            if "overlap_hours" in self.model_fields_set:
+                raise ValueError(
+                    f"overlap_hours ({self.overlap_hours}) must be less than "
+                    f"rolling_horizon_hours ({self.rolling_horizon_hours})"
+                )
+            # Default overlap with a short window: keep half the window as look-ahead.
+            self.overlap_hours = self.rolling_horizon_hours // 2
+        return self
 
 
 class NetworkReductionConfig(BaseModel):
@@ -1357,17 +1608,15 @@ class N1SecurityConfig(BaseModel):
     generation_reserve_type: Literal["largest_unit", "percentage"] = "largest_unit"
     generation_reserve_percentage: float = Field(default=0.15, ge=0, le=1)
 
-    # SCOPF (Security-Constrained OPF) — iterative approach
+    # SCOPF (Security-Constrained OPF), built in a single pass
     scopf_enabled: bool = Field(
         default=False,
         description=(
-            "Use iterative SCOPF instead of preventive N-1 reserves. "
-            "SCOPF adds post-contingency flow constraints using LODF "
-            "factors, only for contingencies that cause violations."
+            "Use SCOPF instead of preventive N-1 reserves: post-contingency "
+            "flow limits (LODF factors) for every single-line outage, built "
+            "in one pass (soft, priced at loss_of_reserve_static)."
         ),
     )
-    scopf_max_iterations: int = Field(default=5, ge=1, le=20)
-    scopf_violation_tolerance: float = Field(default=0.01, ge=0)
 
     # Corrective actions
     corrective_enabled: bool = Field(
@@ -1375,6 +1624,17 @@ class N1SecurityConfig(BaseModel):
         description=(
             "Allow corrective post-contingency actions (battery response, "
             "re-dispatch) instead of purely preventive reserves."
+        ),
+    )
+
+    # Cost of N-1 security: one extra solve per operational window
+    compute_security_cost: bool = Field(
+        default=False,
+        description=(
+            "Re-solve each operational window without the N-1 constraints and "
+            "store objective(with N-1) - objective(without) as "
+            "n1_security_cost. Roughly doubles the solve time. Off: "
+            "n1_security_cost stays 0."
         ),
     )
 
@@ -1542,12 +1802,27 @@ class MasterProblemConfig(BaseModel):
     stochastic: bool = False
     representative_days: int = Field(default=5, ge=1)
     min_day_separation: int = Field(default=5, ge=1)
+    critical_days: int = Field(
+        default=3, ge=0,
+        description="Critical days the master models besides the representative days "
+        "(or TSAM periods): the days of the horizon with the largest net load (lowest "
+        "renewable supply against demand), chosen once for every planning year, each "
+        "standing for one day of the year. 0 disables them.",
+    )
+    storage_firm_hours: Optional[float] = Field(
+        default=None, gt=0,
+        description="Hours a battery must sustain its output to count as firm power in "
+        "the master's capacity adequacy constraint: it counts min(power, usable energy / "
+        "hours). None derives them from the data: the longest stretch without solar on "
+        "the critical days.",
+    )
 
     # Master-problem solver method.
     #   "monolithic" — single model coupling investment + representative-day
     #                  operations (default).
     #   "benders"    — Benders decomposition: investment-only master with theta[y]
-    #                  recourse and per-representative-day dispatch subproblems.
+    #                  recourse and one dispatch subproblem per year (all its
+    #                  representative days).
     #                  Beneficial for very large problems.
     solver_method: Literal["monolithic", "benders"] = Field(
         default="monolithic",
@@ -1561,17 +1836,21 @@ class MasterProblemConfig(BaseModel):
         default=1e-4, gt=0.0,
         description="Relative optimality-gap tolerance for Benders convergence.",
     )
-    benders_lol_penalty_cap: float = Field(
-        default=1000.0, ge=0.0,
-        description="Cap on the loss-of-load penalty ($/MW per timestep) inside "
-        "Benders subproblems for numerical stability (0 disables the cap).",
+    solver_options: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Solver-specific options for the master problem only, in the "
+        "format of solver.options and merged over them (a key here replaces the "
+        "same key there). Every master solve uses them (monolithic, TSAM, "
+        "stochastic, MGA, myopic, NPV re-solves, Benders master and subproblems); "
+        "the dispatch keeps solver.options.",
     )
 
     # TSAM (Time-Series Aggregation Method)
     use_tsam: bool = Field(
         default=False,
         description="Enable TSAM clustering for representative period selection. "
-        "When true, representative_days and min_day_separation are ignored.",
+        "When true, representative_days is ignored (min_day_separation still spaces "
+        "the critical days, which are added to the TSAM periods).",
     )
     tsam_num_periods: int = Field(
         default=10, ge=2, le=365,
@@ -1583,7 +1862,10 @@ class MasterProblemConfig(BaseModel):
     )
     tsam_inter_period_linking: bool = Field(
         default=True,
-        description="Enable inter-period SOC linking for seasonal storage representation.",
+        description=(
+            "Seasonal storage across the TSAM periods: battery SOC and reservoir "
+            "levels carried through every day of the year (Kotzur et al. 2018)."
+        ),
     )
 
     # Operational dispatch mode
@@ -1591,7 +1873,8 @@ class MasterProblemConfig(BaseModel):
         default=False,
         description="Use unit commitment (binary gen_status, startup costs, "
         "min up/down times) in operational dispatch windows during "
-        "development mode. Slower but more realistic operational costs.",
+        "development mode. Slower but more realistic operational costs. "
+        "The master problem then models start-ups too (LP relaxation).",
     )
 
     # Planning mode
@@ -1679,17 +1962,29 @@ class OutageWindow(BaseModel):
 
     Applies the capacity/availability multiplier ``availability`` to the target
     element over the absolute hour window ``[start_hour, end_hour)`` of the
-    simulation horizon (hour 0 = Jan 1 of ``base_year`` at 00:00). A value of
-    ``0.0`` is a full outage; ``0.5`` a 50 % derate. This is the single record
+    simulation horizon (hour 0 = Jan 1 of ``base_year`` at 00:00 on the model
+    clock, ``temporal.model_clock``; every
+    modelled year is 8760 h, so year ``k`` starts at hour ``k * 8760``). The
+    window happens once; with ``recurring`` it repeats every year at the same
+    hours of the year. A value of ``0.0`` is a full outage; ``0.5`` a 50 %
+    derate. This is the single record
     the interruptions calendar reads and writes; the bridge compiles the whole
     schedule into per-element, per-timestep capacity masks for the Julia model.
     """
 
     element_type: OutageElementType
     element_id: str = Field(
-        description="Target element key (dict-keyed types: generators, "
-                    "batteries, electrolyzers, fuel sources) or list index as a "
-                    "string (lines, transformers, converters, fuel routes)."
+        description="Target element: unit key (generators, batteries, "
+                    "electrolyzers), fuel name (fuel_source, fuel_storage), "
+                    "line_id or name (lines, transformers, converters) or "
+                    "route_id (fuel routes; route_<i> for a route without one)."
+    )
+    node: Optional[int] = Field(
+        default=None, ge=0,
+        description="Generators: only the unit's capacity at this node is cut; "
+                    "fuel_storage: only the fuel's tank at this node (None = "
+                    "every node). Batteries and electrolyzers are always cut "
+                    "as a whole unit.",
     )
     start_hour: int = Field(ge=0, description="Absolute horizon hour, inclusive")
     end_hour: int = Field(gt=0, description="Absolute horizon hour, exclusive")
@@ -1699,6 +1994,11 @@ class OutageWindow(BaseModel):
                     "(0 = full cut, 1 = no effect).",
     )
     label: str = Field(default="", description="Optional note shown on the calendar")
+    recurring: bool = Field(
+        default=False,
+        description="Repeat the window every year at the same hours of the year "
+                    "(start_hour taken modulo 8760). False: it happens once.",
+    )
 
     @model_validator(mode="after")
     def _check_window(self) -> "OutageWindow":
@@ -1709,6 +2009,23 @@ class OutageWindow(BaseModel):
                 f"{self.element_id!r}"
             )
         return self
+
+
+def re_increment_conflict(min_inc: float, max_inc: float) -> Optional[str]:
+    """Why ``min_annual_increment`` > ``max_annual_increment`` is a config
+    error, or None when it is not one (a maximum ≥ 1 switches the cap off).
+
+    The master's RE floor then rises faster than the actual share may grow,
+    so the floor is missed every year and its shortfall paid; the run is
+    not infeasible.
+    """
+    if max_inc >= 1.0 or min_inc <= max_inc:
+        return None
+    return (f"min_annual_increment ({min_inc:g}) is greater than "
+            f"max_annual_increment ({max_inc:g}): the RE floor rises faster "
+            "than the renewable share may grow, so the floor is missed every "
+            "year and its shortfall is paid. Set min_annual_increment ≤ "
+            "max_annual_increment.")
 
 
 class SystemConfig(BaseModel):
@@ -1724,18 +2041,47 @@ class SystemConfig(BaseModel):
     demand_scale: float = Field(default=1.0, gt=0)
 
     # System parameters
-    loss_demand_threshold: float = Field(default=0.05, ge=0, le=1, alias="LOSS_DEMAND_TRHESHOLD")
     life_extension_cost_factor: float = Field(default=0.20, ge=0)
     sim_rooftop: bool = Field(default=False, alias="SIM_ROOFTOP")
     target_re_penetration: float = Field(default=1.0, ge=0, le=1, alias="TARGET_RE_PENETRATION")
     min_annual_increment: float = Field(default=0.01, ge=0, alias="MIN_ANNUAL_INCREMENT")
     max_annual_increment: float = Field(default=0.10, ge=0, alias="MAX_ANNUAL_INCREMENT")
-    max_annual_system_cost: float = Field(default=20e9, alias="MAX_ANNUAL_SYSTEM_COST")
-    max_npv_penalty_per_mw: float = Field(default=1e6, alias="MAX_NPV_PENALTY_PER_MW")
-    max_decommission_cost_per_mw: float = Field(default=5e5, alias="MAX_DECOMMISSION_COST_PER_MW")
-    force_replacement: float = Field(default=-5e5, alias="FORCE_REPLACEMENT")
+    max_annual_investment: float = Field(
+        default=20e9,
+        description="Annual investment budget ($/yr): in every master mode "
+                    "it limits the overnight cost of the technologies, battery "
+                    "technologies, transmission and reservoirs built in each "
+                    "investment period (soft, 10 $ per $ over it). With "
+                    "budget_scope 'total' the year's operating cost counts "
+                    "against it too. The old key max_annual_system_cost "
+                    "(MAX_ANNUAL_SYSTEM_COST) is read as this one",
+    )
+    max_annual_operating_cost: Optional[float] = Field(
+        default=None, gt=0,
+        description="Annual operating budget of the dispatch ($/yr): fuel, "
+                    "maintenance and fixed O&M of each year. The year's "
+                    "windows share it in proportion to their demand, what a "
+                    "window leaves unspent stays available to the next ones, "
+                    "and spending above it costs 1000 $ per $, so unaffordable "
+                    "fuel becomes unserved energy. Off (no cap) when unset",
+    )
+    budget_scope: Literal["investment", "total"] = Field(
+        default="investment",
+        description="What max_annual_investment covers in the master: "
+                    "'investment' (the overnight investment of each build "
+                    "year) or 'total' (that investment plus the money the "
+                    "year spends on operation: fuel, maintenance, start-ups, "
+                    "fixed O&M, life extension, decommissioning; no modelling "
+                    "penalty and no CO2 price). Benders "
+                    "decomposition supports 'investment' only (with 'total' "
+                    "the monolithic master is solved)",
+    )
     discount_rate: float = Field(default=0.05, ge=0, le=1)
-    base_lcoe: float = Field(default=93.0, ge=0)
+    base_lcoe: float = Field(
+        default=93.0, ge=0,
+        description="Revenue per MWh an existing generator produces in its NPV "
+                    "($/MWh), for the NPV-based retirement (npv_retirement)",
+    )
     inertia_limit_threshold: float = Field(default=0.1, ge=0, alias="INERTIA_LIMIT_THRESHOLD")
 
     # Frequency stability analysis parameters
@@ -1745,22 +2091,36 @@ class SystemConfig(BaseModel):
     frequency_nadir_limit: float = Field(default=49.0, gt=0, description="Minimum allowable frequency before UFLS (Hz)")
 
     # Configurable optimization parameters (previously hardcoded in Julia)
-    soc_end_tolerance: float = Field(default=0.05, ge=0, le=0.5, description="Battery end-of-horizon SOC tolerance (±fraction)")
+    soc_end_tolerance: float = Field(default=0.05, ge=0, le=0.5, description="End-level tolerance (fraction): reservoir band per window; battery year-end floor below the year-start SOC")
     min_cycling_ratio: float = Field(default=0.8, ge=0, le=1, description="Min battery cycling as fraction of capacity")
     min_cycling_period_days: float = Field(default=7.0, gt=0, description="Period for min cycling calculation (days)")
     reserve_static_default_ratio: float = Field(default=0.15, ge=0, le=1, description="Default static reserve as fraction of demand")
-    flexible_demand_benefit_ratio: float = Field(default=0.5, ge=0, le=1, description="Fraction of price for flexible demand benefit")
     demand_shift_cost_rate: float = Field(default=0.1, ge=0, description="Cost rate per hour of demand shift distance")
     dynamic_reserve_contribution: float = Field(default=0.5, ge=0, le=1, description="Fraction of rated_power for dynamic reserve")
     reserve_margin: float = Field(default=1.15, ge=1.0, description="Capacity adequacy reserve margin (e.g. 1.15 = 15%)")
-    npv_annual_return_rate: float = Field(default=0.15, ge=0, le=1, description="NPV revenue estimation rate for investments")
+    npv_annual_return_rate: float = Field(default=0.15, ge=0, le=1, description="An existing battery's yearly revenue in its NPV, as a fraction of its power investment cost (invest_cost × MW), for the NPV-based retirement")
+    # NPV-based retirement of existing units (development runs)
+    npv_retirement: bool = Field(
+        default=False,
+        description="Retire the existing generators and batteries whose NPV in the "
+                    "master's plan is below npv_retirement_threshold, and re-solve "
+                    "the master (every master mode)",
+    )
+    npv_retirement_max_iterations: int = Field(
+        default=5, ge=0,
+        description="Most rounds of retirements (each followed by a master re-solve)",
+    )
+    npv_retirement_threshold: float = Field(
+        default=0.0,
+        description="A unit whose NPV ($) is below this is retired",
+    )
 
     # Power flow mode selection
     power_flow_mode: Literal[
         "dcopf",           # Pure DC optimal power flow (default)
         "dcopf_ac_verify", # DCOPF + Newton-Raphson AC verification (post-hoc)
-        "acopf_soc",       # AC-OPF: Second-Order Cone relaxation (convex, HiGHS)
-        "acopf_qc",        # AC-OPF: Quadratic Convex relaxation (tighter, HiGHS)
+        "acopf_soc",       # AC-OPF: Second-Order Cone relaxation (convex, Clarabel/SCS)
+        "acopf_qc",        # AC-OPF: Quadratic Convex relaxation (tighter, Clarabel/SCS)
         "acopf_sdp",       # AC-OPF: Semidefinite Programming relaxation (tightest convex, SCS/Mosek)
         "acopf_polar",     # AC-OPF: Polar NLP exact formulation (Ipopt)
         "acopf_rect",      # AC-OPF: Rectangular NLP exact formulation (Ipopt)
@@ -1782,6 +2142,12 @@ class SystemConfig(BaseModel):
     fuels: dict[str, FuelConfig] = {}
     penalties: PenaltiesConfig = PenaltiesConfig()
     co2_budget: CO2BudgetConfig = CO2BudgetConfig()
+    # Set by the multi-system merge: one budget per original system. When
+    # non-empty the dispatch uses these instead of ``co2_budget`` and
+    # ``penalties.co2_budget_violation``. Never written to YAML.
+    co2_budget_by_system: list[SystemCO2Budget] = Field(
+        default_factory=list, exclude=True,
+    )
     criticality_penalties: CriticalityPenalties = CriticalityPenalties()
 
     # Demand
@@ -1821,7 +2187,8 @@ class SystemConfig(BaseModel):
 
     # Rooftop solar
     rooftop_solar_config: Optional[RooftopSolarConfig] = None
-    rooftop_max_potential: list[float] = []
+    # Per node (MW); None = rooftex's potential at that node
+    rooftop_max_potential: list[Optional[float]] = []
     rooftop_solar_emission_reduction: float = 0.7
 
     # Stochastic scenarios
@@ -1902,6 +2269,15 @@ class SystemConfig(BaseModel):
     def num_buses(self) -> int:
         return len(self.buses) if self.buses else self.num_nodes
 
+    @model_validator(mode="before")
+    @classmethod
+    def _rename_legacy_keys(cls, data: Any) -> Any:
+        """Read the keys older files use for a field under their new name
+        (``max_annual_system_cost`` → ``max_annual_investment``)."""
+        if isinstance(data, dict):
+            return rename_legacy_system_keys(data)
+        return data
+
     @model_validator(mode='after')
     def _ensure_buses(self) -> 'SystemConfig':
         """Auto-create one bus per node if no buses specified."""
@@ -1916,6 +2292,85 @@ class SystemConfig(BaseModel):
                 )
                 for i in range(n)
             ]
+        return self
+
+    @model_validator(mode='after')
+    def _normalize_demand_fractions(self) -> 'SystemConfig':
+        """Each node's demand is split over its buses: fractions must sum to 1.
+
+        The models multiply the node demand by every bus's fraction, so two
+        load buses left at the default 1.0 would serve the node's demand
+        twice. Rescale nodes whose fractions sum to anything else (the
+        Studio already writes normalized fractions).
+        """
+        if not self.buses:
+            return self
+        totals: dict[int, float] = {}
+        for b in self.buses:
+            totals[b.parent_node] = totals.get(b.parent_node, 0.0) + b.demand_fraction
+        rescaled = {n: t for n, t in totals.items() if t > 0 and abs(t - 1.0) > 1e-6}
+        if not rescaled:
+            return self
+        for b in self.buses:
+            if b.parent_node in rescaled:
+                b.demand_fraction = b.demand_fraction / rescaled[b.parent_node]
+        import logging
+        logging.getLogger(__name__).warning(
+            "System %r: bus demand_fraction values of node(s) %s summed to %s; "
+            "rescaled to 1 so each node's demand is served once.",
+            self.name, sorted(rescaled),
+            ", ".join(f"{rescaled[n]:g}" for n in sorted(rescaled)),
+        )
+        return self
+
+    @model_validator(mode='after')
+    def _warn_re_increments(self) -> 'SystemConfig':
+        """Warn when the RE minimum increment exceeds the maximum one."""
+        msg = re_increment_conflict(self.min_annual_increment, self.max_annual_increment)
+        if msg:
+            import logging
+            logging.getLogger(__name__).warning("System %r: %s", self.name, msg)
+        return self
+
+    @model_validator(mode='after')
+    def _resolve_outage_unit_ids(self) -> 'SystemConfig':
+        """Point generator / battery outage windows at the unit key.
+
+        The Studio names per-node pieces of a unit ``<unit_key>_n<node>``;
+        projects saved before the calendar wrote unit keys hold those ids,
+        which no unit matches. Rewrite them to (unit key, node) and warn
+        about windows whose element (generator, battery, electrolyzer or
+        fuel_storage fuel) does not exist.
+        """
+        if not self.outage_schedule:
+            return self
+        import logging
+        import re
+        # The fuel model's fuels: the primary-energy sources, or, without
+        # them, the fuels of the entry points (as the runner builds them).
+        if self.primary_energy_sources:
+            pe_fuels = set(self.primary_energy_sources)
+        else:
+            pe_fuels = {f for fe in (self.fuel_entry_points or [])
+                        for f in (fe.fuels or ([fe.fuel] if fe.fuel else []))}
+        keys = {"generator": set(self.generators), "battery": set(self.batteries),
+                "electrolyzer": set(self.electrolyzers or {}),
+                "fuel_storage": pe_fuels}
+        unknown = []
+        for i, ow in enumerate(self.outage_schedule):
+            units = keys.get(ow.element_type)
+            if units is None or ow.element_id in units:
+                continue
+            m = re.fullmatch(r"(.+)_n(\d+)", ow.element_id)
+            if m and m.group(1) in units:
+                self.outage_schedule[i] = ow.model_copy(update={
+                    "element_id": m.group(1), "node": int(m.group(2))})
+            else:
+                unknown.append(f"{ow.element_type} {ow.element_id!r}")
+        if unknown:
+            logging.getLogger(__name__).warning(
+                "System %r: outage window(s) for unknown element(s) %s are ignored.",
+                self.name, ", ".join(unknown))
         return self
 
     @model_validator(mode='after')
@@ -1960,14 +2415,37 @@ class SystemConfig(BaseModel):
 
 
 class SystemLinkConfig(BaseModel):
-    """Inter-system transmission link configuration."""
+    """Inter-system link configuration.
+
+    ``link_type="transmission"`` (default): each connection becomes an
+    electrical line of the merged network. ``link_type="fuel_route"``: each
+    connection becomes a pair of primary-energy transport routes (one per
+    direction) for ``fuel``; the per-connection lists then mean
+    ``existing_capacity_MW`` = route capacity (fuel units/day),
+    ``cost_per_mw_km`` = transport cost ($/unit/km), ``loss_factor`` =
+    losses per 100 km and ``distance_km`` = route length. Route capacity
+    investment follows ``fuel_infrastructure`` of the fuel, so
+    ``max_investment_MW`` and ``investment_cost_per_MW`` are not used.
+    """
 
     systems: list[str] = Field(description="Pair of connected systems")
     connections: list[list[int]] = Field(description="Node pairs [[n1_sys1, n1_sys2], ...]")
+    link_type: Literal["transmission", "fuel_route"] = Field(
+        default="transmission",
+        description="Electrical line(s) or primary-energy fuel route(s)",
+    )
+    fuel: Optional[str] = Field(
+        default=None,
+        description="Fuel carried by a fuel_route link (key of primary_energy_sources)",
+    )
     existing_capacity_mw: list[float] = Field(alias="existing_capacity_MW")
     max_investment_mw: list[float] = Field(alias="max_investment_MW")
     investment_cost_per_mw: list[float] = Field(alias="investment_cost_per_MW")
-    loss_factor: list[float]
+    loss_factor: list[float] = Field(
+        default_factory=list,
+        description="fuel_route links: losses per 100 km per connection (missing = 0). "
+                    "Not used by transmission links (their losses come from resistance_pu)",
+    )
     distance_km: list[float]
     cost_per_mw_km: list[float]
     reactance_pu: list[float] = Field(
@@ -2001,7 +2479,6 @@ class SystemLinkConfig(BaseModel):
     voltage_kv: list[float] = Field(default_factory=list)
     line_type: list[str] = Field(default_factory=list)
     length_km: list[float] = Field(default_factory=list)
-    base_impedance: list[float] = Field(default_factory=list)
     reactance_per_km: list[float] = Field(default_factory=list)
     susceptance_pu: list[float] = Field(default_factory=list)
     num_circuits: list[int] = Field(default_factory=list)
@@ -2040,13 +2517,6 @@ class MetaNetworkConfig(BaseModel):
 
     systems: list[str] = Field(description="List of system names to include")
     systems_links: list[SystemLinkConfig] = []
-    dynamic_transfer_pricing: bool = True
-    inter_system_loss_segments: int = Field(
-        default=2,
-        ge=0,
-        le=5,
-        description="PWL segments for inter-system link losses (0=linear fallback)",
-    )
 
 
 # =============================================================================
@@ -2102,6 +2572,15 @@ class ESFEXConfig(BaseModel):
 
     # Console / file logging verbosity
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+
+    # Set by load_config: dotted paths of the file's keys that nothing reads.
+    _unknown_keys: list[str] = PrivateAttr(default_factory=list)
+
+    @property
+    def unknown_keys(self) -> list[str]:
+        """Keys of the loaded file that ESFEX ignores (misspelt or obsolete),
+        as dotted paths such as ``systems.Cuba.generators.gas_1.dorop``."""
+        return list(self._unknown_keys)
 
     @model_validator(mode="after")
     def validate_systems_exist(self) -> "ESFEXConfig":

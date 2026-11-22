@@ -129,3 +129,77 @@ def test_absorb_dysfunctional_keeps_functional():
     # total demand preserved (moved, not dropped)
     demand_after = sum(b.demand_fraction for b in state.buses.values())
     assert abs(demand_after - demand_before) < 1e-9
+
+
+def test_absorb_skips_when_no_demand_assigned():
+    """During the build, demand is not yet assigned, so every component reads
+    demand-less. The absorb pass must then be a no-op — otherwise a real
+    islanded subsystem with generation but no (yet-assigned) demand (Hokkaido,
+    Shikoku, Okinawa) would be condemned as a dead fragment and deleted, its
+    generation relocated to the mainland, and its load shed at VOLL once demand
+    IS distributed. Keep the faithful topology; islands stay isolated."""
+    from esfex.visualization.data.gui_model import GuiGeneratorInstance
+    from esfex.visualization.workflows.grid_mapping_builder import (
+        _absorb_dysfunctional_islands,
+    )
+
+    state = GuiSystemState(
+        name="A",
+        buses={
+            # main component (no demand assigned yet — as during the build)
+            "bus_0": _bus("bus_0", 0.0, 0.0),
+            "bus_1": _bus("bus_1", 0.0, 0.2),
+            # remote island with generation but no demand yet (a real island
+            # subsystem, e.g. Hokkaido, before demand distribution)
+            "bus_2": _bus("bus_2", _km_to_deg(300), 0.1),
+            "bus_3": _bus("bus_3", _km_to_deg(300), 0.15),
+        },
+        generators={
+            "g_isl": GuiGeneratorInstance(
+                instance_id="g_isl", unit_key="i", name="I", fuel="Coal",
+                gen_type="Non-renewable", node=0, rated_power=500.0,
+                bus="bus_2", latitude=_km_to_deg(300), longitude=0.1),
+        },
+        transmission_lines=[
+            _line("l0", "bus_0", "bus_1"),
+            _line("l2", "bus_2", "bus_3"),   # the island's internal link
+        ],
+    )
+
+    counts = _absorb_dysfunctional_islands(state, ParseResult())
+
+    # Nothing absorbed: the island is preserved intact, gen stays put.
+    assert counts["islands_absorbed"] == 0
+    assert counts["buses_removed"] == 0
+    assert "bus_2" in state.buses and "bus_3" in state.buses
+    assert state.generators["g_isl"].bus == "bus_2"
+
+
+def test_reconnect_line_impedance_on_system_base():
+    """A reconnection line's impedance is on ac_power_flow.base_mva (it used
+    the 100 MVA default whatever the system base)."""
+    from esfex.visualization.workflows.grid_mapping_quality import (
+        estimate_line_pu_params,
+    )
+    d3 = _km_to_deg(3.0)
+    state = GuiSystemState(
+        name="R",
+        buses={
+            "bus_0": _bus("bus_0", 0.0, 0.0),
+            "bus_1": _bus("bus_1", 0.0, 0.2),
+            "bus_2": _bus("bus_2", d3, 0.6),
+            "bus_3": _bus("bus_3", d3, 0.65),
+        },
+        transmission_lines=[_line("l0", "bus_0", "bus_1"),
+                            _line("l1", "bus_2", "bus_3")],
+    )
+    state.ac_power_flow.base_mva = 200.0
+    counts = _reconnect_isolated_bounded(
+        state, ParseResult(), max_km=50.0, snap_km=0.5)
+    assert counts["linked"] == 1
+    ln = next(ln for ln in state.transmission_lines
+              if ln.line_id.startswith("reconnect_"))
+    r, x, b = estimate_line_pu_params(220.0, ln.length_km, 200.0)
+    assert ln.reactance_pu == pytest.approx(x)
+    assert ln.resistance_pu == pytest.approx(r)
+    assert ln.susceptance_pu == pytest.approx(b)

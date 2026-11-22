@@ -64,7 +64,8 @@ def _get_or_create_app() -> QApplication:
     return app
 
 
-def run_studio(config=None, system: str | None = None) -> MainWindow:
+def run_studio(config=None, system: str | None = None,
+               output: str | None = None) -> MainWindow:
     """Create and show the editor window.
 
     Parameters
@@ -73,6 +74,8 @@ def run_studio(config=None, system: str | None = None) -> MainWindow:
         An existing configuration to load into the editor.
     system : str | None
         Name of the system to focus on (default: first).
+    output : str | None
+        File that File > Save writes to (default: the ``config`` file).
 
     Returns
     -------
@@ -100,6 +103,12 @@ def run_studio(config=None, system: str | None = None) -> MainWindow:
 
     lang = prefs.get("general", {}).get("language", "en")
     init_i18n(lang)
+    # Charts must draw Japanese text and CJK node names in any language.
+    from esfex.visualization.plot_fonts import configure_cjk_fallback
+    configure_cjk_fallback()
+    # Web views (map, SLD, dashboard, charts) read their texts from web.*.
+    from esfex.visualization import web_i18n
+    web_i18n.install()
     splash.set_progress(25, tr("splash.init_translations"))
 
     theme_name = prefs.get("general", {}).get("theme", "GitHub Light")
@@ -141,24 +150,35 @@ def run_studio(config=None, system: str | None = None) -> MainWindow:
             config = load_config(config_path)
         if isinstance(config, ESFEXConfig):
             window._loaded_config = config
+            # The GUI is populated once the map is ready (_on_map_ready);
+            # until then nothing may be saved over the user's file.
+            window._set_project_load_pending(True)
             # Read raw YAML dict for GUI-only keys (e.g. visual_scaling)
             if config_path and config_path.is_file():
                 with open(config_path, "r", encoding="utf-8") as fh:
                     window._raw_config_dict = _yaml.safe_load(fh) or {}
             # Actual population happens in Phase 3 (GuiModel + serializer)
+        if config_path is not None:
+            window._config_path = str(config_path)
+            window._load_base_dir = str(config_path.parent)
+    if output:
+        window._config_path = str(output)
 
     splash.set_progress(85, tr("splash.loading_plugins"))
 
     # Load and register plugins in GUI mode
+    import logging
     try:
         from esfex.plugins import get_plugin_manager
 
         pm = get_plugin_manager()
         loaded_config = getattr(window, "_loaded_config", None)
         pm.load_all(loaded_config, gui_mode=True)
+        if loaded_config is not None:
+            for err in pm.apply_config(loaded_config):
+                logging.getLogger(__name__).warning("Invalid plugin configuration: %s", err)
         pm.register_gui_extensions(window)
     except Exception:
-        import logging
         logging.getLogger(__name__).exception("Plugin loading failed in GUI mode")
 
     splash.set_progress(100, tr("splash.ready"))

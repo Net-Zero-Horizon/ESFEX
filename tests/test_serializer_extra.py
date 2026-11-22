@@ -66,7 +66,7 @@ def _no_user_pref_overrides(monkeypatch):
 # helpers for building valid per-node generator / battery arrays
 # ---------------------------------------------------------------------------
 
-def _gen_arrays(n: int, *, rated, invest_cost=None, invest_max=None):
+def _gen_arrays(n: int, *, rated, invest_cost=None):
     """Return kwargs for the per-node GeneratorConfig arrays."""
     d = dict(
         life_time=[25] * n,
@@ -91,13 +91,10 @@ def _gen_arrays(n: int, *, rated, invest_cost=None, invest_max=None):
     )
     if invest_cost is not None:
         d["invest_cost"] = list(invest_cost)
-    if invest_max is not None:
-        d["invest_max_power"] = list(invest_max)
     return d
 
 
-def _bat_arrays(n: int, *, rated, capacity, invest_cost=None, invest_max=None,
-                invest_cost_energy=None, invest_max_capacity=None):
+def _bat_arrays(n: int, *, rated, capacity, invest_cost=None, invest_max=None):
     d = dict(
         life_time=[15] * n,
         initial_age=[0] * n,
@@ -128,10 +125,6 @@ def _bat_arrays(n: int, *, rated, capacity, invest_cost=None, invest_max=None,
         d["invest_cost"] = list(invest_cost)
     if invest_max is not None:
         d["invest_max_power"] = list(invest_max)
-    if invest_cost_energy is not None:
-        d["invest_cost_energy"] = list(invest_cost_energy)
-    if invest_max_capacity is not None:
-        d["invest_max_capacity"] = list(invest_max_capacity)
     return d
 
 
@@ -179,8 +172,7 @@ def _rich_system(name="Rich"):
         fuel="Gas",
         technology="CCGT",
         **_gen_arrays(n, rated=[100.0, 0.0],
-                      invest_cost=[0.0, 5000.0],
-                      invest_max=[0.0, 50.0]),
+                      invest_cost=[0.0, 5000.0]),
         fuel_cost_curve=[
             CostCurveConfig(curve_type="linear", price_at_zero=10.0,
                             price_at_max=40.0, num_segments=4),
@@ -199,9 +191,7 @@ def _rich_system(name="Rich"):
         name="BESS",
         fuel="None",
         **_bat_arrays(n, rated=[20.0, 0.0], capacity=[80.0, 0.0],
-                      invest_cost=[0.0, 1000.0], invest_max=[0.0, 30.0],
-                      invest_cost_energy=[0.0, 200.0],
-                      invest_max_capacity=[0.0, 120.0]),
+                      invest_cost=[0.0, 1000.0], invest_max=[0.0, 30.0]),
         discharge_cost_curve=[
             CostCurveConfig(curve_type="flat"),
             CostCurveConfig(curve_type="exponential", base_price=5.0,
@@ -265,10 +255,8 @@ def _rich_system(name="Rich"):
         name="GasField", unit="MWh_th",
         max_availability=[10000.0, 0.0], import_cost=[3.0, 4.0],
         storage_capacity=[500.0, 0.0], initial_storage_level=[0.5, 0.0],
-        min_storage_level=0.1, storage_investment_cost=100.0,
+        min_storage_level=0.1,
         transport_cost=0.5, transport_losses=0.02,
-        max_storage_investment_per_node=1000.0,
-        max_transport_investment_per_arc=2000.0,
     )
 
     fuel_infra = FuelInfrastructureConfig(
@@ -319,7 +307,7 @@ def _rich_system(name="Rich"):
         fuel_infrastructure=fuel_infra,
         electric_demand={"residential": DemandSectorConfig(
             is_flexible=True, flexibility_ratio=0.2, criticality="high",
-            delay_tolerance=3, price_sensitivity=0.1)},
+            delay_tolerance=3)},
         sector_distribution={0: {"residential": 1.0}, 1: {"residential": 1.0}},
         non_electric_demand={"heat": NonElectricDemandConfig(
             fuel="Gas", unit="MWh_th", demand=[100, 200])},
@@ -372,10 +360,10 @@ def test_rich_config_to_gui_state_components():
     assert st.nodes[0].centroid_lat == 10.0
     assert st.nodes[0].reserve_static == 5.0
 
-    # generator instance at node 0 only (presence via rated_power),
-    # plus an investment-only instance at node 1 (invest_max_power > 0).
+    # generator instance at node 0 only (presence via rated_power; an
+    # invest_cost alone gives no presence)
     assert "GasPlant_n0" in st.generators
-    assert "GasPlant_n1" in st.generators
+    assert "GasPlant_n1" not in st.generators
     g0 = st.generators["GasPlant_n0"]
     assert g0.gen_type == "Non-renewable"
     assert g0.rated_power == 100.0
@@ -472,6 +460,30 @@ def test_rich_roundtrip_yaml_reloads(tmp_path):
     cfg2 = ESFEXConfig(**loaded)
     states2 = S.config_to_gui_states(cfg2)
     assert "RT" in states2
+
+
+def test_nominal_frequency_follows_the_buses(tmp_path):
+    """A 60 Hz network is written with frequency_nominal 60 Hz and the nadir
+    limit moved with it (it used to keep the 50 Hz / 49 Hz defaults);
+    rocof_limit (Hz/s) is unchanged."""
+    cfg = _rich_config("F")
+    assert cfg.systems["F"].frequency_nominal == 50.0
+    states = S.config_to_gui_states(cfg)
+    for b in states["F"].buses.values():
+        b.frequency_hz = 60.0
+    out = tmp_path / "f.yaml"
+    S.gui_state_to_yaml(states, cfg, out)
+    sysd = yaml.safe_load(out.read_text())["systems"]["F"]
+    assert sysd["frequency_nominal"] == 60.0
+    assert sysd["frequency_nadir_limit"] == pytest.approx(59.0)
+    assert sysd["rocof_limit"] == 2.0
+
+    # A mixed 50/60 Hz system keeps a nominal frequency some buses run at.
+    next(iter(states["F"].buses.values())).frequency_hz = 50.0
+    S.gui_state_to_yaml(states, cfg, out)
+    sysd = yaml.safe_load(out.read_text())["systems"]["F"]
+    assert sysd["frequency_nominal"] == 50.0
+    assert sysd["frequency_nadir_limit"] == 49.0
 
 
 # ---------------------------------------------------------------------------
@@ -665,7 +677,6 @@ def test_config_to_inter_system_links_rich_metadata():
         voltage_kv=[330.0],
         line_type=["overhead"],
         length_km=[210.0],
-        base_impedance=[100.0],
         reactance_per_km=[0.4],
         susceptance_pu=[0.001],
         num_circuits=[3],

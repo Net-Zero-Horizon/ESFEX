@@ -1,15 +1,29 @@
 """Hourly demand-DENSITY model (XGBoost) for spatial per-node demand.
 
-The model predicts ``log10(demand_mw / area_km2)`` per location and hour from
-socio-economic density (population & GDP per km²), climate (temperature,
-HDD/CDD), and calendar features (cyclical time, weekend, holidays). Multiplying
-the predicted density by each node's area gives a genuinely spatially-resolved
-hourly demand — replacing the old "national total split by ~uniform weights"
-behaviour that collapsed to total/num_nodes.
+The model predicts ``log10(demand_mw / area_km2)`` per 0.25° cell and hour
+from the place (population and GDP density, GDP per person, position, long-run
+climate, how electricity is used there), the temperature of the hour and the
+calendar. Multiplying the predicted density by each cell's area and summing
+the cells of a node gives a spatially resolved hourly demand.
 
-Files (in ``MODELS_DIR``):
-    demand_density_hourly_xgb.json        — the XGBoost booster
-    demand_density_hourly_xgb.feats.json  — feature order, target, train ranges
+The shipped model is the final model of the article "Global map of
+electricity demand sensitivity to warming learned from observed hourly load"
+(specification ``level_geo_two_shallow``; provenance in its meta file and in
+``scripts/demand_model``). It was trained in two rounds: a shallow booster on
+the fixed predictors of a place gives its level, which is the base margin of
+the hourly booster. Its hours are UTC: :func:`predict_region_cell_demand`
+returns UTC rows (8760 per year, 29 February skipped) and the caller puts them
+on the time base it needs. The predictors are built in
+:mod:`esfex.models.demand_density_features`, as the article's training table
+built them.
+
+Files (shipped in ``esfex/assets/models``; a copy of the three model files in
+``MODELS_DIR`` takes precedence):
+    demand_density_v2.ubj            — hourly round (``.json`` accepted)
+    demand_density_v2.level.ubj      — level round
+    demand_density_v2.meta.json      — features, training ranges, provenance
+    demand_density_v2.grids.npz      — climate normals and energy-use context
+    demand_density_v2.countries.csv  — per country: context, time-zone offsets
 
 Pipeline usage lives in
 ``esfex.visualization.workflows.demand_estimation_analysis.DemandProfileBuilder._build_density``.
@@ -17,44 +31,76 @@ Pipeline usage lives in
 
 from __future__ import annotations
 
-import datetime
 import json
 import logging
 import math
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
-from esfex.paths import MODELS_DIR
+from esfex.models import demand_density_features as dfeat
+from esfex.paths import BUNDLED_MODELS_DIR, model_path
 
 logger = logging.getLogger(__name__)
 
-_MODEL_FILENAME = "demand_density_hourly_xgb.json"
-_FEATS_FILENAME = "demand_density_hourly_xgb.feats.json"
-
-# Local equirectangular metric constants (match grid_mapping_builder).
-_M_PER_DEG_LAT = 110_540.0
-_M_PER_DEG_LNG_EQ = 111_320.0
-
+MODEL_STEM = "demand_density_v2"
+_MODEL_FILENAME = f"{MODEL_STEM}.json"
+_MODEL_BUNDLED = f"{MODEL_STEM}.ubj"      # same booster, binary
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Model wrapper
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _model_files() -> Optional[tuple[Path, Path, Path]]:
+    """(hourly, level, meta) files of the model in use, or None if incomplete.
+
+    A model in MODELS_DIR replaces the shipped one only as a whole: its level
+    round and meta file are read from the same folder. An incomplete copy
+    there is ignored, with a warning.
+    """
+    def complete(hourly: Path):
+        folder = hourly.parent
+        level = next((folder / f"{MODEL_STEM}.level{ext}" for ext in (".ubj", ".json")
+                      if (folder / f"{MODEL_STEM}.level{ext}").exists()), None)
+        meta = folder / f"{MODEL_STEM}.meta.json"
+        if not hourly.exists() or level is None or not meta.exists():
+            return None
+        return hourly, level, meta
+
+    hourly = model_path(_MODEL_FILENAME, _MODEL_BUNDLED)
+    found = complete(hourly)
+    if found is None and hourly.parent != BUNDLED_MODELS_DIR:
+        logger.warning("%s lacks its level round or meta file; using the model "
+                       "shipped with ESFEX.", hourly)
+        found = complete(BUNDLED_MODELS_DIR / _MODEL_BUNDLED)
+    return found
+
+
+def _context_dir(model_dir: Path) -> Path:
+    """Folder of the grids and country table: the model's, else the shipped one."""
+    if (model_dir / f"{MODEL_STEM}.grids.npz").exists():
+        return model_dir
+    return BUNDLED_MODELS_DIR
+
+
 class DemandDensityModel:
-    """XGBoost hourly demand-density predictor (``log10(MW/km²)``)."""
+    """Two-round XGBoost hourly demand-density predictor (``log10(MW/km²)``)."""
 
     def __init__(self) -> None:
-        self._model = None
+        self._model = None            # hourly round
+        self._level = None            # level round
         self.feature_names: list[str] = []
+        self.level_features: list[str] = []
         self.target: str = ""
-        self.train_ranges: dict[str, list[float]] = {}
+        self.meta: dict = {}
+        self.context: Optional[dfeat.DensityContext] = None
 
     @classmethod
     def is_available(cls) -> bool:
-        """True if the model file is present and xgboost importable."""
-        if not (MODELS_DIR / _MODEL_FILENAME).exists():
+        """True if the model files are present and xgboost importable."""
+        if _model_files() is None:
             return False
         try:
             import xgboost  # noqa: F401
@@ -64,41 +110,71 @@ class DemandDensityModel:
 
     @classmethod
     def load_bundled(cls) -> "DemandDensityModel":
-        """Load the density model and its feature sidecar from MODELS_DIR."""
-        model_path = MODELS_DIR / _MODEL_FILENAME
-        feats_path = MODELS_DIR / _FEATS_FILENAME
-        if not model_path.exists():
+        """Load the density model, its meta file and context: a copy in
+        MODELS_DIR if there is one, else the model shipped with ESFEX."""
+        files = _model_files()
+        if files is None:
             raise FileNotFoundError(
-                f"No demand-density model at {model_path}. "
-                "Copy demand_density_hourly_xgb.json into MODELS_DIR."
-            )
+                f"No complete demand-density model ({MODEL_STEM}.ubj, "
+                f"{MODEL_STEM}.level.ubj, {MODEL_STEM}.meta.json) at "
+                f"{model_path(_MODEL_FILENAME, _MODEL_BUNDLED).parent}: the ESFEX "
+                "installation is missing its bundled models; reinstall ESFEX.")
         try:
             import xgboost as xgb
         except ImportError as exc:  # pragma: no cover - env dependent
             raise ImportError(
                 "xgboost is required for the demand-density model."
             ) from exc
-
+        hourly, level, meta_path = files
         inst = cls()
         inst._model = xgb.Booster()
-        inst._model.load_model(str(model_path))
-
-        # Feature order: prefer the sidecar; fall back to the booster's own
-        # embedded feature_names so we never mis-align columns.
-        meta: dict = {}
-        if feats_path.exists():
-            meta = json.loads(feats_path.read_text())
-        inst.feature_names = (
-            list(meta.get("features", []))
-            or list(inst._model.feature_names or [])
-        )
-        inst.target = meta.get("target", "log10(demand_mw/area_km2)")
-        inst.train_ranges = meta.get("train_ranges", {}) or {}
-        logger.info(
-            "Loaded demand-density model from %s (%d features)",
-            model_path, len(inst.feature_names),
-        )
+        inst._model.load_model(str(hourly))
+        inst._level = xgb.Booster()
+        inst._level.load_model(str(level))
+        inst.meta = json.loads(meta_path.read_text())
+        inst.feature_names = list(inst.meta["features"])
+        inst.level_features = list(inst.meta["level_features"])
+        inst.target = inst.meta.get("target", "log10(demand_mw/area_km2)")
+        inst.context = dfeat.DensityContext.load(_context_dir(hourly.parent), MODEL_STEM)
+        logger.info("Loaded demand-density model from %s (%d features, level round "
+                    "on %d)", hourly, len(inst.feature_names), len(inst.level_features))
         return inst
+
+    @property
+    def hdd_base(self) -> float:
+        return float(self.meta.get("hdd_base", dfeat.HDD_BASE))
+
+    @property
+    def cdd_base(self) -> float:
+        return float(self.meta.get("cdd_base", dfeat.CDD_BASE))
+
+    def level_margin(self, statics: np.ndarray) -> np.ndarray:
+        """Level round on rows of ``self.level_features``: the base margin of
+        the hourly round (``log10`` density)."""
+        from esfex.models.xgb_device import predict as _xgb_predict
+
+        return np.asarray(_xgb_predict(self._level, statics,
+                                       feature_names=self.level_features),
+                          dtype=np.float32)
+
+    def predict_log_density(self, features: np.ndarray,
+                            base_margin: Optional[np.ndarray] = None) -> np.ndarray:
+        """``log10`` density for rows of ``self.feature_names``.
+
+        The level round runs on the rows' level features unless its result
+        (*base_margin*, one value per row) is given; the hourly round starts
+        from it. Same as the article's ``model.predict``.
+        """
+        from esfex.models.xgb_device import predict as _xgb_predict
+
+        if self._model is None:
+            raise RuntimeError("Model not loaded. Call load_bundled() first.")
+        X = np.ascontiguousarray(features, dtype=np.float32)
+        if base_margin is None:
+            cols = [self.feature_names.index(f) for f in self.level_features]
+            base_margin = self.level_margin(X[:, cols])
+        return np.asarray(_xgb_predict(self._model, X, feature_names=self.feature_names,
+                                       base_margin=base_margin), dtype=np.float64)
 
     def predict_density_mw_per_km2(self, features: np.ndarray) -> np.ndarray:
         """Predict demand density (MW/km²) for a feature matrix.
@@ -106,14 +182,7 @@ class DemandDensityModel:
         ``features`` must have columns in ``self.feature_names`` order.
         Returns a 1-D array of MW/km² (= ``10 ** model_output``).
         """
-        from esfex.models.xgb_device import predict as _xgb_predict
-
-        if self._model is None:
-            raise RuntimeError("Model not loaded. Call load_bundled() first.")
-        log_density = np.asarray(
-            _xgb_predict(self._model, features, feature_names=self.feature_names),
-            dtype=np.float64)
-        return np.power(10.0, log_density)
+        return np.power(10.0, self.predict_log_density(features))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -121,9 +190,124 @@ class DemandDensityModel:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _cyclical(values: np.ndarray, period: float) -> tuple[np.ndarray, np.ndarray]:
-    angle = 2.0 * math.pi * values / period
-    return np.sin(angle), np.cos(angle)
+def clean_temperature(temperature_hourly, hpy: int = 8760) -> np.ndarray:
+    """*hpy* hours of temperature (°C) with non-finite values replaced.
+
+    A short or missing series is 20 °C throughout; NaN/inf hours (e.g. a
+    degraded ERA5 fallback after a CMIP6 fetch failure) take the mean of the
+    finite ones, so they never reach HDD/CDD and the predictors.
+    """
+    temp = (np.asarray(temperature_hourly[:hpy], dtype=np.float64).copy()
+            if temperature_hourly is not None and len(temperature_hourly) >= hpy
+            else np.full(hpy, 20.0, dtype=np.float64))
+    bad = ~np.isfinite(temp)
+    if bad.any():
+        temp[bad] = float(temp[~bad].mean()) if (~bad).any() else 20.0
+    return temp
+
+
+def density_feature_block(
+    *,
+    latitude: np.ndarray,
+    longitude: np.ndarray,
+    log_pop_density: np.ndarray,
+    log_gdp_density: np.ndarray,
+    log_gdp_per_cap: np.ndarray,
+    t_mean: np.ndarray,
+    t_range: np.ndarray,
+    hh_elec_share: np.ndarray,
+    bld_share_elec: np.ndarray,
+    temperature_utc: np.ndarray,
+    year: int,
+    feature_order: list[str],
+    country_iso: str,
+    offset_hours: np.ndarray,
+    hdd_base: float = dfeat.HDD_BASE,
+    cdd_base: float = dfeat.CDD_BASE,
+) -> np.ndarray:
+    """Predictor matrix for *n* places over the 8760 UTC rows of *year*.
+
+    Every per-place argument is an array of length *n*; *temperature_utc* is
+    one UTC year shared by the places (8760, 29 February skipped).
+    *offset_hours* is each place's standard offset for the local date
+    (:meth:`DensityContext.std_offset`). Rows run place by place (place 0's
+    8760 hours first). Returns float32 columns in *feature_order*.
+    """
+    n = len(latitude)
+    hpy = len(temperature_utc)
+    idx = dfeat.utc_row_hours(year, hpy)
+    temp = np.asarray(temperature_utc, dtype=np.float32)
+    shared = {"temperature": temp,
+              "hdd": np.maximum(hdd_base - temp.astype(np.float64), 0.0),
+              "cdd": np.maximum(temp.astype(np.float64) - cdd_base, 0.0)}
+    per_place = {"latitude": latitude, "longitude": longitude,
+                 "log_pop_density": log_pop_density, "log_gdp_density": log_gdp_density,
+                 "log_gdp_per_cap": log_gdp_per_cap, "t_mean": t_mean, "t_range": t_range,
+                 "hh_elec_share": hh_elec_share, "bld_share_elec": bld_share_elec}
+    X = np.empty((n * hpy, len(feature_order)), dtype=np.float32)
+    col = {f: j for j, f in enumerate(feature_order)}
+    unknown = [f for f in feature_order if f not in shared and f not in per_place
+               and f not in dfeat.CAL_UTC and f not in dfeat.CAL_LOCAL]
+    if unknown:
+        raise ValueError(f"Density feature(s) not built: {unknown}")
+    for f, v in per_place.items():
+        if f in col:
+            X[:, col[f]] = np.repeat(np.asarray(v, dtype=np.float64), hpy)
+    for f, v in shared.items():
+        if f in col:
+            X[:, col[f]] = np.tile(v, n)
+    offsets = np.asarray(offset_hours, dtype=np.float64)
+    for off in np.unique(offsets):
+        places = np.where(offsets == off)[0]
+        cal = dfeat.utc_calendar(country_iso, year, idx, float(off))
+        rows = (places[:, None] * hpy + np.arange(hpy)[None, :]).ravel()
+        for f in dfeat.CAL_UTC:
+            if f in col:
+                X[rows, col[f]] = np.tile(cal[f], len(places))
+        loc = dfeat.local_solar_calendar(
+            cal["hour_sin"][None, :], cal["hour_cos"][None, :],
+            cal["month_sin"][None, :], cal["month_cos"][None, :],
+            np.asarray(latitude, dtype=np.float64)[places, None],
+            np.asarray(longitude, dtype=np.float64)[places, None])
+        for f in dfeat.CAL_LOCAL:
+            if f in col:
+                X[rows, col[f]] = np.broadcast_to(loc[f], (len(places), hpy)).ravel()
+    return X
+
+
+def place_predictors(model: "DemandDensityModel", lats, lons, country_iso: str,
+                     fallback_temperature_utc: Optional[np.ndarray] = None,
+                     fallback_year: Optional[int] = None) -> dict:
+    """The climate normals, energy-use context and local-date offset of places.
+
+    From the shipped grids (:class:`DensityContext`). A place with no land cell
+    within 1° takes ``t_mean``/``t_range`` from the daily means of
+    *fallback_temperature_utc* (one UTC year, *fallback_year*), the definition
+    of the training table; without it they stay NaN (the model's
+    missing-value branches).
+    """
+    ctx = model.context
+    lats = np.asarray(lats, dtype=np.float64)
+    lons = np.asarray(lons, dtype=np.float64)
+    tm, tr = ctx.normals(lats, lons)
+    tm = tm.astype(np.float64)
+    tr = tr.astype(np.float64)
+    missing = ~np.isfinite(tm) | ~np.isfinite(tr)
+    if missing.any() and fallback_temperature_utc is not None:
+        idx = dfeat.utc_row_hours(int(fallback_year), len(fallback_temperature_utc))
+        m, r = dfeat.climate_normals(dfeat.daily_means(fallback_temperature_utc, idx))
+        tm[missing], tr[missing] = m, r
+        logger.info("Density model: %d place(s) without gridded climate normals use "
+                    "the daily means of their temperature year (t_mean %.1f C, "
+                    "t_range %.1f C).", int(missing.sum()), m, r)
+    hh, bld = ctx.energy_context(lats, lons, country_iso)
+    if (~np.isfinite(hh)).any():
+        logger.warning("Density model: no electricity-use statistics for %s; %d "
+                       "place(s) go without them (missing-value branches).",
+                       country_iso or "this country", int((~np.isfinite(hh)).sum()))
+    off = np.array([ctx.std_offset(country_iso, float(lo)) for lo in lons])
+    return {"t_mean": tm, "t_range": tr, "hh_elec_share": hh, "bld_share_elec": bld,
+            "offset_hours": off}
 
 
 def build_density_features(
@@ -137,105 +321,37 @@ def build_density_features(
     base_year: int,
     feature_order: list[str],
     country_iso: str = "",
-    hdd_base: float = 18.0,
-    cdd_base: float = 24.0,
-    train_ranges: Optional[dict[str, list[float]]] = None,
+    t_mean: float = float("nan"),
+    t_range: float = float("nan"),
+    hh_elec_share: float = float("nan"),
+    bld_share_elec: float = float("nan"),
+    offset_hours: Optional[float] = None,
+    hdd_base: float = dfeat.HDD_BASE,
+    cdd_base: float = dfeat.CDD_BASE,
 ) -> np.ndarray:
-    """Build one base-year (8760-hour) density-feature matrix for a node.
+    """One place's predictor matrix for the 8760 UTC rows of *base_year*.
 
-    Socio-economic inputs are constant over the year; climate and calendar
-    vary hourly. Columns are returned in ``feature_order`` so they line up with
-    the booster regardless of how the feature list is declared. Inter-annual
-    growth is handled by the caller via national-total calibration, so this
-    builds the base year only.
+    *temperature_hourly* is the UTC year (29 February skipped); a short series
+    is 20 °C and NaN hours take the mean of the rest. *offset_hours* (the
+    standard offset of the local date) defaults to the longitude band.
+    Columns follow *feature_order*.
     """
-    hpy = 8760
-    ranges = train_ranges or {}
-
-    temp = (
-        np.asarray(temperature_hourly[:hpy], dtype=np.float64).copy()
-        if len(temperature_hourly) >= hpy
-        else np.full(hpy, 20.0, dtype=np.float64)
-    )
-    # NaN/inf temperature (e.g. a degraded ERA5 fallback after a CMIP6 fetch
-    # failure) would propagate through HDD/CDD into the feature matrix; scrub it.
-    _bad = ~np.isfinite(temp)
-    if _bad.any():
-        temp[_bad] = float(temp[~_bad].mean()) if (~_bad).any() else 20.0
-    hdd = np.maximum(hdd_base - temp, 0.0)
-    cdd = np.maximum(temp - cdd_base, 0.0)
-
-    hours = np.arange(hpy)
-    hour_of_day = (hours % 24).astype(float)
-    day_of_year = hours // 24
-
-    h_sin, h_cos = _cyclical(hour_of_day, 24.0)
-
-    _month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    month_arr = np.zeros(hpy, dtype=int)
-    h = 0
-    for m, md in enumerate(_month_days):
-        month_arr[h:h + md * 24] = m
-        h += md * 24
-    m_sin, m_cos = _cyclical(month_arr.astype(float), 12.0)
-
-    jan1 = datetime.date(base_year, 1, 1)
-    dow = np.array(
-        [(jan1 + datetime.timedelta(days=int(d))).weekday() for d in day_of_year]
-    )
-    d_sin, d_cos = _cyclical(dow.astype(float), 7.0)
-    is_weekend = (dow >= 5).astype(float)
-
-    # Holiday calendar (reuse the training-time helper).
-    try:
-        from esfex.models.demand_training import _holiday_features
-        is_holiday, days_to_next, days_from_prev = _holiday_features(
-            country_iso or "", base_year, hours=hpy,
-        )
-        is_holiday = np.asarray(is_holiday, dtype=np.float64)
-        days_to_next = np.asarray(days_to_next, dtype=np.float64)
-        days_from_prev = np.asarray(days_from_prev, dtype=np.float64)
-    except Exception:
-        is_holiday = np.zeros(hpy)
-        days_to_next = np.full(hpy, 7.0)
-        days_from_prev = np.full(hpy, 7.0)
-
-    def _clip(name: str, value):
-        rng = ranges.get(name)
-        if rng and len(rng) == 2:
-            return np.clip(value, rng[0], rng[1])
-        return value
-
-    columns: dict[str, np.ndarray] = {
-        "log_pop_density": np.full(hpy, _clip("log_pop_density", log_pop_density)),
-        "log_gdp_density": np.full(hpy, _clip("log_gdp_density", log_gdp_density)),
-        "log_gdp_per_cap": np.full(hpy, _clip("log_gdp_per_cap", log_gdp_per_cap)),
-        "temperature": _clip("temperature", temp),
-        "hdd": hdd,
-        "cdd": cdd,
-        "hour_sin": h_sin,
-        "hour_cos": h_cos,
-        "dow_sin": d_sin,
-        "dow_cos": d_cos,
-        "month_sin": m_sin,
-        "month_cos": m_cos,
-        "is_weekend": is_weekend,
-        "is_holiday": is_holiday,
-        "days_to_next_holiday": days_to_next,
-        "days_from_prev_holiday": days_from_prev,
-        "latitude": np.full(hpy, latitude),
-        "longitude": np.full(hpy, longitude),
-    }
-
-    missing = [c for c in feature_order if c not in columns]
-    if missing:
-        raise ValueError(f"Density feature(s) not built: {missing}")
-    return np.column_stack([columns[name] for name in feature_order])
+    temp = clean_temperature(temperature_hourly)
+    off = float(round(longitude / 15)) if offset_hours is None else float(offset_hours)
+    one = lambda v: np.array([v], dtype=np.float64)  # noqa: E731
+    return density_feature_block(
+        latitude=one(latitude), longitude=one(longitude),
+        log_pop_density=one(log_pop_density), log_gdp_density=one(log_gdp_density),
+        log_gdp_per_cap=one(log_gdp_per_cap), t_mean=one(t_mean), t_range=one(t_range),
+        hh_elec_share=one(hh_elec_share), bld_share_elec=one(bld_share_elec),
+        temperature_utc=temp, year=base_year, feature_order=feature_order,
+        country_iso=country_iso, offset_hours=one(off),
+        hdd_base=hdd_base, cdd_base=cdd_base)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Per-CELL inference on the 0.25° grid (matches the training-time pipeline:
-# predict a density per 0.25° cell, multiply by the cell's area, then sum cells).
+# predict a density per 0.25° cell, multiply by its land area, then sum cells).
 # ──────────────────────────────────────────────────────────────────────────────
 
 _CELL_DEG = 0.25
@@ -254,18 +370,71 @@ def cell_area_km2(lat: float | np.ndarray):
     )
 
 
+def cell_overlap_fraction(poly, lats, lons, dlat: float, dlon: float) -> np.ndarray:
+    """Fraction of each cell's area inside the study region *poly*.
+
+    The cells are the lat/lon rectangles of *dlat* × *dlon* degrees centred
+    at (*lats*, *lons*); *poly* is a shapely geometry in (lon, lat). A cell
+    wholly inside is 1 (no intersection computed), one outside it 0, and one
+    the boundary crosses ``area(cell ∩ poly) / area(cell)``, so a coastal
+    cell whose centre lies at sea still counts with the part of it that is
+    in the region."""
+    import shapely
+
+    lats = np.asarray(lats, dtype=np.float64)
+    lons = np.asarray(lons, dtype=np.float64)
+    if not poly.is_valid:
+        poly = shapely.make_valid(poly)
+    shapely.prepare(poly)
+    if dlat <= 0 or dlon <= 0:                # degenerate sampling: the centre decides
+        return shapely.contains_xy(poly, lons, lats).astype(np.float64)
+    boxes = shapely.box(lons - dlon / 2, lats - dlat / 2, lons + dlon / 2, lats + dlat / 2)
+    frac = np.zeros(len(lats), dtype=np.float64)
+    hit = shapely.intersects(poly, boxes)
+    inner = hit & shapely.contains(poly, boxes)
+    frac[inner] = 1.0
+    edge = np.where(hit & ~inner)[0]
+    if edge.size:
+        inter = shapely.area(shapely.intersection(boxes[edge], poly))
+        frac[edge] = np.minimum(inter / (dlat * dlon), 1.0)
+    return frac
+
+
+def land_overlap_weight(inside, land_km2, cell_km2) -> np.ndarray:
+    """Share of each cell's land that lies in the study region: the weight of
+    the cell's demand (``density × land_km2 × w``).
+
+    *inside* is the fraction of the cell's area inside the region
+    (:func:`region_cells_025`), *land_km2* the cell's land area (shipped grid)
+    and *cell_km2* its total area. ``w = min(1, inside × cell_km2 / land_km2)``:
+    a coastal cell whose land the region covers counts whole, and a cell on a
+    land border is split between the countries in proportion to their part of
+    its land. A cell wholly inside is 1; one without land in the grid
+    (``land_km2 = 0``) takes ``inside``."""
+    inside = np.asarray(inside, dtype=np.float64)
+    land = np.asarray(land_km2, dtype=np.float64)
+    cell = np.broadcast_to(np.asarray(cell_km2, dtype=np.float64), inside.shape)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = np.where(land > 0, np.minimum(1.0, inside * cell / land), inside)
+    w[inside >= 1.0] = 1.0
+    return w
+
+
 def region_cells_025(
     polygon_latlon: Optional[list[tuple[float, float]]] = None,
     bounds: Optional[tuple[float, float, float, float]] = None,
     node_lats: Optional[list[float]] = None,
     node_lons: Optional[list[float]] = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Enumerate the 0.25° grid-cell centroids covering the study region.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Enumerate the 0.25° grid cells covering the study region.
 
     Centroids are aligned to the global 0.25° raster grid so they sample the
-    GDP / population rasters at their own cells. Returns (lats, lons, areas_km2)
-    for every cell whose centroid is inside the drawn polygon (or the bounding
-    box, or a small pad around the nodes)."""
+    GDP / population rasters at their own cells. Returns ``(lats, lons,
+    areas_km2, inside)`` for every cell that overlaps the drawn polygon (or
+    lies in the bounding box, or a small pad around the nodes); ``inside`` is
+    the fraction of the cell's area in the region (:func:`cell_overlap_fraction`,
+    1 without a polygon), which :func:`land_overlap_weight` turns into the
+    cell's weight."""
     if bounds is not None:
         s, w, n, e = bounds
     elif node_lats and node_lons:
@@ -277,7 +446,7 @@ def region_cells_025(
         las = [p[0] for p in pts]; los = [p[1] for p in pts]
         s, n, w, e = min(las), max(las), min(los), max(los)
     else:
-        return np.array([]), np.array([]), np.array([])
+        return np.array([]), np.array([]), np.array([]), np.array([])
 
     # Global-grid-aligned centroids: lat = -90 + (j+0.5)*0.25, lon similarly.
     j0 = int(math.floor((s + 90.0) / _CELL_DEG))
@@ -294,13 +463,17 @@ def region_cells_025(
     # nation the box reaches neighbouring countries, whose populated cells then
     # get assigned to the nearest border node and inflate its demand (Japan's
     # western nodes absorbed ~45 M of South Korea + ~24 M of China).
+    # A cell is kept when it overlaps the domain, with the fraction of it
+    # inside: testing only its centre dropped coastal cells centred at sea
+    # (Cuba lost 7 % of its population).
+    inside = np.ones(len(lats), dtype=np.float64)
     poly = _make_poly(polygon_latlon) if _as_rings(polygon_latlon) else None
     if poly is not None:
-        from shapely.geometry import Point
-        keep = np.array([poly.contains(Point(lo, la)) for la, lo in zip(lats, lons)])
-        lats, lons = lats[keep], lons[keep]
+        inside = cell_overlap_fraction(poly, lats, lons, _CELL_DEG, _CELL_DEG)
+        keep = inside > 0
+        lats, lons, inside = lats[keep], lons[keep], inside[keep]
 
-    return lats, lons, cell_area_km2(lats)
+    return lats, lons, cell_area_km2(lats), inside
 
 
 def predict_region_cell_demand(
@@ -311,161 +484,50 @@ def predict_region_cell_demand(
     log_pop_density: np.ndarray,
     log_gdp_density: np.ndarray,
     log_gdp_per_cap: np.ndarray,
-    temperature_hourly: np.ndarray,
+    temperature_utc: np.ndarray,
     year: int,
     country_iso: str = "",
-    hdd_base: float = 18.0,
-    cdd_base: float = 24.0,
-    chunk: int = 256,
+    places: Optional[dict] = None,
+    chunk: int = 64,
 ) -> np.ndarray:
-    """Per-cell hourly demand (MW), shape (n_cells, 8760).
+    """Per-cell hourly demand (MW) on UTC rows, shape (n_cells, 8760).
 
     For every 0.25° cell: predict the demand density (MW/km²) from the cell's
-    own socio features + the (shared) hourly climate/calendar, then multiply by
-    the cell area. This integrates the non-linear density correctly per cell —
-    the authoritative use of the model — instead of averaging."""
+    own predictors and the (shared) UTC hourly temperature and calendar of
+    *year*, then multiply by *areas*: the density workflow passes each cell's
+    land area times its weight (:func:`land_overlap_weight`). Row ``h`` is UTC
+    hour ``h`` of the year with 29 February skipped. *places* holds the cells'
+    climate normals, energy-use context and local-date offsets
+    (:func:`place_predictors`, computed here when not given)."""
     hpy = 8760
     n = len(lats)
     if n == 0:
         return np.zeros((0, hpy), dtype=np.float64)
-    ranges = model.train_ranges or {}
-    feature_order = model.feature_names
-
-    # ── Shared hourly block (identical for every cell) ──────────────────
-    temp = (np.asarray(temperature_hourly[:hpy], dtype=np.float64).copy()
-            if len(temperature_hourly) >= hpy else np.full(hpy, 20.0))
-    # When the CMIP6 fetch fails (rate-limited) the caller falls back to the
-    # ERA5 year, which can be short or carry NaN; a full-length NaN array passes
-    # the length guard above and would flow through HDD/CDD into the model,
-    # silently NaN-ing out this cell's demand and later breaking the bus
-    # distribution. Replace non-finite hours with the finite mean (or 20°C).
-    _bad = ~np.isfinite(temp)
-    if _bad.any():
-        temp[_bad] = float(temp[~_bad].mean()) if (~_bad).any() else 20.0
-    hdd = np.maximum(hdd_base - temp, 0.0)
-    cdd = np.maximum(temp - cdd_base, 0.0)
-    hours = np.arange(hpy)
-    h_sin, h_cos = _cyclical((hours % 24).astype(float), 24.0)
-    _md = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    month_arr = np.zeros(hpy, dtype=int); _h = 0
-    for _m, _d in enumerate(_md):
-        month_arr[_h:_h + _d * 24] = _m; _h += _d * 24
-    m_sin, m_cos = _cyclical(month_arr.astype(float), 12.0)
-    day_of_year = hours // 24
-    jan1 = datetime.date(year, 1, 1)
-    dow = np.array([(jan1 + datetime.timedelta(days=int(d))).weekday() for d in day_of_year])
-    d_sin, d_cos = _cyclical(dow.astype(float), 7.0)
-    is_weekend = (dow >= 5).astype(float)
-    try:
-        from esfex.models.demand_training import _holiday_features
-        is_hol, dtn, dfp = _holiday_features(country_iso or "", year, hours=hpy)
-        is_hol = np.asarray(is_hol, float); dtn = np.asarray(dtn, float); dfp = np.asarray(dfp, float)
-    except Exception:
-        is_hol = np.zeros(hpy); dtn = np.full(hpy, 7.0); dfp = np.full(hpy, 7.0)
-
-    def _clip(name, val):
-        rng = ranges.get(name)
-        return np.clip(val, rng[0], rng[1]) if (rng and len(rng) == 2) else val
-
-    shared = {
-        "temperature": _clip("temperature", temp), "hdd": hdd, "cdd": cdd,
-        "hour_sin": h_sin, "hour_cos": h_cos, "dow_sin": d_sin, "dow_cos": d_cos,
-        "month_sin": m_sin, "month_cos": m_cos, "is_weekend": is_weekend,
-        "is_holiday": is_hol, "days_to_next_holiday": dtn, "days_from_prev_holiday": dfp,
-    }
-    lpd = _clip("log_pop_density", log_pop_density)
-    lgd = _clip("log_gdp_density", log_gdp_density)
-    lgpc = _clip("log_gdp_per_cap", log_gdp_per_cap)
-
+    temp = clean_temperature(temperature_utc, hpy)
+    lats = np.asarray(lats, dtype=np.float64)
+    lons = np.asarray(lons, dtype=np.float64)
+    if places is None:
+        places = place_predictors(model, lats, lons, country_iso, temp, year)
+    stat = {"latitude": lats, "longitude": lons,
+            "log_pop_density": np.asarray(log_pop_density, dtype=np.float64),
+            "log_gdp_density": np.asarray(log_gdp_density, dtype=np.float64),
+            "log_gdp_per_cap": np.asarray(log_gdp_per_cap, dtype=np.float64),
+            **{k: np.asarray(places[k], dtype=np.float64)
+               for k in ("t_mean", "t_range", "hh_elec_share", "bld_share_elec")}}
+    # The level of a place is the same at every hour: one level-round call per cell.
+    level = model.level_margin(np.column_stack([stat[f] for f in model.level_features]))
+    off = np.asarray(places["offset_hours"], dtype=np.float64)
     out = np.zeros((n, hpy), dtype=np.float64)
     for s in range(0, n, chunk):
         e = min(s + chunk, n)
-        m = e - s
-        cols = []
-        for name in feature_order:
-            if name in shared:
-                cols.append(np.tile(shared[name], m))
-            elif name == "log_pop_density":
-                cols.append(np.repeat(lpd[s:e], hpy))
-            elif name == "log_gdp_density":
-                cols.append(np.repeat(lgd[s:e], hpy))
-            elif name == "log_gdp_per_cap":
-                cols.append(np.repeat(lgpc[s:e], hpy))
-            elif name == "latitude":
-                cols.append(np.repeat(lats[s:e], hpy))
-            elif name == "longitude":
-                cols.append(np.repeat(lons[s:e], hpy))
-            else:
-                raise ValueError(f"Unknown density feature {name}")
-        X = np.column_stack(cols)
-        from esfex.models.xgb_device import predict as _xgb_predict
-        pred = _xgb_predict(model._model, X, feature_names=feature_order)
-        dens = np.power(10.0, np.asarray(pred, dtype=np.float64)).reshape(m, hpy)
-        out[s:e] = dens * areas[s:e, None]
+        X = density_feature_block(
+            **{k: v[s:e] for k, v in stat.items()},
+            temperature_utc=temp, year=year, feature_order=model.feature_names,
+            country_iso=country_iso, offset_hours=off[s:e],
+            hdd_base=model.hdd_base, cdd_base=model.cdd_base)
+        pred = model.predict_log_density(X, base_margin=np.repeat(level[s:e], hpy))
+        out[s:e] = np.power(10.0, pred).reshape(e - s, hpy) * np.asarray(areas[s:e])[:, None]
     return out
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Per-node area (Voronoi partition by nearest-node sampling)
-# ──────────────────────────────────────────────────────────────────────────────
-
-
-def _polygon_area_km2(coords_latlon: list[tuple[float, float]], mean_lat: float) -> float:
-    """Shoelace area (km²) of a lat/lng ring via local equirectangular metric."""
-    if len(coords_latlon) < 3:
-        return 0.0
-    mlng = _M_PER_DEG_LNG_EQ * math.cos(math.radians(mean_lat))
-    xs = [lng * mlng for (_lat, lng) in coords_latlon]
-    ys = [lat * _M_PER_DEG_LAT for (lat, _lng) in coords_latlon]
-    a = 0.0
-    n = len(coords_latlon)
-    for i in range(n):
-        j = (i + 1) % n
-        a += xs[i] * ys[j] - xs[j] * ys[i]
-    return abs(a) / 2.0 / 1e6
-
-
-def _region_ring(
-    node_lats: list[float],
-    node_lons: list[float],
-    polygon_latlon: Optional[list[tuple[float, float]]],
-    bounds: Optional[tuple[float, float, float, float]],
-):
-    """Resolve the study region; return ``(clip, bbox_ring, mean_lat, area)``.
-
-    ``clip`` is the domain to test cell containment against — a single ring or
-    a multi-ring (archipelago) polygon, or ``None`` when only a bounding box /
-    padded node box is available. ``bbox_ring`` is the 4-corner extent to
-    enumerate the grid over. Prefers the drawn polygon, then the bounding box,
-    then a padded node box (so a single/colinear node set still has area)."""
-    rings = _as_rings(polygon_latlon)
-    clip = polygon_latlon if rings else None
-    if rings:
-        pts = [p for r in rings for p in r]
-        lat_min = min(p[0] for p in pts); lat_max = max(p[0] for p in pts)
-        lon_min = min(p[1] for p in pts); lon_max = max(p[1] for p in pts)
-    elif bounds:
-        s, w, no, e = bounds
-        lat_min, lat_max, lon_min, lon_max = s, no, w, e
-    else:
-        lat_min, lat_max = min(node_lats), max(node_lats)
-        lon_min, lon_max = min(node_lons), max(node_lons)
-        pad_lat = max((lat_max - lat_min) * 0.5, 0.25)
-        pad_lon = max((lon_max - lon_min) * 0.5, 0.25)
-        lat_min -= pad_lat; lat_max += pad_lat
-        lon_min -= pad_lon; lon_max += pad_lon
-    bbox_ring = [
-        (lat_min, lon_min), (lat_min, lon_max),
-        (lat_max, lon_max), (lat_max, lon_min),
-    ]
-    mean_lat = (lat_min + lat_max) / 2.0
-    # Area of the actual domain (sum of island rings), not the ocean-filled
-    # bounding box — so a node's Voronoi share reflects real land area.
-    if rings:
-        total_area = sum(_polygon_area_km2(r, mean_lat) for r in rings)
-    else:
-        total_area = _polygon_area_km2(bbox_ring, mean_lat)
-    return clip, bbox_ring, mean_lat, total_area
 
 
 def _as_rings(polygon) -> list[list[tuple[float, float]]]:
@@ -503,105 +565,6 @@ def _make_poly(polygon):
     return polys[0] if len(polys) == 1 else MultiPolygon(polys)
 
 
-def _nearest_node_cells(clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
-    """Yield (node_index, lat, lon) for each interior grid point of the study
-    region, assigning the point to its nearest node (the Voronoi partition).
-
-    Points are enumerated over ``bbox_ring`` and kept only when inside the
-    ``clip`` domain (single ring or multi-ring/archipelago); a ``None`` clip
-    keeps the whole box."""
-    poly = _make_poly(clip) if _as_rings(clip) else None
-    point_cls = None
-    if poly is not None:
-        from shapely.geometry import Point as point_cls  # noqa: N813
-
-    lat_min = min(lat for lat, _ in bbox_ring)
-    lat_max = max(lat for lat, _ in bbox_ring)
-    lon_min = min(lng for _, lng in bbox_ring)
-    lon_max = max(lng for _, lng in bbox_ring)
-
-    mlng = _M_PER_DEG_LNG_EQ * math.cos(math.radians(mean_lat))
-    nx = np.asarray(node_lons, dtype=np.float64) * mlng
-    ny = np.asarray(node_lats, dtype=np.float64) * _M_PER_DEG_LAT
-
-    for la in np.linspace(lat_min, lat_max, grid):
-        py = la * _M_PER_DEG_LAT
-        for lo in np.linspace(lon_min, lon_max, grid):
-            if poly is not None and not poly.contains(point_cls(lo, la)):
-                continue
-            px = lo * mlng
-            d2 = (nx - px) ** 2 + (ny - py) ** 2
-            yield int(np.argmin(d2)), la, lo
-
-
-def compute_node_areas_km2(
-    node_lats: list[float],
-    node_lons: list[float],
-    polygon_latlon: Optional[list[tuple[float, float]]] = None,
-    bounds: Optional[tuple[float, float, float, float]] = None,
-    grid: int = 200,
-) -> list[float]:
-    """Per-node area (km²) as the Voronoi partition of the study region.
-
-    Each sampled cell of the study region is assigned to its nearest node; a
-    node's area is its share of the total region area. Robust for any node
-    count (including 1)."""
-    n = len(node_lats)
-    if n == 0:
-        return []
-    clip, bbox_ring, mean_lat, total_area = _region_ring(
-        node_lats, node_lons, polygon_latlon, bounds)
-    if total_area <= 0:
-        return [0.0] * n
-    if n == 1:
-        return [total_area]
-
-    counts = np.zeros(n, dtype=np.int64)
-    for ni, _la, _lo in _nearest_node_cells(
-            clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
-        counts[ni] += 1
-
-    if counts.sum() == 0:
-        return [total_area / n] * n
-    counts = np.maximum(counts, 1)   # no node vanishes
-    shares = counts / counts.sum()
-    return [float(total_area * s) for s in shares]
-
-
-# GDP pixel area (the 0.25° GDP raster), matching pixel_features.
-def _gdp_pixel_km2(lat: float) -> float:
-    return (0.25 ** 2) * math.cos(math.radians(lat)) * 111.0 ** 2
-
-
-def _sample_node_raster(
-    node_lats: list[float],
-    node_lons: list[float],
-    sample_fn,
-    polygon_latlon: Optional[list[tuple[float, float]]],
-    bounds: Optional[tuple[float, float, float, float]],
-    grid: int,
-) -> list[Optional[float]]:
-    """Cell-averaged value of ``sample_fn(lat, lon)`` per node, over each
-    node's Voronoi cell. Points where ``sample_fn`` returns None/≤0 are skipped;
-    a node with no valid samples yields None."""
-    n = len(node_lats)
-    if n == 0:
-        return []
-    clip, bbox_ring, mean_lat, total_area = _region_ring(
-        node_lats, node_lons, polygon_latlon, bounds)
-    if total_area <= 0:
-        return [None] * n
-    acc = np.zeros(n, dtype=np.float64)
-    cnt = np.zeros(n, dtype=np.int64)
-    for ni, la, lo in _nearest_node_cells(clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
-        v = sample_fn(la, lo)
-        if v is None or v <= 0:
-            continue
-        acc[ni] += v
-        cnt[ni] += 1
-    return [float(acc[i] / cnt[i]) if cnt[i] else None for i in range(n)]
-
-
 # SSP GDP rasters: GDP{year}_ssp{N}.tif at 5-year steps, 2025–2100.
 _SSP_GDP_STEP = 5
 _SSP_GDP_MIN = 2025
@@ -615,48 +578,6 @@ def _normalize_ssp(ssp) -> str:
         if ch in "12345":
             return ch
     return "2"
-
-
-def gdp_density_point(lat: float, lon: float, year: int, ssp: str = "ssp2") -> Optional[float]:
-    """GDP density (USD/km²) at a point for a given year and SSP scenario.
-
-    For future years uses the IIASA SSP GDP rasters (``GDP{Y}_ssp{N}.tif``,
-    5-year steps) with linear interpolation between steps. For years before the
-    SSP range, falls back to the historical GDP raster (``GDP{Y}.tif``)."""
-    try:
-        from esfex.models.pixel_features import (
-            _open_raster, _sample_point, sample_gdp_total,
-        )
-        from esfex.paths import GRIDDED_GDP_025_DIR as GDP_DIR
-    except Exception:
-        return None
-
-    sn = _normalize_ssp(ssp)
-
-    def _at_step(step_year: int) -> Optional[float]:
-        path = GDP_DIR / f"GDP{step_year}_ssp{sn}.tif"
-        if not path.exists():
-            return None
-        v = _sample_point(_open_raster(str(path)), lat, lon)
-        if v is None or v <= 0:
-            return None
-        return v / _gdp_pixel_km2(lat)
-
-    if year < _SSP_GDP_MIN:
-        gt = sample_gdp_total(lat, lon, year)
-        return (gt / _gdp_pixel_km2(lat)) if (gt and gt > 0) else None
-    if year >= _SSP_GDP_MAX:
-        return _at_step(_SSP_GDP_MAX)
-
-    lo_year = (year // _SSP_GDP_STEP) * _SSP_GDP_STEP
-    hi_year = lo_year + _SSP_GDP_STEP
-    v_lo, v_hi = _at_step(lo_year), _at_step(hi_year)
-    if v_lo is None:
-        return v_hi
-    if v_hi is None:
-        return v_lo
-    f = (year - lo_year) / float(_SSP_GDP_STEP)
-    return v_lo * (1.0 - f) + v_hi * f
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -749,9 +670,12 @@ def _cmip6_get_with_retry(url: str):
 def _cmip6_cache_path(lat, lon, start_year, end_year, model=_CMIP6_MODEL):
     """On-disk cache path for one point's CMIP6 timeseries. Keyed at 0.01°, so
     grid-snapped coordinates (see :data:`_CMIP6_GRID_DEG`) reuse the same file
-    across every node that falls in the cell."""
+    across every node that falls in the cell. (The ``cmip6_{model}_*.npz``
+    files of earlier versions lost 31 December of a leap year instead of
+    29 February and are not read.)"""
     from esfex.paths import CMIP6_DIR
-    return CMIP6_DIR / f"cmip6_{model}_{lat:.2f}_{lon:.2f}_{start_year}_{end_year}.npz"
+    return (CMIP6_DIR
+            / f"cmip6_{model}_{lat:.2f}_{lon:.2f}_{start_year}_{end_year}_8760.npz")
 
 
 def _cmip6_point_hourly(
@@ -797,6 +721,9 @@ def _cmip6_point_hourly(
     year_days: dict[int, list[int]] = {}
     for i, t in enumerate(times):
         year_days.setdefault(int(t[:4]), []).append(i)
+    for yr, idxs in year_days.items():         # 8760-h years: 29 February goes
+        if len(idxs) == 366:
+            year_days[yr] = [i for i in idxs if times[i][5:10] != "02-29"]
 
     result: dict[int, np.ndarray] = {}
     for yr in range(start_year, end_year + 1):
@@ -1007,164 +934,9 @@ def _ssp_gdp_total_nearest(lat: float, lon: float, year: int, ssp: str) -> Optio
     step = min(max(step, _SSP_GDP_MIN), _SSP_GDP_MAX)
     sn = _normalize_ssp(ssp)
     path = GDP_DIR / f"GDP{step}_ssp{sn}.tif"
-    if not path.exists():
+    from esfex.data_assets import ensure
+    if not ensure(path):
         return None
     v = _sample_point(_open_raster(str(path)), lat, lon)
     return float(v) if (v is not None and v > 0) else None
 
-
-def sample_cells_socio(
-    lats: np.ndarray,
-    lons: np.ndarray,
-    areas: np.ndarray,
-    year: int,
-    ssp: str,
-    pop_year: int = 2020,
-):
-    """Per-0.25°-cell socio inputs for the density model.
-
-    Returns (log_pop_density, log_gdp_density, log_gdp_per_cap, keep_mask):
-    population density from GPW (people/km²) and GDP density from the SSP GDP
-    raster total ÷ cell area (USD/km²). Cells with neither population nor GDP
-    are flagged ``keep_mask=False`` (no economic activity → no demand)."""
-    n = len(lats)
-    try:
-        from esfex.models.pixel_features import sample_pop_density
-    except Exception:
-        sample_pop_density = None
-
-    pd = np.full(n, np.nan); gd = np.full(n, np.nan)
-    for i in range(n):
-        la = float(lats[i]); lo = float(lons[i]); ar = max(float(areas[i]), 1e-6)
-        p = sample_pop_density(la, lo, pop_year) if sample_pop_density else None
-        pd[i] = p if (p is not None and p > 0) else 0.0
-        gt = _ssp_gdp_total_nearest(la, lo, year, ssp)
-        gd[i] = (gt / ar) if (gt and gt > 0) else 0.0
-
-    keep = (pd > 0) | (gd > 0)
-    # Per-capita = GDP density / pop density (GDP/pop on a per-cell basis).
-    with np.errstate(divide="ignore", invalid="ignore"):
-        gpc = np.where(pd > 0, gd / pd, gd)
-    log_pd = np.log10(np.maximum(pd, 1e-6))
-    log_gd = np.log10(np.maximum(gd, 1e-3))
-    log_gpc = np.log10(np.maximum(gpc, 1e-3))
-    return log_pd, log_gd, log_gpc, keep
-
-
-def sample_node_pop_density(
-    node_lats: list[float],
-    node_lons: list[float],
-    year: int,
-    polygon_latlon: Optional[list[tuple[float, float]]] = None,
-    bounds: Optional[tuple[float, float, float, float]] = None,
-    grid: int = 90,
-) -> list[Optional[float]]:
-    """Cell-averaged GPW population density (people/km²) per node."""
-    try:
-        from esfex.models.pixel_features import sample_pop_density
-    except Exception:
-        return [None] * len(node_lats)
-    return _sample_node_raster(
-        node_lats, node_lons,
-        lambda la, lo: sample_pop_density(la, lo, year),
-        polygon_latlon, bounds, grid,
-    )
-
-
-def sample_node_pop_and_area(
-    node_lats: list[float],
-    node_lons: list[float],
-    year: int,
-    polygon_latlon: Optional[list[tuple[float, float]]] = None,
-    bounds: Optional[tuple[float, float, float, float]] = None,
-    grid: int = 120,
-) -> list[tuple[Optional[float], float]]:
-    """Per node: (mean GPW population density [people/km²], POPULATED area
-    [km²]).
-
-    The populated area is each node's share of the region area restricted to
-    grid cells that actually carry population — so ocean and empty land in a
-    Voronoi cell do NOT inflate it. This is the correct ``area_km2`` for the
-    demand-density model (whose target was demand per km² of inhabited land),
-    and it stops sparse island/coastal nodes from being over-forecast."""
-    n = len(node_lats)
-    if n == 0:
-        return []
-    try:
-        from esfex.models.pixel_features import sample_pop_density
-    except Exception:
-        return [(None, 0.0)] * n
-
-    clip, bbox_ring, mean_lat, total_area = _region_ring(
-        node_lats, node_lons, polygon_latlon, bounds)
-    if total_area <= 0:
-        return [(None, 0.0)] * n
-
-    sum_pop = np.zeros(n, dtype=np.float64)
-    cnt_pop = np.zeros(n, dtype=np.int64)
-    total_inside = 0
-    for ni, la, lo in _nearest_node_cells(clip, bbox_ring, node_lats, node_lons, mean_lat, grid):
-        total_inside += 1
-        pd = sample_pop_density(la, lo, year)
-        if pd is not None and pd > 0:
-            sum_pop[ni] += pd
-            cnt_pop[ni] += 1
-
-    out: list[tuple[Optional[float], float]] = []
-    for ni in range(n):
-        if cnt_pop[ni] == 0 or total_inside == 0:
-            out.append((None, 0.0))
-            continue
-        pop_density = sum_pop[ni] / cnt_pop[ni]
-        pop_area = total_area * (cnt_pop[ni] / total_inside)
-        out.append((float(pop_density), float(pop_area)))
-    return out
-
-
-def sample_node_gdp_density(
-    node_lats: list[float],
-    node_lons: list[float],
-    year: int,
-    ssp: str = "ssp2",
-    polygon_latlon: Optional[list[tuple[float, float]]] = None,
-    bounds: Optional[tuple[float, float, float, float]] = None,
-    grid: int = 90,
-) -> list[Optional[float]]:
-    """Cell-averaged SSP GDP density (USD/km²) per node for *year*."""
-    return _sample_node_raster(
-        node_lats, node_lons,
-        lambda la, lo: gdp_density_point(la, lo, year, ssp),
-        polygon_latlon, bounds, grid,
-    )
-
-
-def sample_node_densities(
-    node_lats: list[float],
-    node_lons: list[float],
-    year: int,
-    polygon_latlon: Optional[list[tuple[float, float]]] = None,
-    bounds: Optional[tuple[float, float, float, float]] = None,
-    grid: int = 90,
-    ssp: str = "ssp2",
-) -> list[Optional[dict]]:
-    """Cell-averaged socio density per node for one (year, ssp).
-
-    Returns, per node, ``{"pop_density", "gdp_density", "gdp_per_cap"}`` (or
-    None when the cell yielded no population sample). Convenience wrapper over
-    the population and GDP samplers."""
-    pop = sample_node_pop_density(node_lats, node_lons, year, polygon_latlon, bounds, grid)
-    gdp = sample_node_gdp_density(node_lats, node_lons, year, ssp, polygon_latlon, bounds, grid)
-    out: list[Optional[dict]] = []
-    for ni in range(len(node_lats)):
-        pd = pop[ni] if ni < len(pop) else None
-        if pd is None or pd <= 0:
-            out.append(None)
-            continue
-        gd = gdp[ni] if ni < len(gdp) else None
-        gpc = (gd / pd) if (gd and pd > 0) else None
-        out.append({
-            "pop_density": float(pd),
-            "gdp_density": (float(gd) if gd else None),
-            "gdp_per_cap": (float(gpc) if gpc else None),
-        })
-    return out

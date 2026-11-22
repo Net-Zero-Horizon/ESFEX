@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -126,6 +127,21 @@ class GuiBus:
     latitude: float = 0.0               # Absolute map position
     longitude: float = 0.0
     style: VisualStyle = field(default_factory=VisualStyle)
+    # GUI-only: True once the user picks the role in the bus form. The
+    # role repair run on save (repair_bus_roles_and_demand) then keeps it.
+    # Saved as the ``_gui_layout.user_set_bus_roles`` list of bus ids.
+    role_user_set: bool = False
+
+
+def majority_ac_frequency(buses) -> Optional[float]:
+    """The most common frequency of the AC *buses* (first seen wins a tie),
+    or ``None`` when none has a frequency."""
+    counts: dict[float, int] = {}
+    for b in buses:
+        f = float(getattr(b, "frequency_hz", 0.0) or 0.0)
+        if f > 0 and getattr(b, "current_type", "AC") != "DC":
+            counts[f] = counts.get(f, 0) + 1
+    return max(counts, key=counts.get) if counts else None
 
 
 @dataclass
@@ -158,14 +174,15 @@ class GuiGeneratorInstance:
     initial_age: int = 0
     degradation_rate: float = 0.0
     fuel_cost: float = 0.0
-    fixed_cost: float = 0.0
+    fixed_cost: float = 0.0          # $/MW/year of rated power
     maintenance_cost: float = 0.0
     eff_at_rated: float = 0.35
     eff_at_min: float = 0.25
     min_up: int = 0
     min_down: int = 0
-    ramp_up: float = 0.0
-    ramp_down: float = 0.0
+    num_units: int = 1       # identical units (clustered unit commitment)
+    ramp_up: float = 1.0     # fraction of capacity per hour (0 = no limit)
+    ramp_down: float = 1.0
     inertia: float = 0.0
     droop: float = 0.05
     governor_time_const: float = 5.0
@@ -228,17 +245,10 @@ class GuiBatteryInstance:
     life_time: int = 20
     initial_age: int = 0
     degradation_rate: float = 0.0
-    min_power: float = 0.0
-    min_up: int = 0
-    min_down: int = 0
-    ramp_up: float = 1.0
+    ramp_up: float = 1.0           # fraction of charge/discharge power per hour
     ramp_down: float = 1.0
-    eff_at_rated: float = 0.9
-    eff_at_min: float = 0.9
     inertia: float = 0.0
-    start_up_cost: float = 0.0
-    fuel_cost: float = 0.0
-    fixed_cost: float = 0.0
+    fixed_cost: float = 0.0        # $/MW of discharge power per year
     maintenance_cost: float = 0.0
     throughput_degradation_cost: float = 0.0
     # Bidding/offer curve for discharge cost
@@ -269,8 +279,8 @@ class GuiTransmissionLine:
     to_endpoint: Optional[EndpointRef] = None
     # Power flow properties
     length_km: Optional[float] = None          # None = auto-calculate from coords
-    base_impedance: Optional[float] = None     # ohm (None = system default)
-    reactance_per_km: Optional[float] = None   # ohm/km (None = system default)
+    reactance_per_km: Optional[float] = None   # ohm/km (None = system default);
+                                               # derives reactance_pu from length
     reactance_pu: Optional[float] = None       # None = use global default
     resistance_pu: Optional[float] = None
     susceptance_pu: Optional[float] = None
@@ -390,7 +400,11 @@ class GuiOutageWindow:
     Edited via the interruptions calendar. ``element_id`` is the element's key
     or id (generators/batteries: unit key; lines: line_id; converters/
     transformers: name; fuel sources: fuel name). ``availability`` is the
-    capacity fraction during ``[start_hour, end_hour)`` (0 = full cut).
+    capacity fraction during ``[start_hour, end_hour)`` (0 = full cut). Hours
+    are absolute horizon hours (0 = Jan 1 of base_year); ``recurring`` repeats
+    the window every year. ``node`` restricts a window on an element that is
+    not a calendar instance (e.g. a fuel_storage tank) to one node; generator
+    and battery instances carry their node themselves.
     """
     element_type: str = "generator"
     element_id: str = ""
@@ -398,6 +412,8 @@ class GuiOutageWindow:
     end_hour: int = 1
     availability: float = 0.0
     label: str = ""
+    recurring: bool = False
+    node: Optional[int] = None
 
 
 @dataclass
@@ -520,15 +536,20 @@ class GuiSystemSettings:
     demand_scale: float = 1.0
     discount_rate: float = 0.05
     base_lcoe: float = 93.0
+    # NPV-based retirement of existing units
+    npv_annual_return_rate: float = 0.15
+    npv_retirement: bool = False
+    npv_retirement_max_iterations: int = 5
+    npv_retirement_threshold: float = 0.0
     target_re_penetration: float = 1.0
     min_annual_increment: float = 0.01
     max_annual_increment: float = 0.10
-    max_annual_system_cost: float = 20e9
-    max_npv_penalty_per_mw: float = 1e6
-    max_decommission_cost_per_mw: float = 5e5
-    force_replacement: float = -5e5
+    # Annual investment budget ($/yr); "total" scope adds the year's operation
+    max_annual_investment: float = 20e9
+    budget_scope: str = "investment"
+    # Annual operating budget of the dispatch ($/yr); None = off
+    max_annual_operating_cost: Optional[float] = None
     life_extension_cost_factor: float = 0.20
-    loss_demand_threshold: float = 0.05
     inertia_limit_threshold: float = 0.1
     sim_rooftop: bool = False
     # CO2 budget (merged from former GuiCO2Budget)
@@ -552,20 +573,14 @@ class GuiPenalties:
     loss_of_reserve_dynamic: float = 100.0
     loss_of_inertia: float = 200.0
     transfer_margin: float = 100.0
-    curtailment: float = 100.0
     max_curtailment_ratio: float = 0.05
     curtailment_cost: float = 20.0
-    curtailment_excess_penalty: float = 500.0
-    re_excess_penalty: float = 100.0
     rooftop_curtailment: float = 5.0
     co2_cost: float = 10.0
     co2_budget_violation: float = 500.0
     fre_penetration_loss: float = 100.0
-    ev_loss: float = 10.0
+    ev_loss: float = 50_000.0  # $/MWh — same as loss_of_load
     loss_of_fuel_supply: float = 100.0
-    coupling_slack_penalty: float = 1.0
-    transport_congestion: float = 100.0
-    storage_violation: float = 100.0
     non_electric_demand_loss: float = 100.0
     # Load criticality penalties (multipliers on VOLL per sector).
     # Real LP code multiplies these by `loss_of_load_penalty` (VOLL,
@@ -615,15 +630,11 @@ class GuiElectrolyzerInstance:
     unit_key: str
     name: str
     fuel: str = "Hydrogen"
-    technology: str = "PEM"  # PEM, Alkaline, SOE
     technology_id: Optional[str] = None  # references GuiTechnology.tech_id
     bus: str = "bus_0"     # bus_id this electrolyzer is connected to
     node: int = 0          # DEPRECATED
     life_time: int = 20
-    initial_age: int = 0
-    degradation_rate: float = 0.01
     rated_power: float = 0.0
-    min_power: float = 0.1
     ramp_up: float = 0.5
     ramp_down: float = 0.5
     eff_at_rated: float = 0.65
@@ -679,9 +690,6 @@ class GuiRooftopSolar:
     simulation_seed: int = 42
     performance_ratio: float = 0.75
     degradation_rate: float = 0.005
-    cost_per_kw: float = 1200.0
-    cost_reduction_rate: float = 0.08
-    o_and_m_cost: float = 20.0
     base_year: int = 2025
     target_year: int = 2050
     systems_per_node: list[int] = field(default_factory=list)      # per-node
@@ -703,7 +711,6 @@ class GuiDemandSector:
     flexibility_ratio: float = 0.0
     criticality: str = "medium"  # "critical", "high", "medium", "low"
     delay_tolerance: int = 0
-    price_sensitivity: float = 0.0
 
 
 @dataclass
@@ -713,11 +720,6 @@ class GuiNonElectricDemand:
     demand_id: str
     fuel: str
     unit: str
-    is_flexible: bool = False
-    flexibility_ratio: float = 0.0
-    criticality: str = "medium"  # "critical", "high", "medium", "low"
-    delay_tolerance: int = 0
-    price_sensitivity: float = 0.0
     demand: list[int] = field(default_factory=list)  # per-node annual
 
 
@@ -811,22 +813,24 @@ class GuiGlobalSettings:
     # Temporal
     resolution_hours: int = 1
     rolling_horizon_hours: int = 48
-    overlap_hours: int = 6
+    overlap_hours: int = 24
     investment_resolution: int = HOURS_STD_YEAR
     primary_energy_resolution: int = 24
     use_rolling_horizon: bool = True
+    # Time base of every hourly series (temporal.model_clock): 'auto' until the
+    # Grid Builder / availability generator resolves it to a zone.
+    model_clock: str = "auto"
     # Solver
     solver_name: str = "highs"
     solver_threads: int = 4
     solver_time_limit: int = 10800
     solver_gap: float = 0.01
     solver_verbose: bool = False
-    solver_scale_constraints: bool = True
     solver_specific_options: dict[str, Any] = field(default_factory=dict)
     # N1 Security
     n1_enabled: bool = False
     n1_apply_to_modes: list[str] = field(
-        default_factory=lambda: ["unit_commitment"]
+        default_factory=lambda: ["development", "unit_commitment"]
     )
     n1_transmission_enabled: bool = True
     n1_transmission_reserve_factor: float = 0.70
@@ -835,9 +839,8 @@ class GuiGlobalSettings:
     n1_generation_reserve_type: str = "largest_unit"
     n1_generation_reserve_percentage: float = 0.15
     n1_scopf_enabled: bool = False
-    n1_scopf_max_iterations: int = 5
-    n1_scopf_violation_tolerance: float = 0.01
     n1_corrective_enabled: bool = False
+    n1_compute_security_cost: bool = False
     n1_contingency_depth: str = "n1"
     n1_redistribution_mode: str = "pro_rata"
     n1_pi_screening_threshold: float = 0.0
@@ -847,10 +850,16 @@ class GuiGlobalSettings:
     mp_stochastic: bool = False
     mp_representative_days: int = 5
     mp_min_day_separation: int = 5
+    mp_critical_days: int = 3
+    # Storage firm hours of the capacity adequacy; 0 = derived from the data
+    mp_storage_firm_hours: float = 0.0
     # Master-problem solver: "monolithic" or "benders" (+ Benders settings)
     mp_solver_method: str = "monolithic"
     mp_benders_max_iterations: int = 50
     mp_benders_tolerance: float = 1e-4
+    # master_problem.solver_options (merged over solver_specific_options for
+    # the master solves); no form editor, kept so a save keeps them
+    mp_solver_options: dict[str, Any] = field(default_factory=dict)
     mp_use_tsam: bool = False
     mp_tsam_num_periods: int = 10
     mp_tsam_method: str = "kmedoids"
@@ -879,12 +888,18 @@ class GuiGlobalSettings:
     risk_voll_commercial: float = 25000.0
     risk_voll_industrial: float = 15000.0
     risk_voll_critical: float = 100000.0
-    risk_base_temperature: float = 18.0
-    risk_heating_coefficient: float = 0.0
-    risk_cooling_coefficient: float = 0.0
+    # Same defaults as RiskConfig (schema).
+    risk_base_temperature: float = 24.0
+    risk_heating_coefficient: float = 0.5
+    risk_cooling_coefficient: float = 2.5
     risk_insurance_premium_rate: float = 0.0
     risk_monte_carlo_samples: int = 1000
     risk_monte_carlo_seed: int = 42
+    # Scenarios set by the Risk & Resilience Workbench (Apply), saved as
+    # ``risk.climate_scenarios`` / ``risk.hazard_scenarios`` (dicts with the
+    # ClimateScenarioConfig / HazardScenarioConfig fields).
+    risk_climate_scenarios: list[dict] = field(default_factory=list)
+    risk_hazard_scenarios: list[dict] = field(default_factory=list)
 
     # Set to True by serializer when loading from file (skip pref override)
     _loaded_from_file: bool = field(default=False, repr=False)
@@ -920,8 +935,6 @@ class GuiGlobalSettings:
                 prefs, "solver", "mip_gap", self.solver_gap)
             self.solver_verbose = get_preference(
                 prefs, "solver", "verbose", self.solver_verbose)
-            self.solver_scale_constraints = get_preference(
-                prefs, "solver", "scale_constraints", self.solver_scale_constraints)
         except Exception:
             pass  # Preferences unavailable — keep dataclass defaults
 
@@ -970,7 +983,6 @@ class GuiInterSystemLink:
     voltage_kv: Optional[float] = None
     line_type: Optional[str] = None     # "overhead", "underground", "submarine"
     length_km: Optional[float] = None   # alias of distance_km when shown to user
-    base_impedance: Optional[float] = None
     reactance_per_km: Optional[float] = None
     susceptance_pu: Optional[float] = None
     num_circuits: int = 1
@@ -1023,9 +1035,6 @@ class GuiInvestmentEntry:
     technology_id: str = ""         # References GuiTechnology.tech_id
     # Per-node investment data
     node_data: list[GuiInvestmentNodeData] = field(default_factory=list)
-    # Battery-specific extra columns
-    invest_cost_energy: dict[int, float] = field(default_factory=dict)  # node_idx → $/MWh
-    invest_max_capacity: dict[int, float] = field(default_factory=dict)  # node_idx → MWh
 
 
 # ── System state ─────────────────────────────────────────────────
@@ -1077,6 +1086,10 @@ class GuiSystemState:
 
     # Raw passthrough for fields not edited in the GUI
     raw_extras: dict = field(default_factory=dict)
+
+    # Keys of the loaded file that ESFEX ignores (ESFEXConfig.unknown_keys),
+    # listed by validation; not written back on save.
+    unknown_config_keys: list[str] = field(default_factory=list)
 
 
 # ── Checkpoint suspension helper ─────────────────────────────────
@@ -1414,6 +1427,42 @@ class GuiModel(QObject):
         self._inter_system_links.clear()
         self._next_islink_id = 0
 
+    def restore_inter_system_link(
+        self, link: GuiInterSystemLink, keep_id: bool = True,
+    ) -> str:
+        """Add a link parsed from a config, keeping every field.
+
+        Used by the load paths so nothing parsed by
+        ``config_to_inter_system_links`` (reactance, resistance, style, ...)
+        falls back to the dataclass defaults. ``keep_id=False`` assigns a
+        fresh id (for links merged into a project that already has links).
+        """
+        kwargs = {f.name: getattr(link, f.name) for f in dataclasses.fields(link)}
+        if not keep_id:
+            kwargs["link_id"] = None
+        return self.add_inter_system_link(**kwargs)
+
+    def rename_system_references(self, old_name: str, new_name: str) -> None:
+        """Point inter-system links and the simulation selection at a renamed system.
+
+        ``systems_to_simulate`` keeps its order, so the renamed system stays
+        selected (and keeps its position) for Validate and Run.
+        """
+        for lk in self._inter_system_links:
+            changed = False
+            if lk.from_system == old_name:
+                lk.from_system = new_name
+                changed = True
+            if lk.to_system == old_name:
+                lk.to_system = new_name
+                changed = True
+            if changed:
+                self.interSystemLinkUpdated.emit(lk.link_id)
+        g = self.global_settings
+        g.systems_to_simulate = [
+            new_name if s == old_name else s for s in g.systems_to_simulate
+        ]
+
     # ------------------------------------------------------------------
     # Node operations
     # ------------------------------------------------------------------
@@ -1554,6 +1603,31 @@ class GuiModel(QObject):
             for bus in self.state.buses.values():
                 if bus.parent_node > index:
                     bus.parent_node -= 1
+
+            # Reindex equipment node references for nodes > index. Units whose
+            # bus sat on the removed node were deleted above; the survivors
+            # still carry the OLD node index. Leaving them stale is not
+            # cosmetic: the serializer sizes the system with
+            # ``num_nodes = max(len(nodes), max(unit.node) + 1)``, so one stale
+            # reference re-inflates num_nodes past the real node count and the
+            # config no longer matches its own demand_paths ("demand_paths has
+            # 289 entries but system has 296 nodes").
+            for coll in (self.state.generators, self.state.batteries,
+                         self.state.electrolyzers):
+                for unit in coll.values():
+                    n = getattr(unit, "node", None)
+                    if isinstance(n, int) and n > index:
+                        unit.node = n - 1
+
+            # Same for the deprecated from_node/to_node mirrors on branches.
+            # They are derived from the buses at serialization, but other
+            # in-memory consumers still read them, so keep them coherent.
+            for br in (list(self.state.transmission_lines)
+                       + list(self.state.transformers)):
+                for attr in ("from_node", "to_node"):
+                    v = getattr(br, attr, None)
+                    if isinstance(v, int) and v > index:
+                        setattr(br, attr, v - 1)
 
             self.nodeRemoved.emit(index)
 
@@ -2765,6 +2839,15 @@ class GuiModel(QObject):
         if not name:
             name = bus_id.replace("_", " ").title()
         bus = GuiBus(bus_id=bus_id, name=name, parent_node=parent_node)
+        if "frequency_hz" not in kwargs:
+            # A new bus (an auto-complete LV bus, a bus added in the editor)
+            # runs at the frequency of its node's AC buses, not at 50 Hz on a
+            # 60 Hz grid.
+            node_freq = majority_ac_frequency(
+                b for b in self.state.buses.values()
+                if b.parent_node == parent_node)
+            if node_freq:
+                bus.frequency_hz = node_freq
         for k, v in kwargs.items():
             if hasattr(bus, k):
                 setattr(bus, k, v)
@@ -2846,3 +2929,26 @@ class GuiModel(QObject):
                 if hasattr(bus, k):
                     setattr(bus, k, v)
             self.busUpdated.emit(bus_id)
+
+    def set_demand_fractions(self, fractions: dict[str, float],
+                             roles: dict[str, str] | None = None) -> int:
+        """Set many buses' demand fractions (and roles) as one undo step.
+
+        ``update_bus`` per bus took an undo snapshot for each one, pickling
+        the whole state (the nodes' hourly demand included), and its
+        ``busUpdated`` redrew the bus's marker and walked all its connected
+        equipment. A demand fraction changes neither, so this takes one
+        snapshot and emits no per-bus signal. Returns the buses updated."""
+        self._last_checkpoint = 0.0          # this change is its own undo step
+        self.checkpoint()
+        n = 0
+        for bus_id, frac in fractions.items():
+            bus = self.state.buses.get(bus_id)
+            if bus is None:
+                continue
+            bus.demand_fraction = frac
+            if roles and bus_id in roles:
+                bus.role = roles[bus_id]
+            n += 1
+        self.dataMutated.emit()
+        return n

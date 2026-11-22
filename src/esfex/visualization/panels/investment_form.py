@@ -191,18 +191,14 @@ class InvestmentForm(QWidget):
             return
 
         self._updating = True
-        is_battery = entry.technology_type == "battery"
+        # An existing generator only has a cost (it prices its life
+        # extension); new generation is built from technologies
+        has_max = entry.technology_type != "generator"
 
         # Columns
-        if is_battery:
-            headers = [
-                tr("investment_form.node_col"), tr("investment_form.invest_cost_col"),
-                tr("investment_form.invest_max_col"), tr("investment_form.energy_cost_col"),
-                tr("investment_form.energy_max_col"),
-            ]
-        else:
-            headers = [tr("investment_form.node_col"), tr("investment_form.invest_cost_col"),
-                       tr("investment_form.invest_max_col")]
+        headers = [tr("investment_form.node_col"), tr("investment_form.invest_cost_col")]
+        if has_max:
+            headers.append(tr("investment_form.invest_max_col"))
 
         self._table.setColumnCount(len(headers))
         self._table.setHorizontalHeaderLabels(headers)
@@ -222,18 +218,8 @@ class InvestmentForm(QWidget):
 
             # Invest cost
             self._set_float_cell(row, 1, nd.invest_cost)
-            # Invest max
-            self._set_float_cell(row, 2, nd.invest_max)
-
-            if is_battery:
-                # Energy cost
-                self._set_float_cell(
-                    row, 3, entry.invest_cost_energy.get(nd.node_index, 0.0)
-                )
-                # Energy max capacity
-                self._set_float_cell(
-                    row, 4, entry.invest_max_capacity.get(nd.node_index, 0.0)
-                )
+            if has_max:
+                self._set_float_cell(row, 2, nd.invest_max)
 
         self._table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.Stretch
@@ -334,10 +320,6 @@ class InvestmentForm(QWidget):
             nd.invest_cost = val
         elif col == 2:
             nd.invest_max = val
-        elif col == 3 and entry.technology_type == "battery":
-            entry.invest_cost_energy[nd.node_index] = val
-        elif col == 4 and entry.technology_type == "battery":
-            entry.invest_max_capacity[nd.node_index] = val
 
         self._emit_change()
 

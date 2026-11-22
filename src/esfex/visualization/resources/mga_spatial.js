@@ -10,12 +10,12 @@ function refresh() {
     if (!bridge) return;
     bridge.get_data(raw => {
         let data; try { data = JSON.parse(raw); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false); return;
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return;
         }
-        try { render(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        try { hideStatus(); render(data); }   // render() may show its own empty state
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 function showStatus(text, isError) {
@@ -59,30 +59,33 @@ const NAMED_COLORSCALES = {
 function resolveColorscale(name) { return NAMED_COLORSCALES[name] || name; }
 
 function render(data) {
+    resetLabelFits();
     const sp = data.spatial;
     if (!sp || !sp.tech_labels || sp.tech_labels.length === 0) {
-        showStatus("No spatial divergence data.", false); return;
+        showStatus(_t("web.charts.mga_spatial.no_data"), false); return;
     }
     const cmap = data.colormap || "YlOrRd";
     const trace = {
         type: "heatmap",
         z: sp.std_mw, x: sp.node_labels, y: sp.tech_labels,
         colorscale: resolveColorscale(cmap),
-        colorbar: { title: { text: "σ (MW)", side: "right" },
+        colorbar: { title: { text: _t("web.charts.mga_spatial.colorbar"), side: "right" },
                     thickness: 12, len: 0.9 },
-        hovertemplate: "%{y}<br>%{x}<br>σ = %{z:,.1f} MW<br>" +
-                       "μ = %{customdata:,.1f} MW<extra></extra>",
+        hovertemplate: _t("web.charts.mga_spatial.hover"),
         customdata: sp.mean_mw
     };
     const layout = {
-        margin: { l: 220, r: 30, t: 96, b: 120 },
-        title: { text: "<b>Spatial Divergence</b><br><span style='font-size:11px;color:#7f8c8d'>σ across alternatives per (technology × node) · hotter = more contested</span>",
+        margin: { l: 10, r: 30, t: 50, b: 10 },
+        title: { text: "<span style='font-size:11px;color:#7f8c8d'>" +
+                       _t("web.charts.mga_spatial.subtitle") + "</span>",
                  x: 0.5, xanchor: "center", y: 0.98, yanchor: "top", font: { size: 13 } },
-        xaxis: { tickangle: -40, automargin: true },
-        yaxis: { automargin: true }
+        xaxis: labelAxis({ axis: "xaxis", labels: sp.node_labels, fontSize: 11,
+                           fraction: 0.25, maxChars: 24, angle: -40 }),
+        yaxis: labelAxis({ axis: "yaxis", labels: sp.tech_labels, fontSize: 11,
+                           fraction: 0.25 })
     };
     Plotly.purge("plot");
-    Plotly.newPlot("plot", [trace], layout, { responsive: true, displaylogo: false });
+    Plotly.newPlot("plot", [trace], layout, { responsive: true, displaylogo: false }).then(refitLabels);
 }
 
 // Python params widget calls this when the colormap combo changes.

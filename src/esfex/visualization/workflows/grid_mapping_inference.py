@@ -15,6 +15,10 @@ Inference is purely topological:
   exactly the flow the edge has to carry; in a meshed network it is a
   very conservative upper bound.
 * The inferred capacity is ``max(current_cap, |imbalance| × safety_factor)``.
+* A line whose capacity is raised counts as extra parallel circuits of its
+  own type: its R and X are divided and its B multiplied by
+  ``new_capacity / old_capacity`` (the convention of the equivalent lines
+  the simplification builds), so its impedance matches the larger capacity.
 * Transformers also get their R/X re-derived from their MVA rating so
   per-unit values stay in plausible ranges.
 
@@ -39,19 +43,25 @@ logger = logging.getLogger(__name__)
 class InferenceReport:
     lines_capacity_set: int = 0
     lines_capacity_bumped: int = 0
+    # Bumped lines whose R/X/B were rescaled as parallel circuits
+    lines_impedance_scaled: int = 0
     transformers_mva_set: int = 0
     transformers_mva_bumped: int = 0
     transformers_impedance_set: int = 0
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
-        return (
-            f"Lines: {self.lines_capacity_set} new caps, "
-            f"{self.lines_capacity_bumped} bumped. "
-            f"Transformers: {self.transformers_mva_set} new MVA, "
-            f"{self.transformers_mva_bumped} bumped, "
-            f"{self.transformers_impedance_set} impedances re-derived."
-        )
+        from esfex.visualization.i18n import tr
+        return " ".join((
+            tr("grid_builder.report_inference_lines",
+               set=self.lines_capacity_set,
+               bumped=self.lines_capacity_bumped,
+               scaled=self.lines_impedance_scaled),
+            tr("grid_builder.report_inference_transformers",
+               set=self.transformers_mva_set,
+               bumped=self.transformers_mva_bumped,
+               impedance=self.transformers_impedance_set),
+        ))
 
 
 # Floor for capacity even when no gen/demand sits on either side —
@@ -259,6 +269,29 @@ def _bridge_flow_index(adj: dict[str, set[str]], inj: dict[str, float]):
     return flow
 
 
+def _scale_line_as_parallel_circuits(state: "GuiSystemState", ln, k: float) -> bool:
+    """Rescale line *ln*'s impedance for *k* times its capacity, as *k*
+    circuits of its type in parallel: R and X ÷ k, B × k. A line without a
+    reactance first gets the one the Grid Builder derives from its length
+    and voltage (``_line_impedance_pu``). False when its reactance is
+    unknown (no voltage or length), the line is then left as it is."""
+    x = float(getattr(ln, "reactance_pu", None) or 0.0)
+    if x > 0:
+        r = getattr(ln, "resistance_pu", None)
+        b = getattr(ln, "susceptance_pu", None)
+    else:
+        from esfex.visualization.data.validation import _line_impedance_pu
+        r, x, b = _line_impedance_pu(state, ln)
+        if x <= 0:
+            return False
+    ln.reactance_pu = x / k
+    if r:
+        ln.resistance_pu = r / k
+    if b:
+        ln.susceptance_pu = b * k
+    return True
+
+
 def infer_electrical_params(state: "GuiSystemState") -> InferenceReport:
     """Walk the network and infer missing line/transformer parameters.
 
@@ -309,6 +342,14 @@ def infer_electrical_params(state: "GuiSystemState") -> InferenceReport:
         elif current < needed:
             ln.capacity_mw = needed
             rep.lines_capacity_bumped += 1
+            if _scale_line_as_parallel_circuits(state, ln, needed / current):
+                rep.lines_impedance_scaled += 1
+            else:
+                from esfex.visualization.i18n import tr as _tr
+                rep.notes.append(_tr(
+                    "grid_builder.report_inference_not_rescaled",
+                    line=getattr(ln, "line_id", "?"), old=f"{current:g}",
+                    new=f"{needed:g}"))
 
     # ── Transformers ──────────────────────────────────────────────
     # Lazy import so the inference module can be used without Qt loaded.
@@ -316,6 +357,7 @@ def infer_electrical_params(state: "GuiSystemState") -> InferenceReport:
         from esfex.visualization.workflows.grid_mapping_quality import (
             estimate_transformer_impedance_pu,
             estimate_transformer_losses_fraction,
+            system_base_mva,
         )
     except Exception:
         estimate_transformer_impedance_pu = None
@@ -346,7 +388,8 @@ def infer_electrical_params(state: "GuiSystemState") -> InferenceReport:
                 tr.from_voltage_kv / tr.to_voltage_kv
                 if tr.to_voltage_kv > 0 else 2.0
             )
-            new_z = estimate_transformer_impedance_pu(tr.rated_power_mva, ratio)
+            new_z = estimate_transformer_impedance_pu(
+                tr.rated_power_mva, ratio, system_base_mva(state))
             if abs(new_z - tr.impedance_pu) > 0.01:
                 tr.impedance_pu = new_z
                 rep.transformers_impedance_set += 1

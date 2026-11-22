@@ -6,8 +6,6 @@ Provides helper functions and temporal utilities.
 
 from esfex.utils.helpers import (
     BoundaryConditions,
-    adjust_investment_limits,
-    adjust_transmission_parameters,
     calculate_co2_emissions,
     calculate_renewable_penetration,
     extract_boundary_conditions,
@@ -30,8 +28,6 @@ from esfex.utils.temporal import (
 __all__ = [
     # Helpers
     "BoundaryConditions",
-    "adjust_investment_limits",
-    "adjust_transmission_parameters",
     "calculate_co2_emissions",
     "calculate_renewable_penetration",
     "extract_boundary_conditions",

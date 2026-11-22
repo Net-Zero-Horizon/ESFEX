@@ -1,49 +1,35 @@
 # Rooftop Solar Assessment
 
-Distributed rooftop photovoltaic potential analysis and adoption modeling for building stocks. Access via **Workflows > Rooftop Solar Assessment**.
+Distributed rooftop photovoltaic potential analysis and adoption modeling for building stocks. Access via **Workflows > Solar Rooftop Analysis...**.
 
 The wizard evaluates rooftop PV deployment at the individual building level, combining geospatial building footprint data, solar resource databases, and panel performance models to compute per-building and aggregated PV potential. It then projects technology adoption over time using four complementary diffusion models, and feeds the selected adoption trajectory into the ESFEX optimizer as a time-varying virtual generator. The methodology follows rooftop suitability assessment practices [**[55]**](../reference/bibliography.md#ref55) and distributed generation adoption modeling [**[54]**](../reference/bibliography.md#ref54), with cost assumptions from [**[48]**](../reference/bibliography.md#ref48) and diffusion dynamics from [**[53]**](../reference/bibliography.md#ref53).
 
 The analysis engine is provided by the `rooftex` library for building-level PV assessment and the `esfex.models.adoption_models` module for adoption curve generation.
 
-The wizard is organized in two phases:
+The wizard has four steps. Each step stacks several panels:
 
-- **Phase A (Steps 1-5)**: Rooftop Potential. Define the geographic domain, fetch building and solar data, configure panel and roof parameters, run the per-building analysis, and review results.
-- **Phase B (Steps 6-9)**: Adoption Modeling & Integration. Gather macroeconomic data, run four adoption models (logistic, Bass, techno-economic, agent-based), compare scenarios, and apply the selected curve to the ESFEX model.
+1. **Domain & Data**: domain definition, then building footprint and solar resource data.
+2. **Configuration & Analysis**: panel and roof configuration and the per-building analysis, side by side.
+3. **Results & Macro**: rooftop potential results, then macroeconomic data for the adoption models.
+4. **Adoption & Integration**: four adoption models (logistic, Bass, techno-economic, agent-based), scenario comparison, and application of the selected curve to the ESFEX model.
 
 
 ---
 
 
-## Phase A -- Rooftop Potential Assessment
+## Step 1: Domain & Data
 
 
-### Step 1: Domain Definition
+### Domain Definition
 
-Define the geographic bounding box that covers the area of interest.
-
-**Two input methods:**
-
-- **Draw on map**: Click "Draw Rectangle", then click and drag directly on the map. The wizard minimizes itself so the full map is visible during drawing. Once the rectangle is completed, the wizard restores itself and displays the captured coordinates.
-- **Manual entry**: Enter South latitude, North latitude, West longitude, and East longitude directly in the coordinate spinboxes (6 decimal places). Click "Apply" to validate.
-
-The wizard displays the approximate domain area in km squared, computed using spherical distance:
-
-\[
-A \approx ((\phi_N - \phi_S) \times 111.32) \times ((\lambda_E - \lambda_W) \times 111.32 \times \cos\bar{\phi})
-\]
-
-where \(\bar{\phi} = (\phi_S + \phi_N)/2\) is the midpoint latitude.
-
-**Show on Map**: After coordinates are set, click to visualize the domain rectangle on the map and fit the view to its extent.
+Define the study area with the shared domain selector: **Draw domain** on the map, or **Use imported area as domain** with an imported GeoAsset (see [Study area selector](index.md#study-area-selector)). Building footprints are downloaded for the domain's bounding box and then clipped to the polygon.
 
 **Tips:**
 
 - The domain should cover the urban or peri-urban area where rooftop PV deployment is being assessed. Larger domains require longer data fetching and analysis times.
-- North must be greater than South, and East must be greater than West.
 
 
-### Step 2: Data Sources
+### Data Sources
 
 Fetch building footprint and solar resource data from external databases. Both datasets must be successfully loaded before proceeding to the next step.
 
@@ -53,9 +39,9 @@ Fetch building footprint and solar resource data from external databases. Both d
 |--------|-------------|
 | **Overture Maps** | Open dataset with global building footprints. Best coverage in urban areas. |
 | **Microsoft ML Buildings** | Machine learning-derived footprints from satellite imagery. Over 1.2 billion buildings worldwide. |
-| **Google Open Buildings** | Google's ML-derived dataset. Best coverage in Africa, South/Southeast Asia, and Latin America. |
+| **Google Open Buildings** | Google's ML-derived dataset. Best coverage in Africa, South/Southeast Asia, and Latin America. When the Google source is unavailable, the fetch falls back to Overture Maps automatically. |
 
-Click **Fetch Buildings** to download building footprints within the domain. The operation runs in a background thread with a progress bar. The status displays the total number of buildings retrieved and the fraction with height data (needed for shading analysis). Buildings with height information enable more accurate inter-building shading estimation.
+Click **Fetch Buildings** to download building footprints within the domain (clipped to the domain polygon). The operation runs in a background thread with a progress bar. The status displays the total number of buildings retrieved and the fraction with height data (needed for shading analysis). Buildings with height information enable more accurate inter-building shading estimation.
 
 **Solar resource:**
 
@@ -73,7 +59,12 @@ Select a reference year (2005-2024, default 2022) and click **Fetch Solar Data**
 - The reference year should be a recent year with typical weather conditions. Avoid years with unusual cloud patterns or extreme events.
 
 
-### Step 3: Panel & Roof Configuration
+## Step 2: Configuration & Analysis
+
+The configuration panel and the analysis panel sit side by side.
+
+
+### Panel & Roof Configuration
 
 Configure PV panel specifications, roof suitability criteria, and shading analysis parameters. All fields have sensible defaults and can be adjusted to reflect available module technology and local building characteristics.
 
@@ -110,7 +101,7 @@ Configure PV panel specifications, roof suitability criteria, and shading analys
 - Disable shading analysis for rapid preliminary assessments or when building height data is unavailable.
 
 
-### Step 4: Analysis
+### Analysis
 
 Click **Run Analysis** to execute the rooftop PV assessment pipeline. The wizard displays a configuration summary before starting, showing the number of buildings, solar data source, panel parameters, and roof criteria.
 
@@ -132,7 +123,10 @@ The analysis runs on a background thread with a progress bar and real-time log o
 - Buildings without height data still receive PV capacity estimates but are excluded from the shading calculation.
 
 
-### Step 5: Results
+## Step 3: Results & Macro
+
+
+### Results
 
 Summary statistics and export options for the completed analysis.
 
@@ -157,13 +151,7 @@ Summary statistics and export options for the completed analysis.
 | **Export CSV** | Save a tabular summary with one row per building: building_id, usable_roof_area_m2, capacity_kw, annual_kwh, specific_yield_kwh_kwp, shading_loss, suitable. |
 
 
----
-
-
-## Phase B -- Adoption Modeling & Integration
-
-
-### Step 6: Macroeconomic Data
+### Macroeconomic Data
 
 Fetch and configure macroeconomic parameters that drive the adoption models. Data can be auto-fetched by country or entered manually.
 
@@ -202,9 +190,12 @@ Fetched values populate the form fields automatically. If any source fails, part
 - PV system cost should include all balance-of-system costs, not just module price.
 
 
-### Step 7: Adoption Models
+## Step 4: Adoption & Integration
 
-Configure and run four adoption modeling methods. Each method projects year-by-year rooftop PV penetration from a base year to a target year, bounded by the technical maximum capacity computed in Phase A.
+
+### Adoption Models
+
+Configure and run four adoption modeling methods. Each method projects year-by-year rooftop PV penetration from a base year to a target year, bounded by the technical maximum capacity computed by the rooftop analysis (Step 2).
 
 **Time horizon:**
 
@@ -245,17 +236,17 @@ Click **Run Models** to execute all selected methods in a background thread. The
 - Use Conservative presets for risk-averse planning and Aggressive presets for optimistic scenarios.
 
 
-### Step 8: Scenario Comparison
+### Scenario Comparison
 
 Compare adoption curves from all computed methods on a single chart and select one for integration.
 
 **Adoption chart:**
 
-A matplotlib line chart plots installed capacity (MW) versus year for each method, using distinct colors. The ABM curve includes a shaded confidence band (10th-90th percentile across stochastic iterations). If validation data was loaded in Step 7, observed data points are overlaid as scatter markers for visual comparison.
+A matplotlib line chart plots installed capacity (MW) versus year for each method, using distinct colors. The ABM curve includes a shaded confidence band (10th-90th percentile across stochastic iterations). If validation data was loaded in the adoption models panel, observed data points are overlaid as scatter markers for visual comparison.
 
 **Curve selection:**
 
-Radio buttons list each method with its final capacity at the target year. Select the method that best represents the expected adoption trajectory. The selection determines which curve is applied to the ESFEX model in Step 9.
+Radio buttons list each method with its final capacity at the target year. Select the method that best represents the expected adoption trajectory. The selection determines which curve is applied to the ESFEX model by the grid integration panel.
 
 **Summary table:**
 
@@ -269,7 +260,7 @@ A table displays installed capacity for each method at every 5th year and the fi
 | **Export CSV** | Save all curves as a CSV file with columns: year, method_penetration, method_capacity_mw (for each method). |
 
 
-### Step 9: Grid Integration
+### Grid Integration
 
 Apply the selected adoption curve to the ESFEX model or export analysis results for external use.
 
@@ -281,7 +272,7 @@ Click **Apply to Model** to write adoption parameters into the GUI model's rooft
 
 1. Extracting initial adoption (penetration at base year) and maximum adoption (penetration at target year, with low/medium/high scenarios at 0.6x, 1.0x, and 1.3x of the final value).
 2. Estimating the adoption rate from the slope at the curve midpoint.
-3. Computing per-node system counts and average system sizes from the Phase A building analysis.
+3. Computing per-node system counts and average system sizes from the building analysis.
 4. Setting system cost, performance ratio, and degradation rate from the macroeconomic and panel configuration data.
 5. Enabling rooftop solar simulation in the system settings.
 
@@ -294,7 +285,7 @@ The applied configuration creates a time-varying virtual generator in the ESFEX 
 | **Adoption Curves** | CSV | All methods: year, penetration fraction, installed capacity (MW) per method. |
 | **Macro Data** | JSON | Full macroeconomic data snapshot (GDP, tariff, costs, rates). |
 | **Model Parameters** | JSON | Per-method fitted parameters, final penetration, and final capacity. |
-| **Buildings Analysis** | CSV | Per-building results from Phase A: building_id, capacity_kw, annual_kwh, specific_yield, usable_roof_area, suitable. |
+| **Buildings Analysis** | CSV | Per-building results of the rooftop analysis: building_id, capacity_kw, annual_kwh, specific_yield, usable_roof_area, suitable. |
 
 
 ---
@@ -368,7 +359,7 @@ z(t) = \beta_0 + \beta_{\text{GDP}} \cdot GDP(t) + \beta_{\text{tariff}} \cdot \
 
 | Symbol | Default | Description |
 |--------|---------|-------------|
-| \(K\) | from Phase A | Technical maximum rooftop capacity (MW) |
+| \(K\) | from the rooftop analysis | Technical maximum rooftop capacity (MW) |
 | \(\beta_0\) | -3.0 | Intercept (baseline propensity) |
 | \(\beta_{\text{GDP}}\) | 0.00005 | GDP per capita coefficient (higher GDP promotes adoption) |
 | \(\beta_{\text{tariff}}\) | 8.0 | Electricity tariff coefficient (higher tariff promotes adoption) |
@@ -422,7 +413,7 @@ N(t) = K \cdot F(t) \tag{RSP-6a}
 |--------|---------|-------------|
 | \(p\) | 0.03 | Innovation coefficient (external influence: advertising, policy, media). Typical range for energy technologies: 0.01-0.05. |
 | \(q\) | 0.38 | Imitation coefficient (internal influence: word-of-mouth, neighbor effects). Typical range: 0.20-0.50 [**[53]**](../reference/bibliography.md#ref53). |
-| \(K\) | from Phase A | Market potential (maximum capacity, MW) |
+| \(K\) | from the rooftop analysis | Market potential (maximum capacity, MW) |
 
 The Bass model [**[53]**](../reference/bibliography.md#ref53) captures the classic S-curve dynamics of technology diffusion: early adoption driven by innovators (coefficient \(p\)), followed by acceleration as imitators adopt through social influence (coefficient \(q\)). The ratio \(q/p\) determines the asymmetry of the S-curve. If an initial penetration is specified (e.g., 1%), the model solves for the time offset \(t_0\) such that \(F(t_0)\) matches the initial value.
 
@@ -518,7 +509,7 @@ from esfex.models.adoption_models import (
     fit_adoption_to_rooftop_config,
 )
 
-# Phase A: Rooftop potential (requires buildings GeoDataFrame and solar data)
+# Rooftop potential (requires buildings GeoDataFrame and solar data)
 config = AnalysisConfig(
     module_efficiency=0.21,
     module_power_w=400,
@@ -531,7 +522,7 @@ config = AnalysisConfig(
     shading_search_radius_m=50.0,
 )
 
-# Phase B: Adoption modeling
+# Adoption modeling
 macro = MacroeconomicData(
     country_iso="CUB",
     gdp_per_capita=9500.0,
@@ -542,7 +533,7 @@ macro = MacroeconomicData(
     discount_rate=0.08,
 )
 
-max_mw = 150.0  # from Phase A analysis summary
+max_mw = 150.0  # from the rooftop analysis summary
 
 logistic = run_logistic_adoption(macro, max_mw, base_year=2025, target_year=2050)
 bass = run_bass_diffusion(max_mw, base_year=2025, target_year=2050, p=0.03, q=0.38)
@@ -563,4 +554,4 @@ config_dict = fit_adoption_to_rooftop_config(
 print(f"Adoption rate (medium): {config_dict['adoption_rates']['medium']:.3f}")
 ```
 
-See the [Adoption Models API](../api/models-adoption-models.md) and [Solar Analysis API](../api/visualization-solar-analysis.md) for full parameter documentation.
+Parameters are documented in the docstrings of `esfex.models.adoption_models` and `esfex.visualization.workflows.solar_analysis`. The rooftop model used by the simulation is described in [Rooftop Solar Model](../api/models-solar-rooftop.md).

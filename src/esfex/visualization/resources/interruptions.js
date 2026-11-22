@@ -1,25 +1,39 @@
-/* Interruptions calendar — D3 Gantt timeline over the horizon year.
+/* Interruptions calendar — D3 Gantt timeline over the simulation horizon.
  * Rows = infrastructure elements (grouped by category); bars = scheduled
  * outages over [start_hour, end_hour). Fully offline (bundled d3). Talks to
  * Python via the QWebChannel `bridge` (get_data / commit). */
 "use strict";
 
 var LEFT = 172, ROW_H = 22, HDR_H = 18, TOP = 26, PAD_R = 16;
-var baseMs = Date.UTC(2025, 0, 1), horizon = 8760, plotW = 900, contentH = 0;
+var baseYear = 2025, horizon = 8760, plotW = 900, contentH = 0;
 var rows = [], rowOf = {}, schedule = [], selected = null, uidSeq = 1;
-var x, svg, gBars, I = {};
+var x, svg, gBars;
 
-function hourToDate(h) { return new Date(baseMs + h * 3600000); }
+// Model calendar: every modelled year has 8760 h and no Feb 29 (the data are
+// 8760-h blocks; see esfex.utils.temporal). Hour h is in year
+// baseYear + floor(h / 8760); within it, dates follow a non-leap calendar.
+var H_YEAR = 8760, NOLEAP = Date.UTC(2025, 0, 1);   // 2025 is not a leap year
+function hourToParts(h) {
+    var y = Math.floor(h / H_YEAR);
+    var d = new Date(NOLEAP + (h - y * H_YEAR) * 3600000);
+    return { year: baseYear + y, month: d.getUTCMonth(), day: d.getUTCDate(),
+             hour: d.getUTCHours(), minute: d.getUTCMinutes() };
+}
+function partsToHour(year, month, day, hour, minute) {
+    if (month === 1 && day === 29) day = 28;   // Feb 29 is not modelled
+    var r = (Date.UTC(2025, month, day, hour, minute) - NOLEAP) / 3600000;
+    return (year - baseYear) * H_YEAR + Math.round(r);
+}
 function pad(n) { return String(n).padStart(2, "0"); }
 function hourToInput(h) {
-    var d = hourToDate(h);
-    return d.getUTCFullYear() + "-" + pad(d.getUTCMonth() + 1) + "-" + pad(d.getUTCDate()) +
-           "T" + pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes());
+    var p = hourToParts(h);
+    return p.year + "-" + pad(p.month + 1) + "-" + pad(p.day) +
+           "T" + pad(p.hour) + ":" + pad(p.minute);
 }
 function inputToHour(s) {
     var m = /(\d+)-(\d+)-(\d+)T(\d+):(\d+)/.exec(s || "");
     if (!m) return null;
-    return Math.round((Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) - baseMs) / 3600000);
+    return partsToHour(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]);
 }
 function clampH(h) { return Math.max(0, Math.min(horizon, Math.round(h))); }
 function keyOf(d) { return d.element_type + " " + d.element_id; }
@@ -49,9 +63,8 @@ function applyTheme(t) {
 }
 
 function boot(data) {
-    baseMs = Date.UTC(data.base_year, 0, 1);
+    baseYear = data.base_year || 2025;
     horizon = data.horizon_hours || 8760;
-    I = data.i18n || {};
     if (data.theme) applyTheme(data.theme);
     // Flatten groups → rows (a header row per category, then element rows).
     rows = [];
@@ -66,19 +79,35 @@ function boot(data) {
     schedule = (data.schedule || []).map(function (o) {
         var c = Object.assign({ _uid: uidSeq++ }, o); return c;
     });
-    // Static labels
-    document.getElementById("tb-title").textContent = document.title = I.title || "Interruptions";
-    document.getElementById("tb-hint").textContent = I.empty || "";
-    document.getElementById("side-placeholder").textContent = I.empty || "";
-    document.getElementById("lbl-start").textContent = I.start || "Start";
-    document.getElementById("lbl-end").textContent = I.end || "End";
-    document.getElementById("lbl-avail").textContent = I.availability || "Availability";
-    document.getElementById("lbl-label").textContent = I.label || "Note";
-    document.getElementById("btn-delete").textContent = I.delete || "Delete";
+    applyLabels();
     wireForm();
     render();
     if (data.focus) focusRow(data.focus.element_type, data.focus.element_id);
 }
+
+// Static labels (web.interruptions.*; the category headers come translated
+// from Python with the data).
+function applyLabels() {
+    var text = {
+        "tb-title": _t("web.interruptions.title"),
+        "tb-hint": _t("web.interruptions.empty_hint"),
+        "side-placeholder": _t("web.interruptions.empty_hint"),
+        "lbl-start": _t("web.interruptions.start"),
+        "lbl-end": _t("web.interruptions.end"),
+        "lbl-avail": _t("web.interruptions.availability"),
+        "lbl-label": _t("web.interruptions.note"),
+        "lbl-recurring": _t("web.interruptions.recurring"),
+        "btn-delete": _t("web.interruptions.delete"),
+    };
+    for (var id in text) document.getElementById(id).textContent = text[id];
+    document.title = text["tb-title"];
+}
+
+// Language changed (web_i18n): labels and month names in the new language.
+window.onEsfexLanguageChanged = function () {
+    applyLabels();
+    if (rows.length) render();
+};
 
 function focusRow(cat, id) {
     var r = rowOf[cat + " " + id];
@@ -109,18 +138,35 @@ function render() {
         .attr("width", LEFT + plotW + PAD_R)
         .attr("height", contentH);
 
-    // Month grid + axis labels
+    // Grid + axis labels: months when the horizon is one year, otherwise
+    // one line per model year (labelled every few years so labels fit).
     var gGrid = svg.append("g");
-    for (var mo = 0; mo <= 12; mo++) {
-        var h = Math.round((Date.UTC(new Date(baseMs).getUTCFullYear(), mo, 1) - baseMs) / 3600000);
-        if (h < 0 || h > horizon) continue;
-        gGrid.append("line").attr("class", "grid-line month")
-            .attr("x1", x(h)).attr("x2", x(h)).attr("y1", TOP).attr("y2", contentH - 8);
-        if (mo < 12) {
-            var mid = hourToDate(h);
-            gGrid.append("text").attr("class", "axis-label")
-                .attr("x", x(h) + 4).attr("y", 16)
-                .text(mid.toLocaleString("default", { month: "short", timeZone: "UTC" }));
+    var nYears = Math.ceil(horizon / H_YEAR);
+    if (nYears <= 1) {
+        for (var mo = 0; mo <= 12; mo++) {
+            var h = partsToHour(baseYear, mo, 1, 0, 0);
+            if (h < 0 || h > horizon) continue;
+            gGrid.append("line").attr("class", "grid-line month")
+                .attr("x1", x(h)).attr("x2", x(h)).attr("y1", TOP).attr("y2", contentH - 8);
+            if (mo < 12) {
+                gGrid.append("text").attr("class", "axis-label")
+                    .attr("x", x(h) + 4).attr("y", 16)
+                    .text(new Date(Date.UTC(2025, mo, 1))
+                          .toLocaleString(window.ESFEX_LANG || "default",
+                                          { month: "short", timeZone: "UTC" }));
+            }
+        }
+    } else {
+        var every = Math.max(1, Math.ceil(nYears * 44 / plotW));
+        for (var yi = 0; yi <= nYears; yi++) {
+            var hy = yi * H_YEAR;
+            if (hy > horizon) break;
+            gGrid.append("line").attr("class", "grid-line month")
+                .attr("x1", x(hy)).attr("x2", x(hy)).attr("y1", TOP).attr("y2", contentH - 8);
+            if (yi < nYears && yi % every === 0) {
+                gGrid.append("text").attr("class", "axis-label")
+                    .attr("x", x(hy) + 4).attr("y", 16).text(String(baseYear + yi));
+            }
         }
     }
 
@@ -249,6 +295,9 @@ function wireForm() {
     document.getElementById("in-label").addEventListener("input", function () {
         if (selected) { selected.label = this.value; commitDeferred(); }
     });
+    document.getElementById("in-recurring").addEventListener("change", function () {
+        if (selected) { selected.recurring = this.checked; commit(); }
+    });
     document.getElementById("btn-delete").addEventListener("click", function () {
         if (!selected) return;
         schedule = schedule.filter(function (o) { return o !== selected; });
@@ -268,6 +317,7 @@ function fillForm() {
     document.getElementById("in-avail").value = pct;
     document.getElementById("avail-val").textContent = pct + "%";
     document.getElementById("in-label").value = selected.label || "";
+    document.getElementById("in-recurring").checked = !!selected.recurring;
 }
 
 // ── Commit to Python ───────────────────────────────────────────────
@@ -284,6 +334,8 @@ function commit() {
             element_type: d.element_type, element_id: d.element_id,
             start_hour: d.start_hour, end_hour: d.end_hour,
             availability: d.availability, label: d.label || "",
+            recurring: !!d.recurring,
+            node: (d.node === undefined) ? null : d.node,
         };
     });
     window._bridge.commit(JSON.stringify(out));

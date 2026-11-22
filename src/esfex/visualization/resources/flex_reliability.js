@@ -31,25 +31,25 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { _ucClearPlot(); showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { _ucClearPlot(); showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            _ucClearPlot(); showStatus(data && data.error ? data.error : "No data", false);
+            _ucClearPlot(); showStatus(data && data.error ? data.error : _t("web.common.no_data"), false);
             return;
         }
         if (data.mode === "uc") {
             try { renderUC(data); hideStatus(); }
-            catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+            catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
             return;
         }
         if (!data.years || data.years.length === 0) {
-            _ucClearPlot(); showStatus("No data", false);
+            _ucClearPlot(); showStatus(_t("web.common.no_data"), false);
             return;
         }
         try {
             render(data);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error("[flex_reliability.js]", e);
         }
     });
@@ -94,16 +94,16 @@ function render(data) {
             x: x, y: curve, name: years[i], legendgroup: years[i],
             line: { color: yearColor(i, n), width: 1.8 },
             xaxis: "x", yaxis: "y",
-            hovertemplate: years[i] +
-                "<br>%{x:.1f}% of time<br>Ramp: %{y:,.1f} MW/h<extra></extra>",
+            hovertemplate: _t("web.charts.flex_reliability.hover_ramp_curve",
+                              { year: years[i] }),
         });
     });
 
     // ── (b) failure-mode bars + inertia-deficit line ──
     const modes = [
-        { key: "ens_year_mwh", label: "Unserved energy", color: "#E74C3C" },
-        { key: "reserve_dynamic_mwh", label: "Reserve shortfall (dyn)", color: "#9B59B6" },
-        { key: "reserve_static_mwh", label: "Reserve shortfall (sta)", color: "#3498DB" },
+        { key: "ens_year_mwh", label: _t("web.charts.flex_reliability.mode_ens"), color: "#E74C3C" },
+        { key: "reserve_dynamic_mwh", label: _t("web.charts.flex_reliability.mode_res_dyn"), color: "#9B59B6" },
+        { key: "reserve_static_mwh", label: _t("web.charts.flex_reliability.mode_res_sta"), color: "#3498DB" },
     ];
     for (const m of modes) {
         const v = data[m.key];
@@ -112,22 +112,23 @@ function render(data) {
             type: "bar", x: years, y: v, name: m.label,
             marker: { color: m.color, line: { color: "#FFFFFF", width: 0.5 } },
             xaxis: "x2", yaxis: "y2", offsetgroup: "fm", legendgroup: "fm",
-            hovertemplate: "%{x}: %{y:,.2f} MWh<extra>" + m.label + "</extra>",
+            hovertemplate: _t("web.charts.flex_reliability.hover_mode", { label: m.label }),
         });
     }
     if (data.inertia_deficit_hours && data.inertia_deficit_hours.length) {
         traces.push({
             type: "scatter", mode: "lines+markers",
-            x: years, y: data.inertia_deficit_hours, name: "Inertia-deficit hours",
+            x: years, y: data.inertia_deficit_hours,
+            name: _t("web.charts.flex_reliability.trace_inertia"),
             line: { color: "#E67E22", width: 2.5 },
             marker: { color: "#E67E22", size: 7, line: { color: "#FFF", width: 1 } },
             xaxis: "x2", yaxis: "y3",
-            hovertemplate: "%{x}: %{y:,.0f} h<extra>Inertia deficit</extra>",
+            hovertemplate: _t("web.charts.flex_reliability.hover_inertia"),
         });
     }
 
     const feasibleNote = data.any_event ? "" :
-        "  <i>(no violations — adequate)</i>";
+        "  <i>" + _t("web.charts.flex_reliability.no_violations") + "</i>";
 
     const layout = {
         margin: { t: 56, r: 116, b: 64, l: 76 },
@@ -141,33 +142,33 @@ function render(data) {
                   bgcolor: "rgba(255,255,255,0.85)",
                   bordercolor: "rgba(0,0,0,0.1)", borderwidth: 1 },
         annotations: [
-            { text: "<b>a) Net-Load Ramp Duration Curve (MW/h)</b>",
+            { text: "<b>" + _t("web.charts.flex_reliability.title_a") + "</b>",
               x: 0.21, xref: "paper", xanchor: "center",
               y: 1.02, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
-            { text: "<b>b) Failure Mode by Year</b>" + feasibleNote,
+            { text: "<b>" + _t("web.charts.flex_reliability.title_b") + "</b>" + feasibleNote,
               x: 0.78, xref: "paper", xanchor: "center",
               y: 1.02, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
         ],
         // (a) left
         xaxis: { domain: [0, 0.42], anchor: "y",
-                 title: "<b>% of time ramp exceeded</b>",
+                 title: "<b>" + _t("web.charts.flex_reliability.axis_pct_time") + "</b>",
                  range: [0, 100], gridcolor: "rgba(0,0,0,0.08)" },
         yaxis: { domain: [0, 1], anchor: "x",
-                 title: "<b>Net-load ramp (MW/h)</b>",
+                 title: "<b>" + _t("web.charts.flex_reliability.axis_ramp_net") + "</b>",
                  zeroline: true, zerolinecolor: "rgba(0,0,0,0.25)",
                  gridcolor: "rgba(0,0,0,0.08)" },
         // (b) right
         xaxis2: { domain: [0.58, 0.96], anchor: "y2", type: "category",
-                  tickangle: -45, title: "<b>Year</b>",
+                  tickangle: -45, title: "<b>" + _t("web.charts.flex_reliability.axis_year") + "</b>",
                   gridcolor: "rgba(0,0,0,0.08)" },
         yaxis2: { domain: [0, 1], anchor: "x2",
-                  title: "<b>Shortfall (MWh)</b>", rangemode: "tozero",
+                  title: "<b>" + _t("web.charts.flex_reliability.axis_shortfall_mwh") + "</b>", rangemode: "tozero",
                   gridcolor: "rgba(0,0,0,0.08)" },
         yaxis3: { domain: [0, 1], anchor: "x2", overlaying: "y2",
                   side: "right", rangemode: "tozero", showgrid: false,
-                  title: { text: "<b>Inertia-deficit (h)</b>",
+                  title: { text: "<b>" + _t("web.charts.flex_reliability.axis_inertia") + "</b>",
                            font: { color: "#E67E22" } },
                   tickfont: { color: "#E67E22" } },
     };
@@ -201,70 +202,69 @@ function renderUC(data) {
     traces.push({
         x: x, y: data.net_load_mw,
         type: "scatter", mode: "lines",
-        name: "Net load",
+        name: _t("web.charts.flex_reliability.trace_net_load"),
         line: { color: "#2C3E50", width: 2 },
         xaxis: "x", yaxis: "y",
-        hovertemplate: "Hour %{x}: %{y:,.0f} MW<extra>Net load</extra>",
+        hovertemplate: _t("web.charts.flex_reliability.hover_net_load"),
     });
     traces.push({
         x: x, y: data.ramp_mw_h,
         type: "scatter", mode: "lines",
-        name: "Ramp (ΔP/Δt)",
+        name: _t("web.charts.flex_reliability.trace_ramp"),
         line: { color: "#922B21", width: 1.5, dash: "dot" },
         xaxis: "x", yaxis: "y2",
-        hovertemplate: "Hour %{x}: %{y:,.1f} MW/h<extra>Ramp</extra>",
+        hovertemplate: _t("web.charts.flex_reliability.hover_ramp"),
     });
 
     traces.push({
         x: data.x_pct, y: data.ramp_sorted_mw_h,
         type: "scatter", mode: "lines",
-        name: "Ramp duration",
+        name: _t("web.charts.flex_reliability.trace_ramp_duration"),
         line: { color: "#27AE60", width: 2 },
         fill: "tozeroy", fillcolor: "rgba(39, 174, 96, 0.10)",
         xaxis: "x2", yaxis: "y3",
-        hovertemplate: "Top %{x:.1f}%: %{y:,.1f} MW/h<extra></extra>",
+        hovertemplate: _t("web.charts.flex_reliability.hover_ramp_duration"),
         showlegend: false,
     });
 
     traces.push({
         x: x, y: data.loss_load_mw,
-        type: "bar", name: "Load shed",
+        type: "bar", name: _t("web.charts.flex_reliability.trace_load_shed"),
         marker: { color: "#E74C3C", opacity: 0.85 },
         xaxis: "x3", yaxis: "y4",
-        hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>Load shed</extra>",
+        hovertemplate: _t("web.charts.flex_reliability.hover_load_shed"),
     });
     traces.push({
         x: x, y: data.loss_reserve_static_mw,
-        type: "bar", name: "Reserve (static) shortfall",
+        type: "bar", name: _t("web.charts.flex_reliability.trace_res_static"),
         marker: { color: "#3498DB", opacity: 0.85 },
         xaxis: "x3", yaxis: "y4",
-        hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>Static</extra>",
+        hovertemplate: _t("web.charts.flex_reliability.hover_res_static"),
     });
     traces.push({
         x: x, y: data.loss_reserve_dynamic_mw,
-        type: "bar", name: "Reserve (dynamic) shortfall",
+        type: "bar", name: _t("web.charts.flex_reliability.trace_res_dynamic"),
         marker: { color: "#9B59B6", opacity: 0.85 },
         xaxis: "x3", yaxis: "y4",
-        hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>Dynamic</extra>",
+        hovertemplate: _t("web.charts.flex_reliability.hover_res_dynamic"),
     });
 
     const subTitle = data.any_event
-        ? `<span style="color:#922B21"><b>Stress events:</b> ` +
-          `LS ${_fmtMWh(t.loss_load || 0)} &nbsp; ` +
-          `RS-stat ${_fmtMWh(t.loss_reserve_static || 0)} &nbsp; ` +
-          `RS-dyn ${_fmtMWh(t.loss_reserve_dynamic || 0)} &nbsp; ` +
-          `Inertia ${(t.loss_inertia_hours || 0).toFixed(0)} h</span>`
-        : `<span style="color:#1E8449"><b>Adequate</b> — no operational stress events</span>`;
+        ? `<span style="color:#922B21">` +
+          _t("web.charts.flex_reliability.stress_events", {
+              ls: _fmtMWh(t.loss_load || 0),
+              rs_stat: _fmtMWh(t.loss_reserve_static || 0),
+              rs_dyn: _fmtMWh(t.loss_reserve_dynamic || 0),
+              inertia: (t.loss_inertia_hours || 0).toFixed(0),
+          }) + `</span>`
+        : `<span style="color:#1E8449">` +
+          _t("web.charts.flex_reliability.adequate") + `</span>`;
 
     const layout = {
-        margin: { t: 110, r: 70, b: 60, l: 80 },
+        margin: { t: 80, r: 70, b: 60, l: 80 },
         grid: { rows: 3, columns: 1, pattern: "independent", roworder: "top to bottom" },
         showlegend: true,
         annotations: [
-            { text: `<b>Flexibility &amp; Reliability — Year ${data.year}</b>`,
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.16, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: subTitle,
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.08, yref: "paper", yanchor: "bottom",
@@ -278,17 +278,17 @@ function renderUC(data) {
         },
         // Subplot (a): net load + ramp
         xaxis:  { domain: [0, 1], anchor: "y", showticklabels: false },
-        yaxis:  { domain: [0.68, 1.0], title: "<b>Net load (MW)</b>",
+        yaxis:  { domain: [0.68, 1.0], title: "<b>" + _t("web.charts.flex_reliability.axis_net_load") + "</b>",
                   rangemode: "tozero" },
         yaxis2: { domain: [0.68, 1.0], overlaying: "y", side: "right",
-                  title: "<b>Ramp (MW/h)</b>", showgrid: false },
+                  title: "<b>" + _t("web.charts.flex_reliability.axis_ramp") + "</b>", showgrid: false },
         // Subplot (b): ramp duration curve
         xaxis2: { domain: [0, 1], anchor: "y3",
-                  title: "<b>Top X% of hours</b>", range: [0, 100] },
-        yaxis3: { domain: [0.36, 0.62], title: "<b>Ramp (MW/h)</b>" },
+                  title: "<b>" + _t("web.charts.flex_reliability.axis_top_hours") + "</b>", range: [0, 100] },
+        yaxis3: { domain: [0.36, 0.62], title: "<b>" + _t("web.charts.flex_reliability.axis_ramp") + "</b>" },
         // Subplot (c): stress events
-        xaxis3: { domain: [0, 1], anchor: "y4", title: "<b>Hour</b>" },
-        yaxis4: { domain: [0.0, 0.30], title: "<b>Shortfall (MW)</b>",
+        xaxis3: { domain: [0, 1], anchor: "y4", title: "<b>" + _t("web.charts.flex_reliability.axis_hour") + "</b>" },
+        yaxis4: { domain: [0.0, 0.30], title: "<b>" + _t("web.charts.flex_reliability.axis_shortfall_mw") + "</b>",
                   rangemode: "tozero" },
         barmode: "stack",
     };

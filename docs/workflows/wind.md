@@ -1,13 +1,15 @@
 # Wind Assessment
 
-Wind resource assessment and advanced analysis wizard. Access via **Workflows > Wind Assessment**.
+Wind resource assessment and advanced analysis wizard. Access via **Workflows > Wind Resource Assessment...**.
 
 The wizard evaluates onshore and offshore wind energy potential over a user-defined geographic domain. It downloads ERA5 reanalysis wind data (or MERRA-2 via NASA POWER), fits Weibull distributions, applies turbine power curves from a comprehensive database, runs multi-criteria suitability analysis, and generates development zone maps. The advanced analysis phase adds detailed wind characterization, project-level financial evaluation, inter-turbine wake modeling, and hourly availability profile generation for the ESFEX optimization engine. Wind resource modeling is provided by the `windrex` library.
 
-The wizard is organized in two phases:
+The wizard has four steps. Each step stacks several panels:
 
-- **Phase A (Steps 1-5)**: Resource Assessment. Define the analysis domain, select a turbine model and configure assessment parameters, set MCDA criteria and weights, run the spatial analysis, and review results with development zone generation.
-- **Phase B (Steps 6-9)**: Advanced Analysis. Characterize the wind regime (Weibull fit, wind rose, diurnal and seasonal patterns), evaluate project financials (LCOE, NPV, IRR, sensitivity), model wake effects (Jensen/Park, array efficiency, spacing optimization), and generate hourly capacity factor profiles for system generators.
+1. **Setup**: domain definition, then turbine and assessment configuration.
+2. **Suitability**: MCDA criteria and the analysis run, side by side.
+3. **Results & Economics**: results with development zones, then project financial analysis (LCOE, NPV, IRR, sensitivity).
+4. **Refinement & Profiles**: wind characterization (Weibull fit, wind rose, diurnal and seasonal patterns), wake and layout analysis (Jensen/Park, array efficiency, spacing), and hourly capacity factor profiles for system generators.
 
 All wind-specific computations use the `windrex` library, which can also be used independently for scripting and batch analysis -- see [Scripting](#scripting).
 
@@ -15,30 +17,19 @@ All wind-specific computations use the `windrex` library, which can also be used
 ---
 
 
-## Phase A -- Resource Assessment
+## Step 1: Setup
 
 
-### Step 1: Domain Definition
+### Domain Definition
 
-Define the geographic bounding box for the wind resource assessment. The domain determines the spatial extent over which wind data is fetched and analyzed.
-
-**Draw on map:**
-
-Click **Draw Rectangle** to interactively draw the analysis domain on the map. The wizard minimizes while you draw, then restores automatically once the rectangle is placed. The bounding box coordinates are populated in the manual coordinate fields.
-
-**Manual coordinates:**
-
-Enter the south/north latitude and west/east longitude boundaries directly. Click **Apply Coordinates** to set the domain, then **Show on Map** to visualize it.
-
-Once a domain is set, the approximate area in km^2 is displayed. For offshore wind, extend the domain to cover the maritime area of interest.
+Define the study area with the shared domain selector: **Draw domain** on the map, or **Use imported area as domain** with an imported GeoAsset (see [Study area selector](index.md#study-area-selector)). Wind data is downloaded for the domain's bounding box; the analysis grid is then clipped to the polygon, so only cells inside it are evaluated. For offshore wind, include the maritime area of interest in the domain.
 
 **Tips:**
 
 - A typical onshore domain for a single wind farm site is 20-50 km on a side. Larger domains (100+ km) are appropriate for regional screening studies.
-- The domain must have north > south and east > west. The wizard validates this before proceeding.
 
 
-### Step 2: Turbine & Assessment Configuration
+### Turbine & Assessment Configuration
 
 Select a turbine model from a comprehensive database and configure the assessment parameters.
 
@@ -95,7 +86,12 @@ The hub height defaults to the selected turbine's specification but can be overr
 - Specific power (W/m^2 of swept area) is shown in the turbine detail panel. Lower specific power turbines (below 300 W/m^2) capture more energy in low-wind regimes.
 
 
-### Step 3: MCDA Criteria
+## Step 2: Suitability
+
+The MCDA criteria panel and the analysis panel sit side by side. The analysis reads the domain and configuration from Step 1 and the criteria from this step when you start it.
+
+
+### MCDA Criteria
 
 Configure the multi-criteria decision analysis (MCDA) for evaluating wind development zone suitability.
 
@@ -140,10 +136,10 @@ Check **Customize LULC Scores** to expand the land cover scoring table. Each lan
 
 - At least one criterion must be enabled to proceed.
 - For offshore assessments, consider disabling Terrain Slope, Elevation, and LULC Suitability, as they are not meaningful over water.
-- The Entropy and PCA methods are data-driven and therefore not available until the analysis in Step 4 completes. The wizard applies manual weights for the MCDA computation and reports the computed weights in the analysis log.
+- The Entropy and PCA methods are data-driven and therefore not available until the analysis completes. The wizard applies manual weights for the MCDA computation and reports the computed weights in the analysis log.
 
 
-### Step 4: Analysis
+### Analysis
 
 Run the full wind resource assessment. The analysis executes on a background thread with progress reporting.
 
@@ -171,10 +167,13 @@ Before running, the step displays a summary of all configured inputs: domain coo
 | CF range | Minimum to maximum capacity factor across the domain |
 | MCDA score range | Minimum to maximum suitability score |
 | Computed weights | Per-criterion weights (for Entropy/PCA methods) |
-| Hourly data | Per-cell hourly wind speed and direction arrays (used in Phase B) |
+| Hourly data | Per-cell hourly wind speed and direction arrays (used by the Step 4 panels) |
 
 
-### Step 5: Results & Development Zones
+## Step 3: Results & Economics
+
+
+### Results & Development Zones
 
 Review the analysis results and generate wind development zones.
 
@@ -208,59 +207,13 @@ The results are displayed as overlays on the map:
 
 **Tips:**
 
-- Development zones group adjacent feasible cells into coherent areas. The zone buffer parameter from Step 2 controls how far apart cells can be and still belong to the same zone.
-- After adding zones to the model, proceed to Phase B to generate availability profiles for the new wind generators.
+- Development zones group adjacent feasible cells into coherent areas. The zone buffer parameter in the configuration panel controls how far apart cells can be and still belong to the same zone.
+- After adding zones to the model, go on to Step 4 to generate availability profiles for the new wind generators.
 
 
----
+### Financial Analysis
 
-
-## Phase B -- Advanced Analysis
-
-
-### Step 6: Wind Characterization
-
-Detailed statistical characterization of the wind regime using the hourly data fetched in Phase A. This step uses functions from `windrex`: `fit_weibull`, `weibull_pdf`, `weibull_mean_power_density`, `compute_wind_rose`, `compute_diurnal_pattern`, and `compute_seasonal_pattern`.
-
-**Cell selector:**
-
-Select an individual grid cell from the dropdown to inspect a specific location, or select **All Cells** to view aggregated statistics across the entire domain.
-
-**Computed statistics:**
-
-| Metric | Description |
-|--------|-------------|
-| Weibull Parameters | Shape factor \(k\) and scale factor \(\lambda\) (m/s). \(k\) controls the distribution width: \(k \approx 2\) is typical; \(k > 3\) indicates very consistent winds. \(\lambda\) is approximately 13% larger than the mean wind speed. See [Equation WND-1](#weibull-probability-density-function) |
-| Mean Wind Speed | Arithmetic mean of all hourly wind speed measurements (m/s) |
-| Wind Power Density | Mean kinetic energy flux per unit area (W/m^2), computed from the Weibull parameters. Values above 400 W/m^2 indicate excellent wind resource. See [Equation WND-3](#wind-power-density) |
-| Dominant Direction | Most frequent wind direction sector based on the 16-sector wind rose |
-
-**Charts (2x2 grid):**
-
-1. **Weibull Distribution** -- Histogram of measured wind speeds overlaid with the fitted Weibull probability density function \(f(v)\). The fitted parameters \((k, \lambda)\) are shown in the legend. A good visual fit confirms that the Weibull model accurately represents the wind regime.
-
-2. **Wind Rose** -- Polar bar chart showing wind frequency by direction sector (16 sectors, each 22.5 degrees). Bar colors indicate mean speed per sector. The wind rose identifies prevailing wind directions that are critical for turbine layout optimization in Step 8.
-
-3. **Diurnal Pattern** -- Mean wind speed by hour of day (0-23). Some sites exhibit predictable diurnal cycles (e.g., coastal sites with stronger afternoon sea breezes). Sites with flat diurnal profiles have more consistent output.
-
-4. **Seasonal Pattern** -- Mean wind speed by month (January-December). Most mid-latitude sites are windier in winter, while tropical sites may show monsoon-driven seasonality.
-
-**Actions:**
-
-| Action | Description |
-|--------|-------------|
-| Export Charts | Save the 2x2 chart grid as a PNG image (150 DPI) |
-
-**Tips:**
-
-- A Weibull shape factor \(k > 2\) indicates a relatively narrow speed distribution and more predictable energy output.
-- Wind power density above 200 W/m^2 (IEC Class III threshold) is generally the minimum for commercial viability.
-- When "All Cells" is selected, wind speeds from all cells are concatenated for aggregate statistics. Individual cell selection is useful for comparing microclimates within the domain.
-
-
-### Step 7: Financial Analysis
-
-Project-level financial evaluation for a representative wind farm, using the capacity and capacity factor computed in Phase A.
+Project-level financial evaluation for a representative wind farm, using the capacity and capacity factor computed by the analysis.
 
 **Presets:**
 
@@ -316,14 +269,57 @@ The sensitivity sweep runs on a background thread and renders a chart with the c
 
 **Tips:**
 
-- The capacity factor used here is the gross CF from Phase A (before wake losses). For a more accurate LCOE that accounts for wake effects, run Step 8 first and adjust the CF accordingly.
+- The capacity factor used here is the gross CF from the analysis (before wake losses), and it cannot be edited in this panel, so the LCOE does not include wake losses. The wake analysis in Step 4 reports the net CF.
 - LCOE is most sensitive to capacity factor and CAPEX. Use the sensitivity chart to identify which parameter deserves the most attention in project development.
 - For offshore projects, CAPEX values of 3,000-5,000 $/kW are typical, reflecting the additional cost of marine foundations, subsea cables, and offshore installation vessels.
 
 
-### Step 8: Wake & Layout Analysis
+## Step 4: Refinement & Profiles
 
-Evaluates inter-turbine wake losses using the Jensen wake model and the wind rose computed in Step 6. Wake losses reduce the effective capacity factor of downstream turbines and are a primary consideration in wind farm layout design.
+
+### Wind Characterization
+
+Detailed statistical characterization of the wind regime using the hourly data fetched by the analysis. This panel uses functions from `windrex`: `fit_weibull`, `weibull_pdf`, `weibull_mean_power_density`, `compute_wind_rose`, `compute_diurnal_pattern`, and `compute_seasonal_pattern`.
+
+**Cell selector:**
+
+Select an individual grid cell from the dropdown to inspect a specific location, or select **All Cells** to view aggregated statistics across the entire domain.
+
+**Computed statistics:**
+
+| Metric | Description |
+|--------|-------------|
+| Weibull Parameters | Shape factor \(k\) and scale factor \(\lambda\) (m/s). \(k\) controls the distribution width: \(k \approx 2\) is typical; \(k > 3\) indicates very consistent winds. \(\lambda\) is approximately 13% larger than the mean wind speed. See [Equation WND-1](#weibull-probability-density-function) |
+| Mean Wind Speed | Arithmetic mean of all hourly wind speed measurements (m/s) |
+| Wind Power Density | Mean kinetic energy flux per unit area (W/m^2), computed from the Weibull parameters. Values above 400 W/m^2 indicate excellent wind resource. See [Equation WND-3](#wind-power-density) |
+| Dominant Direction | Most frequent wind direction sector based on the 16-sector wind rose |
+
+**Charts (2x2 grid):**
+
+1. **Weibull Distribution** -- Histogram of measured wind speeds overlaid with the fitted Weibull probability density function \(f(v)\). The fitted parameters \((k, \lambda)\) are shown in the legend. A good visual fit confirms that the Weibull model accurately represents the wind regime.
+
+2. **Wind Rose** -- Polar bar chart showing wind frequency by direction sector (16 sectors, each 22.5 degrees). Bar colors indicate mean speed per sector. The wind rose identifies prevailing wind directions that are critical for the wake and layout analysis.
+
+3. **Diurnal Pattern** -- Mean wind speed by hour of day (0-23). Some sites exhibit predictable diurnal cycles (e.g., coastal sites with stronger afternoon sea breezes). Sites with flat diurnal profiles have more consistent output.
+
+4. **Seasonal Pattern** -- Mean wind speed by month (January-December). Most mid-latitude sites are windier in winter, while tropical sites may show monsoon-driven seasonality.
+
+**Actions:**
+
+| Action | Description |
+|--------|-------------|
+| Export Charts | Save the 2x2 chart grid as a PNG image (150 DPI) |
+
+**Tips:**
+
+- A Weibull shape factor \(k > 2\) indicates a relatively narrow speed distribution and more predictable energy output.
+- Wind power density above 200 W/m^2 (IEC Class III threshold) is generally the minimum for commercial viability.
+- When "All Cells" is selected, wind speeds from all cells are concatenated for aggregate statistics. Individual cell selection is useful for comparing microclimates within the domain.
+
+
+### Wake & Layout Analysis
+
+Evaluates inter-turbine wake losses using the Jensen wake model and the wind rose computed by the characterization panel. Wake losses reduce the effective capacity factor of downstream turbines and are a primary consideration in wind farm layout design.
 
 The Jensen (linear) wake model computes the velocity deficit behind each turbine as a function of downstream distance, thrust coefficient, and wake decay constant. See [Equation WND-5](#jensen-wake-velocity-deficit). The model uses the computed wind rose to weight directional contributions, so the result accounts for the actual prevailing wind directions at the site.
 
@@ -339,7 +335,7 @@ The Jensen (linear) wake model computes the velocity deficit behind each turbine
 
 | Metric | Description |
 |--------|-------------|
-| Gross CF | Capacity factor before wake losses (from Phase A) |
+| Gross CF | Capacity factor before wake losses (from the analysis) |
 | Array Efficiency | Fraction of gross energy that survives wake interactions (%). See [Equation WND-7](#array-efficiency) |
 | Wake Loss | Energy lost to wake effects (1 - array efficiency, expressed as %) |
 | Net CF | Effective capacity factor after wake losses (Gross CF times Array Efficiency) |
@@ -362,11 +358,11 @@ A chart showing how array efficiency varies with turbine spacing from 3D to 15D.
 **Tips:**
 
 - Spacing below 5D is uncommon in practice due to excessive wake losses (>15%) and structural loading from turbulent wakes on downstream rotors.
-- If no wind rose is available from Step 6 (e.g., if you advanced directly to Phase B), the model assumes a uniform 16-sector wind rose with 8 m/s mean speed per sector.
+- If the characterization panel has not computed a wind rose, the model assumes a uniform 16-sector wind rose with 8 m/s mean speed per sector.
 - The wake model uses a regular grid layout assumption. Real wind farm layouts optimized for the specific wind rose and terrain can achieve 2-5% higher array efficiency than a regular grid.
 
 
-### Step 9: Availability Profile Generation
+### Availability Profile Generation
 
 Generates hourly capacity factor profiles for wind generators in the current system model. These profiles are the time-series files consumed by the ESFEX optimization engine (see [Availability Profiles](../user-guide/availability-profiles.md) for format details).
 
@@ -376,10 +372,10 @@ The wizard automatically identifies all renewable generators with wind fuel type
 
 For each selected generator instance, the wizard:
 
-1. **Locates the nearest grid cell** -- Matches the generator's geographic position to the nearest cell from the Phase A analysis domain (up to 0.5 degrees distance).
-2. **Applies the turbine power curve** -- If hourly wind speed data is available from Phase A, the wizard converts wind speeds to capacity factors using the turbine's power curve (either the custom curve from Step 2 or a default generic curve). This avoids a redundant API call.
-3. **Falls back to fresh data fetch** -- If no nearby Phase A data exists (generator is outside the analysis domain), the wizard downloads hourly wind speed data for the generator's location and year via `windrex.compute_wind_hourly_cf`, then computes capacity factors.
-4. **Writes CSV file** -- Saves an 8,760-row CSV file (one column per node) in the selected output directory. The file is automatically assigned as the generator's `Availability` profile in the model.
+1. **Locates the nearest grid cell** -- Matches the generator's geographic position to the nearest cell of the analysis domain (up to 0.5 degrees distance).
+2. **Applies the turbine power curve** -- If hourly wind speed data is available from the analysis, the wizard converts wind speeds to capacity factors using the turbine's power curve (either the custom curve from the configuration panel or a default generic curve). This avoids a redundant API call.
+3. **Falls back to fresh data fetch** -- If no nearby analysis data exists (generator is outside the analysis domain), the wizard downloads hourly wind speed data for the generator's location and year via `windrex.compute_wind_hourly_cf`, then computes capacity factors.
+4. **Writes CSV file** -- Saves an 8,760-row CSV file (one column per node) in the selected output directory. The file is automatically assigned as the generator's `Availability` profile in the model. The weather comes in UTC (NASA POWER: local solar time); the profile is saved on the [model clock](../user-guide/configuration.md#model-clock), which is recorded in the project's global settings.
 
 **Generator table columns:**
 
@@ -405,7 +401,7 @@ After generation completes, the wizard displays a time-series preview chart of t
 **Tips:**
 
 - Generators without a geographic position (0, 0) are automatically skipped.
-- Profiles generated from Phase A data are faster than fresh API calls, since the wind speed data is already in memory.
+- Profiles generated from the analysis data are faster than fresh API calls, since the wind speed data is already in memory.
 - Wind profiles typically show higher variability than solar profiles (no fixed diurnal pattern), so reviewing the preview chart is recommended to check for data quality issues.
 - After generating profiles, you can proceed directly to running a simulation -- the model will use the newly created availability files.
 
@@ -485,7 +481,7 @@ P_{\text{rated}} & v_{\text{rated}} \leq v \leq v_{\text{cut-out}} \\[4pt]
 | \(v_{\text{cut-out}}\) | Maximum wind speed (turbine shuts down) | 20-30 m/s |
 | \(P_{\text{rated}}\) | Nameplate capacity | MW |
 
-The cubic interpolation in the mid-range approximates the relationship between wind speed and power extraction. When a manufacturer-provided power curve is available from the turbine database (Step 2), it replaces this generic model with point-by-point interpolation.
+The cubic interpolation in the mid-range approximates the relationship between wind speed and power extraction. When a manufacturer-provided power curve is available from the turbine database (configuration panel), it replaces this generic model with point-by-point interpolation.
 
 
 ### Jensen Wake Velocity Deficit
@@ -602,118 +598,68 @@ The capacity factor is the ratio of actual energy output to the theoretical maxi
 
 ## Scripting
 
-All wizard computations are available as Python functions through the `windrex` library for batch processing and Jupyter notebooks:
+The spatial MCDA assessment runs only inside the wizard (`WindAnalyzer` in `esfex.visualization.workflows.wind_analysis`, a Qt thread). The site-level computations are available as functions in the `windrex` library:
 
 ```python
+import numpy as np
 from windrex import (
-    WindConfig,
-    MCDAConfig,
-    CriterionConfig,
     WindFinancialInputs,
-    compute_wind_assessment,
-    compute_wind_financials,
-    compute_wind_hourly_cf,
     compute_array_efficiency,
     compute_spacing_curve,
-    fit_weibull,
-    weibull_pdf,
-    weibull_mean_power_density,
+    compute_wind_financials,
+    compute_wind_hourly_cf,
     compute_wind_rose,
+    fit_weibull,
     load_turbine_database,
+    weibull_mean_power_density,
 )
 
-# --- Phase A: Resource assessment ---
+# --- Turbine and hourly capacity factor at a site ---
+turbines = {t.key: t for t in load_turbine_database()}
+turbine = turbines["Vestas_V112_3MW"]
 
-config = WindConfig(
-    turbine="Vestas_V112_3MW",
-    hub_height=100,
-    year=2022,
-    grid_resolution=0.25,
-    min_capacity_factor=0.25,
-    installation="onshore",
+hourly_cf = compute_wind_hourly_cf(
+    lat=22.0, lon=-82.5, year=2022,
     data_source="open_meteo",
+    hub_height=100,
+    turbine_key=turbine.key,
 )
+np.savetxt("wind_availability.csv", hourly_cf, delimiter=",", fmt="%.6f")
+print(f"Mean CF: {np.mean(hourly_cf):.3f}")
 
-mcda = MCDAConfig(
-    method="manual",
-    criteria={
-        "capacity_factor": CriterionConfig(enabled=True, weight=0.40, direction="maximize"),
-        "slope": CriterionConfig(enabled=True, weight=0.15, direction="minimize"),
-        "elevation": CriterionConfig(enabled=True, weight=0.10, direction="minimize"),
-        "lulc_score": CriterionConfig(enabled=True, weight=0.20, direction="maximize"),
-        "dist_grid_km": CriterionConfig(enabled=True, weight=0.15, direction="minimize"),
-    },
-)
-
-bounds = (21.5, -83.0, 22.5, -82.0)  # (south, west, north, east)
-summary = compute_wind_assessment(bounds, config, mcda)
-
-print(f"Feasible sites: {summary.feasible_cells}/{summary.total_cells}")
-print(f"CF range: {summary.cf_min:.3f} - {summary.cf_max:.3f}")
-print(f"Average CF: {summary.cf_avg:.3f}")
-
-# --- Wind characterization ---
-
-import numpy as np
-
-# Use first cell's hourly data
-cell_key = list(summary.hourly_data.keys())[0]
-ws = np.asarray(summary.hourly_data[cell_key].wind_speed)
-wd = np.asarray(summary.hourly_data[cell_key].wind_direction)
-
-k, lam = fit_weibull(ws)
-wpd = weibull_mean_power_density(k, lam)
+# --- Wind characterization (ws, wd: hourly speed in m/s and direction in degrees) ---
+k, A = fit_weibull(ws)
+wpd = weibull_mean_power_density(k, A)
 wind_rose = compute_wind_rose(ws, wd)
-
-print(f"Weibull: k={k:.2f}, lambda={lam:.2f} m/s")
-print(f"Wind power density: {wpd:.0f} W/m2")
+print(f"Weibull: k={k:.2f}, A={A:.2f} m/s, power density {wpd:.0f} W/m2")
 
 # --- Financial analysis ---
-
-inputs = WindFinancialInputs(
-    capacity_mw=3.0,
-    capacity_factor=summary.cf_avg,
+results = compute_wind_financials(WindFinancialInputs(
+    capacity_mw=turbine.rated_power_mw,
+    capacity_factor=float(np.mean(hourly_cf)),
     capex_per_kw=1300,
     opex_per_kw_yr=25,
     discount_rate=0.08,
     lifetime_years=25,
     electricity_price=50.0,
     degradation_rate=0.005,
-)
-
-results = compute_wind_financials(inputs)
-print(f"LCOE: ${results.lcoe:.2f}/MWh")
-print(f"NPV: ${results.npv:,.0f}")
-print(f"IRR: {results.irr:.1%}")
+))
+print(f"LCOE: ${results.lcoe:.2f}/MWh, NPV: ${results.npv:,.0f}, IRR: {results.irr:.1%}")
 
 # --- Wake analysis ---
-
-rotor_d = 112.0  # meters
 efficiency = compute_array_efficiency(
     n_turbines=25,
-    spacing_d=7.0,
-    rotor_diameter=rotor_d,
+    spacing_diameters=7.0,
+    rotor_diameter=turbine.rotor_diameter_m,
     thrust_ct=0.80,
     wind_rose=wind_rose,
 )
 print(f"Array efficiency: {efficiency:.1%}")
-print(f"Net CF: {summary.cf_avg * efficiency:.3f}")
 
 spacings, efficiencies = compute_spacing_curve(
-    rotor_diameter=rotor_d,
+    rotor_diameter=turbine.rotor_diameter_m,
     thrust_ct=0.80,
     wind_rose=wind_rose,
     n_turbines=25,
 )
-
-# --- Availability profile ---
-
-hourly_cf = compute_wind_hourly_cf(
-    lat=22.0, lon=-82.5, year=2022,
-    data_source="open_meteo",
-    hub_height=100,
-    turbine_key="Vestas_V112_3MW",
-)
-np.savetxt("wind_availability.csv", hourly_cf, delimiter=",", fmt="%.6f")
-print(f"Profile mean CF: {np.mean(hourly_cf):.3f}")
 ```

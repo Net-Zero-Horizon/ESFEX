@@ -192,6 +192,27 @@ class TestGenerateEvProfiles:
 # ---------------------------------------------------------------------------
 
 
+class TestProfilesAreReproducible:
+    """The hourly noise used to come from the unseeded global RNG, so the same
+    configuration produced different demand (and results) on every run."""
+
+    @pytest.mark.parametrize("gen", [generate_ev_profiles, generate_v2g_availability])
+    def test_same_inputs_same_profiles(self, gen):
+        cats, qty, pats, _ = _make_ev_inputs(num_nodes=2, num_hours=48)
+        kw = dict(num_nodes=2, num_hours=48, ev_categories=cats,
+                  ev_quantity=qty, base_patterns=pats)
+        a = gen(**kw)
+        np.random.seed(123)  # global RNG state must not matter
+        b = gen(**kw)
+        pd.testing.assert_frame_equal(a, b)
+
+    def test_seed_none_draws_fresh_noise(self):
+        cats, qty, pats, _ = _make_ev_inputs(num_nodes=1, num_hours=48)
+        kw = dict(num_nodes=1, num_hours=48, ev_categories=cats,
+                  ev_quantity=qty, base_patterns=pats, seed=None)
+        assert not generate_ev_profiles(**kw).equals(generate_ev_profiles(**kw))
+
+
 class TestGenerateV2gAvailability:
     """Tests for generate_v2g_availability."""
 

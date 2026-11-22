@@ -10,7 +10,7 @@ extracting results (M$ → $). This improves numerical conditioning of the
 optimization model. Physical units (MW, MWh, tonnes, etc.) are unchanged.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, List, Optional, Union
 
 import numpy as np
 
@@ -22,15 +22,60 @@ from esfex.utils.temporal import HOURS_STD_YEAR
 COST_SCALE = 1e-6    # $ → M$  (multiply when sending to Julia)
 COST_UNSCALE = 1e6   # M$ → $  (multiply when extracting from Julia)
 
+# Dispatch cost-breakdown entries a window spends against the operating
+# budget (max_annual_operating_cost; the Julia OPERATING_BUDGET_COSTS): the
+# money paid, no modelling penalty, no battery degradation, no CO2 price.
+OPERATING_BUDGET_COSTS = ("fuel_cost", "maintenance_cost", "startup_cost",
+                          "battery_maintenance_cost", "fixed_om_cost",
+                          "electrolyzer_cost", "converter_cost", "line_flow_cost",
+                          "pe_supply_cost", "pe_transport_cost")
+
+# Cost-breakdown entries that are not costs of their own: the total, the
+# electrolyzers' cost when their hydrogen fills the primary-energy tank (a
+# view of electrolyzer_cost), the V2G payment to EV owners (a transfer,
+# never in the objective) and the money spent above the operating budget
+# (already in fuel, maintenance and fixed O&M; its penalty is a cost). The
+# other entries add up to the total.
+COST_BREAKDOWN_NON_COMPONENTS = ("total", "pe_electrolyzer_cost", "v2g_compensation",
+                                 "operating_budget_excess")
+
 
 def scale_cost(val: float) -> float:
     """Scale a single monetary value from $ to M$."""
     return val * COST_SCALE
 
 
+def line_flow_cost_per_mwh(line) -> float:
+    """Flow cost of a line in $ per MWh carried: ``length_km × cost_per_mw_km``
+    (inter-system links; 0 for other lines). The master and the dispatch both
+    charge it on |flow|."""
+    cost = float(getattr(line, "cost_per_mw_km", 0.0) or 0.0)
+    return max(0.0, cost * float(getattr(line, "length_km", 0.0) or 0.0))
+
+
 def scale_cost_list(arr: list) -> list:
     """Scale a list of monetary values from $ to M$."""
     return [x * COST_SCALE for x in arr]
+
+
+def battery_availability_key(key: str) -> str:
+    """Key of battery *key*'s profile in the runner's availability cache
+    (apart from the generators', which use the bare unit key)."""
+    return f"battery:{key}"
+
+
+def battery_technology_availability_key(key: str) -> str:
+    """Key of battery technology *key*'s profile in the availability cache."""
+    return f"battery_technology:{key}"
+
+
+def _per_node(arr, n: int) -> list:
+    """A per-node list of length *n* from an optional field: a single value
+    applies to every node, missing nodes get 0."""
+    vals = [float(v) for v in (arr or [])]
+    if len(vals) == 1:
+        return vals * n
+    return (vals + [0.0] * n)[:n]
 from esfex.config.schema import (
     BatteryConfig,
     BatteryTechnologyConfig,
@@ -40,8 +85,8 @@ from esfex.config.schema import (
     DCPowerFlowConfig,
     GeneratorConfig,
     NodeConfig,
+    ScenarioMultipliers,
     SolverConfig,
-    SystemConfig,
     TechnologyConfig,
     TemporalConfig,
     TransformerConfig,
@@ -176,11 +221,16 @@ def build_gen_cost_curves_dict(
     num_buses: int,
     bus_to_node: Optional[list] = None,
     gen_bus_per_node: Optional[dict] = None,
+    per_bus_keys: Optional[set] = None,
+    all_buses_of_node: bool = False,
 ) -> Any:
     """Build Julia ``Dict{Int, Dict{Int, Vector{CostSegment}}}`` for generators.
 
-    Only generators with multi-segment (>1) curves are included.
-    Flat curves (1 segment) are skipped — those use the original code path.
+    Every curve that changes the unit's price is included: multi-segment
+    curves, and single-segment (flat) curves whose price differs from the
+    unit's ``fuel_cost`` (the solver then charges that price instead). A flat
+    curve at ``fuel_cost`` (e.g. no ``flat_price``) is skipped, since it
+    prices the output exactly as having no curve does.
 
     Parameters
     ----------
@@ -195,6 +245,14 @@ def build_gen_cost_curves_dict(
     gen_bus_per_node:
         Generator key → {node_idx: bus_idx} (0-based) for explicit physical
         placement. Falls back to the first bus of each node when missing.
+    per_bus_keys:
+        Keys of units whose arrays (curves included) are already per bus
+        (virtual generators from master investments): curve ``i`` belongs to
+        bus ``i``, and buses without rated power get no curve.
+    all_buses_of_node:
+        Give the node's curve to every bus of the node (candidate
+        technologies, which the master may build at any bus of a node,
+        their per-bus arrays laid out in "property" mode).
 
     Returns
     -------
@@ -216,15 +274,26 @@ def build_gen_cost_curves_dict(
         inner = jl.seval("Dict{Int, Vector{CostSegment}}()")
         has_entries = False
 
+        per_bus = per_bus_keys is not None and key in per_bus_keys
         for node_idx, curve in enumerate(curves):
-            blocks = normalize_cost_curve(curve, fallback_price=gen.fuel_cost[node_idx])
-            if len(blocks) <= 1:
+            if curve is None:
+                continue
+            if per_bus and not (node_idx < len(gen.rated_power)
+                                and gen.rated_power[node_idx] > 0):
+                continue  # no unit at this bus: no output variable to split
+            fuel_cost = gen.fuel_cost[node_idx] if node_idx < len(gen.fuel_cost) else 0.0
+            blocks = normalize_cost_curve(curve, fallback_price=fuel_cost)
+            if len(blocks) == 1 and blocks[0].price == fuel_cost:
                 continue
 
             # Determine bus index (1-based) for this node — use the
             # per-(unit, node) physical placement when available, else
             # role-aware fallback.
-            if bus_to_node is not None:
+            if per_bus:
+                buses_1 = [node_idx + 1]
+            elif bus_to_node is not None and all_buses_of_node:
+                buses_1 = [b + 1 for b, n in enumerate(bus_to_node) if n == node_idx]
+            elif bus_to_node is not None:
                 bus_0 = None
                 if gen_bus_per_node is not None:
                     bus_0 = gen_bus_per_node.get(key, {}).get(node_idx)
@@ -233,12 +302,13 @@ def build_gen_cost_curves_dict(
                         (b for b, n in enumerate(bus_to_node) if n == node_idx),
                         node_idx,
                     )
-                bus_1 = bus_0 + 1
+                buses_1 = [bus_0 + 1]
             else:
-                bus_1 = node_idx + 1
+                buses_1 = [node_idx + 1]
 
-            inner[bus_1] = blocks_to_julia_cost_segments(blocks)
-            has_entries = True
+            for bus_1 in buses_1:
+                inner[bus_1] = blocks_to_julia_cost_segments(blocks)
+                has_entries = True
 
         if has_entries:
             outer[g] = inner
@@ -254,7 +324,10 @@ def build_bat_cost_curves_dict(
 ) -> Any:
     """Build Julia ``Dict{Int, Dict{Int, Vector{CostSegment}}}`` for batteries.
 
-    Only batteries with multi-segment (>1) discharge curves are included.
+    Every discharge curve that changes the battery's price is included:
+    multi-segment curves, and single-segment (flat) curves whose price
+    differs from the battery's ``throughput_degradation_cost`` (the solver
+    then charges that price instead), as for generators.
 
     Parameters
     ----------
@@ -292,7 +365,7 @@ def build_bat_cost_curves_dict(
         for node_idx, curve in enumerate(curves):
             fb = fallback_costs[node_idx] if node_idx < len(fallback_costs) else 0.0
             blocks = normalize_cost_curve(curve, fallback_price=fb)
-            if len(blocks) <= 1:
+            if not blocks or (len(blocks) == 1 and blocks[0].price == fb):
                 continue
 
             if bus_to_node is not None:
@@ -368,6 +441,34 @@ def convert_index_julia_to_py(idx: int) -> int:
         Python 0-based index
     """
     return idx - 1
+
+
+def node_bus_mapping_required(buses, num_nodes: int) -> bool:
+    """Whether per-node arrays must be mapped onto the bus network.
+
+    Per-node arrays (``rated_power``, availability, reserves, …) are indexed by
+    node; the operational model is indexed by bus. The two coincide *only* when
+    the bus list is the identity mapping — one bus per node, in node order.
+
+    The historical test was ``num_buses > num_nodes``, which assumed the bus
+    network is always a refinement of the node network. A reduced network
+    breaks that assumption: ``reduce_to_node_mesh`` followed by
+    ``drop_isolated_components`` leaves FEWER buses than nodes (every node whose
+    buses were dropped). Under the old test the mapping was skipped and
+    node-indexed arrays were consumed *positionally* as bus-indexed ones, so
+    each node past the first bus-less node had its capacity silently relocated
+    onto another node's bus — Japan: 70 % of 330 GW landed on the wrong bus, so
+    34 % of load shed at VOLL while that capacity sat idle (and renewables were
+    curtailed at the same hour). The same skip left bus-level results
+    un-aggregated, exported as if node-level.
+    """
+    if not buses:
+        return False
+    if len(buses) != num_nodes:
+        return True
+    return any(
+        int(getattr(b, "parent_node", i) or 0) != i for i, b in enumerate(buses)
+    )
 
 
 def expand_node_to_bus_array(
@@ -471,6 +572,7 @@ def convert_transmission_line_data(
     line: TransmissionLineGeo,
     dc_config: DCPowerFlowConfig,
     distances: Optional[np.ndarray] = None,
+    s_base_mva: float = 100.0,
 ) -> Any:
     """
     Convert a Python TransmissionLineGeo to Julia TransmissionLineData struct.
@@ -479,6 +581,7 @@ def convert_transmission_line_data(
         line: Python TransmissionLineGeo
         dc_config: DC power flow defaults (for fallback reactance calculation)
         distances: Optional distance matrix (for fallback length)
+        s_base_mva: System power base (MVA) of the per-unit values
 
     Returns:
         Julia TransmissionLineData struct
@@ -514,13 +617,10 @@ def convert_transmission_line_data(
         if i < distances.shape[0] and j < distances.shape[1]:
             length_km = float(distances[i, j])
 
-    # Determine reactance: use per-line value or derive from length + global defaults
-    reactance_pu = line.reactance_pu
-    if reactance_pu is None or reactance_pu <= 0:
-        if length_km > 0 and dc_config.base_impedance > 0:
-            reactance_pu = (length_km * dc_config.reactance_per_km) / dc_config.base_impedance
-        else:
-            reactance_pu = 0.01  # Minimal default
+    # Reactance of the whole line: its own value, else derived from its length
+    # (one circuit's reactance divided over its circuits)
+    from esfex.utils.per_unit import line_reactance_pu
+    reactance_pu = line_reactance_pu(line, length_km, dc_config, s_base_mva)
 
     resistance_pu = line.resistance_pu if line.resistance_pu is not None else 0.0
     susceptance_pu = line.susceptance_pu if line.susceptance_pu is not None else 0.0
@@ -544,6 +644,7 @@ def convert_transmission_line_data(
         line.num_circuits,
         float(frequency_hz),
         str(current_type),
+        scale_cost(line_flow_cost_per_mwh(line)),
     )
 
 
@@ -683,6 +784,7 @@ def convert_network_config(
     acdc_converters: Optional[list] = None,
     freq_converters: Optional[list] = None,
     buses: Optional[List[BusConfig]] = None,
+    s_base_mva: float = 100.0,
 ) -> Any:
     """
     Convert Python NodeConfig to Julia NetworkConfig struct.
@@ -696,6 +798,7 @@ def convert_network_config(
         acdc_converters: AC/DC converter definitions (optional)
         freq_converters: Frequency converter definitions (optional)
         buses: Bus definitions (optional, auto-creates one bus per node if omitted)
+        s_base_mva: System power base (MVA): ``ac_power_flow.base_mva``
 
     Returns:
         Julia NetworkConfig struct with bus support
@@ -869,7 +972,7 @@ def convert_network_config(
                     if tid is not None and str(tid) in trafo_to_bus:
                         line = line.model_copy(update={'to_bus': trafo_to_bus[str(tid)]})
 
-            jl_line = convert_transmission_line_data(line, dc_config, distances)
+            jl_line = convert_transmission_line_data(line, dc_config, distances, s_base_mva)
             if jl_line is None:
                 continue  # unresolved endpoints
             jl.seval("push!")(jl_lines, jl_line)
@@ -918,7 +1021,7 @@ def convert_network_config(
         py_to_julia_int_vector(bus_to_node),
         py_to_julia_matrix(connections),
         py_to_julia_matrix(distances),
-        dc_config.base_impedance,
+        float(s_base_mva),
         dc_config.reactance_per_km,
         dc_config.voltage_level_kv,
         np.deg2rad(dc_config.max_angle_diff_deg),
@@ -933,6 +1036,46 @@ def convert_network_config(
     )
 
 
+def absolute_start_hour(year, base_year, hour_in_year) -> int:
+    """Horizon hour of ``hour_in_year`` in ``year`` (hour 0 = Jan 1 of ``base_year``).
+
+    Every modelled year is 8760 h long.
+    """
+    years = int(year or 0) - int(base_year if base_year is not None else (year or 0))
+    return max(0, years) * HOURS_STD_YEAR + int(hour_in_year or 0)
+
+
+def outage_window_spans(window, lo: int, hi: int) -> list:
+    """Absolute ``[start, end)`` hour spans of one outage window overlapping ``[lo, hi)``.
+
+    ``window`` is ``(start_hour, end_hour, availability[, recurring])`` in
+    absolute horizon hours (hour 0 = Jan 1 of ``base_year``; every modelled
+    year is 8760 h). A one-off window happens once. A recurring window repeats
+    every year at the same hours of the year (its start is taken modulo 8760),
+    including a window that runs over the new year.
+    """
+    w0, w1 = int(window[0]), int(window[1])
+    if len(window) < 4 or not window[3]:
+        return [(w0, w1)] if w1 > lo and w0 < hi else []
+    length = w1 - w0
+    s = w0 % HOURS_STD_YEAR
+    first = (lo - length - s) // HOURS_STD_YEAR
+    last = (hi - s) // HOURS_STD_YEAR
+    spans = []
+    for k in range(first, last + 1):
+        a = s + k * HOURS_STD_YEAR
+        b = a + length
+        if b > lo and a < hi:
+            spans.append((a, b))
+    return spans
+
+
+def outage_window_tuple(ow) -> tuple:
+    """``(start_hour, end_hour, availability, recurring)`` of an ``OutageWindow``."""
+    return (ow.start_hour, ow.end_hour, ow.availability,
+            bool(getattr(ow, "recurring", False)))
+
+
 def compile_outage_factor(
     windows: list,
     start_hour: int,
@@ -941,8 +1084,10 @@ def compile_outage_factor(
 ) -> np.ndarray:
     """Per-timestep availability factor in [0, 1] from scheduled outage windows.
 
-    ``windows`` is a list of ``(start_hour, end_hour, availability)`` triples in
-    absolute hour-of-horizon coordinates (``[start, end)``). The result has
+    ``windows`` is a list of ``(start_hour, end_hour, availability[, recurring])``
+    tuples in absolute hour-of-horizon coordinates (``[start, end)``, hour 0 =
+    Jan 1 of ``base_year``; see :func:`outage_window_spans`). ``start_hour`` is
+    the absolute horizon hour at which the window starts. The result has
     length ``hours`` — the current rolling-horizon window at
     ``resolution_hours`` resolution — where local period ``i`` covers absolute
     hours ``[(start_hour // res + i) * res, ...)``.
@@ -957,27 +1102,70 @@ def compile_outage_factor(
         return factor
     res = max(1, int(resolution_hours))
     base_period = start_hour // res
-    for i in range(hours):
-        p_start = (base_period + i) * res
-        p_end = p_start + res
-        for w0, w1, wav in windows:
-            lo = max(p_start, w0)
-            hi = min(p_end, w1)
-            if hi > lo:
-                frac = (hi - lo) / res
-                factor[i] *= (1.0 - frac) + frac * float(wav)
+    lo = base_period * res
+    hi = lo + hours * res
+    for w in windows:
+        wav = float(w[2])
+        for w0, w1 in outage_window_spans(w, lo, hi):
+            # Only the periods the span touches
+            i0 = max(0, (w0 - lo) // res)
+            i1 = min(hours, -(-(w1 - lo) // res))
+            for i in range(i0, i1):
+                p_start = lo + i * res
+                frac = (min(p_start + res, w1) - max(p_start, w0)) / res
+                if frac > 0:
+                    factor[i] *= (1.0 - frac) + frac * wav
     return factor
 
 
+def unit_outage_factors(
+    outage_schedule,
+    element_type: str,
+    unit_keys: list,
+    start_hour: int,
+    hours: int,
+    resolution_hours: int = 1,
+    by_node: bool = True,
+) -> dict:
+    """Scheduled outages of a list of units as availability factors per step.
+
+    The master's form of the dispatch's outage masks (Julia
+    ``gen_outage_factors`` / ``bat_outage_factors``): ``{(unit, node):
+    factor}`` with ``unit`` the 1-based position of the window's
+    ``element_id`` in ``unit_keys``, ``node`` the 1-based node of a
+    node-specific window (0 for a window on the whole unit, and for every
+    window when ``by_node`` is False: battery outages apply to the whole
+    unit, as in the dispatch) and ``factor`` the :func:`compile_outage_factor`
+    of those windows over ``hours`` steps of ``resolution_hours`` from
+    horizon hour ``start_hour`` (recurring windows repeat every year).
+    Entries that stay 1 over the span are left out.
+    """
+    index = {k: i + 1 for i, k in enumerate(unit_keys)}
+    windows: dict = {}
+    for ow in outage_schedule or []:
+        if ow.element_type != element_type or ow.element_id not in index:
+            continue
+        node = getattr(ow, "node", None)
+        key = (index[ow.element_id],
+               int(node) + 1 if by_node and node is not None else 0)
+        windows.setdefault(key, []).append(outage_window_tuple(ow))
+    out = {}
+    for key, ws in windows.items():
+        factor = compile_outage_factor(ws, start_hour, hours, resolution_hours)
+        if np.any(factor < 1.0):
+            out[key] = factor
+    return out
+
+
 def fuel_source_outage_windows(outage_schedule, fuel_name: str) -> list:
-    """Scheduled outage windows for a fuel source, as ``(start, end, avail)``.
+    """Scheduled outage windows for a fuel source, as ``(start, end, avail, recurring)``.
 
     Fuel-source outages reuse ``FuelConfig``'s built-in single-window disruption
-    in the primary-energy model (no Julia change), so the caller applies the
-    first window and warns if more than one is scheduled.
+    in the primary-energy model (no Julia change), so the caller applies one
+    window per model window and warns if several overlap it.
     """
     return [
-        (ow.start_hour, ow.end_hour, ow.availability)
+        outage_window_tuple(ow)
         for ow in (outage_schedule or [])
         if ow.element_type == "fuel_source" and ow.element_id == fuel_name
     ]
@@ -995,7 +1183,7 @@ def build_outage_mask_matrix(
     Row ``i`` is the per-timestep availability factor for element ``id_order[i]``
     (see :func:`compile_outage_factor`), defaulting to all-ones for elements with
     no scheduled outage. ``windows_by_id`` maps an element id to its list of
-    ``(start_hour, end_hour, availability)`` windows.
+    ``(start_hour, end_hour, availability[, recurring])`` windows.
 
     Returns ``None`` when no element in ``id_order`` has an outage, so callers
     can skip populating the mask entirely (keeping the model identical).
@@ -1081,6 +1269,12 @@ def convert_generator_config(
 
     frequency_hz = float(getattr(gen, 'frequency_hz', 50.0))
     current_type = str(getattr(gen, 'current_type', 'AC'))
+    # Units per node for clustered unit commitment (a single value is
+    # broadcast; Julia counts fewer than 1 as 1)
+    num_units_node = [int(n) for n in (getattr(gen, 'num_units', None) or [1])]
+    if len(num_units_node) == 1:
+        num_units_node = num_units_node * num_nodes
+    num_units_node += [1] * (num_nodes - len(num_units_node))
 
     # Reservoir fields — fill with zeros if empty
     res_capacity = gen.reservoir_capacity if gen.reservoir_capacity else [0.0] * num_nodes
@@ -1130,15 +1324,11 @@ def convert_generator_config(
         ramp_down = prop(gen.ramp_down)
         min_up = prop(min_up_float)
         min_down = prop(min_down_float)
+        num_units = [int(n) for n in prop(num_units_node)]
         fuel_cost = prop(gen.fuel_cost)
         fixed_cost = prop(gen.fixed_cost)
         maint_cost = prop(gen.maintenance_cost)
         invest_cost = prop(gen.invest_cost)
-        # invest_max_power is a CAPACITY field: total MW available for
-        # investment at the node.  Use "capacity" mode so it goes to
-        # the first bus only; the per-node aggregate constraint in
-        # power_system.jl already caps total investment across buses.
-        invest_max = cap(gen.invest_max_power)
         life_time = prop(life_time_float)
         initial_age = prop(initial_age_float)
         degradation = prop(gen.degradation_rate)
@@ -1168,11 +1358,11 @@ def convert_generator_config(
         ramp_down = gen.ramp_down
         min_up = min_up_float
         min_down = min_down_float
+        num_units = num_units_node
         fuel_cost = gen.fuel_cost
         fixed_cost = gen.fixed_cost
         maint_cost = gen.maintenance_cost
         invest_cost = gen.invest_cost
-        invest_max = gen.invest_max_power
         life_time = life_time_float
         initial_age = initial_age_float
         degradation = gen.degradation_rate
@@ -1211,7 +1401,6 @@ def convert_generator_config(
         py_to_julia_vector(maint_cost),
         py_to_julia_vector(inertia_arr),
         py_to_julia_vector(invest_cost),
-        py_to_julia_vector(invest_max),
         py_to_julia_matrix(availability),
         gen.reservable,
         py_to_julia_vector(life_time),
@@ -1253,7 +1442,22 @@ def convert_generator_config(
             if bus_to_node
             else (getattr(gen, 'reservoir_head_min_factor', None) or [1.0])
         ),
+        py_to_julia_int_vector(num_units),
     )
+
+
+def _storage_availability_matrix(availability: Optional[np.ndarray], num_nodes: int,
+                                 bus_to_node: Optional[list]) -> np.ndarray:
+    """Availability of a battery or battery technology for Julia: the
+    ``[steps × nodes]`` profile laid out on the buses, or a 0-row matrix
+    (fully available) when there is none."""
+    if availability is None:
+        n = len(bus_to_node) if bus_to_node is not None else num_nodes
+        return np.zeros((0, n))
+    availability = np.asarray(availability, dtype=float)
+    if bus_to_node is not None:
+        availability = expand_node_to_bus_matrix(availability, bus_to_node, default_value=1.0)
+    return availability
 
 
 def convert_battery_config(
@@ -1261,8 +1465,12 @@ def convert_battery_config(
     bus_to_node: Optional[list] = None,
     bus_per_node: Optional[dict] = None,
     replicate_capacity_across_node: bool = False,
+    availability: Optional[np.ndarray] = None,
 ) -> Any:
     """Convert Python BatteryConfig to Julia BatteryConfig struct.
+
+    ``availability`` is the battery's profile ``[steps × nodes]`` (factor on
+    charge and discharge power), None when it has none.
 
     Capacity placement mirrors :func:`convert_generator_config`:
 
@@ -1344,16 +1552,17 @@ def convert_battery_config(
         soc_max_out = prop([1.0] * num_nodes)
         self_discharge = prop([0.0001] * num_nodes)
         inv_cost = prop(bat.invest_cost)
-        inv_cost_energy = prop(bat.invest_cost_energy)
-        # invest_max fields are CAPACITY: total MW/MWh budget at the node.
-        # Use "capacity" mode (first bus only) — same reasoning as generators.
+        # invest_max_power only places the battery at a bus in the master:
+        # "capacity" mode (first bus of the node only)
         inv_max_power = cap(bat.invest_max_power)
-        inv_max_capacity = cap(bat.invest_max_capacity)
         life_time = prop(life_time_float)
         initial_age = prop(initial_age_float)
         maint_cost = prop(maintenance_cost)
         degrad = prop(degradation_rate)
         tp_degrad_cost = prop(throughput_degradation_cost)
+        ramp_up = prop(_per_node(bat.ramp_up, num_nodes))
+        ramp_down = prop(_per_node(bat.ramp_down, num_nodes))
+        fixed_cost = prop(_per_node(bat.fixed_cost, num_nodes))
     else:
         num_buses = num_nodes
         capacity = bat.capacity
@@ -1368,21 +1577,22 @@ def convert_battery_config(
         soc_max_out = [1.0] * num_nodes
         self_discharge = [0.0001] * num_nodes
         inv_cost = bat.invest_cost
-        inv_cost_energy = bat.invest_cost_energy
         inv_max_power = bat.invest_max_power
-        inv_max_capacity = bat.invest_max_capacity
         life_time = life_time_float
         initial_age = initial_age_float
         maint_cost = maintenance_cost
         degrad = degradation_rate
         tp_degrad_cost = throughput_degradation_cost
+        ramp_up = _per_node(bat.ramp_up, num_nodes)
+        ramp_down = _per_node(bat.ramp_down, num_nodes)
+        fixed_cost = _per_node(bat.fixed_cost, num_nodes)
 
     # --- Cost scaling: $ → M$ ---
     inv_cost = scale_cost_list(inv_cost)
-    inv_cost_energy = scale_cost_list(inv_cost_energy)
     maint_cost = scale_cost_list(maint_cost)
     decomm_cost = scale_cost_list(decomm_cost)
     tp_degrad_cost = scale_cost_list(tp_degrad_cost)
+    fixed_cost = scale_cost_list(fixed_cost)
 
     return ESFEX.BatteryConfig(
         bat.name,
@@ -1396,9 +1606,7 @@ def convert_battery_config(
         py_to_julia_vector(soc_initial),
         py_to_julia_vector(self_discharge),
         py_to_julia_vector(inv_cost),
-        py_to_julia_vector(inv_cost_energy),
         py_to_julia_vector(inv_max_power),
-        py_to_julia_vector(inv_max_capacity),
         py_to_julia_vector(life_time),
         py_to_julia_vector(initial_age),
         py_to_julia_vector(decomm_cost),
@@ -1414,6 +1622,11 @@ def convert_battery_config(
             prop(getattr(bat, 'risk_coefficient', [1.0]))
             if bus_to_node else getattr(bat, 'risk_coefficient', [1.0])
         ),
+        py_to_julia_vector(ramp_up),
+        py_to_julia_vector(ramp_down),
+        py_to_julia_vector(fixed_cost),
+        bool(bat.reservable),
+        py_to_julia_matrix(_storage_availability_matrix(availability, num_nodes, bus_to_node)),
     )
 
 
@@ -1535,6 +1748,7 @@ def convert_technology_config(
 def convert_battery_technology_config(
     bat_tech: BatteryTechnologyConfig,
     bus_to_node: Optional[list] = None,
+    availability: Optional[np.ndarray] = None,
 ) -> Any:
     """
     Convert Python BatteryTechnologyConfig to Julia BatteryTechnologyConfig struct.
@@ -1542,6 +1756,7 @@ def convert_battery_technology_config(
     Args:
         bat_tech: Python BatteryTechnologyConfig
         bus_to_node: Optional bus-to-node mapping (0-indexed).
+        availability: The technology's profile ``[steps × nodes]``, or None.
 
     Returns:
         Julia BatteryTechnologyConfig struct
@@ -1575,6 +1790,9 @@ def convert_battery_technology_config(
         inertia_arr = prop(bat_tech.inertia)
         tp_degrad_cost = prop(bat_tech.throughput_degradation_cost)
         decomm_cost = prop(bat_tech.decommissioning_cost)
+        ramp_up = prop(_per_node(bat_tech.ramp_up, num_nodes))
+        ramp_down = prop(_per_node(bat_tech.ramp_down, num_nodes))
+        fixed_cost = prop(_per_node(bat_tech.fixed_cost, num_nodes))
     else:
         inv_cost_power = bat_tech.invest_cost_power
         inv_cost_capacity = bat_tech.invest_cost_energy
@@ -1591,6 +1809,9 @@ def convert_battery_technology_config(
         inertia_arr = bat_tech.inertia
         tp_degrad_cost = bat_tech.throughput_degradation_cost
         decomm_cost = bat_tech.decommissioning_cost
+        ramp_up = _per_node(bat_tech.ramp_up, num_nodes)
+        ramp_down = _per_node(bat_tech.ramp_down, num_nodes)
+        fixed_cost = _per_node(bat_tech.fixed_cost, num_nodes)
 
     # --- Cost scaling: $ → M$ ---
     inv_cost_power = scale_cost_list(inv_cost_power)
@@ -1598,6 +1819,7 @@ def convert_battery_technology_config(
     maint_cost = scale_cost_list(maint_cost)
     tp_degrad_cost = scale_cost_list(tp_degrad_cost)
     decomm_cost = scale_cost_list(decomm_cost)
+    fixed_cost = scale_cost_list(fixed_cost)
 
     return ESFEX.BatteryTechnologyConfig(
         bat_tech.name,
@@ -1624,6 +1846,11 @@ def convert_battery_technology_config(
             prop(getattr(bat_tech, 'risk_coefficient', [1.0]))
             if bus_to_node else getattr(bat_tech, 'risk_coefficient', [1.0])
         ),
+        py_to_julia_vector(ramp_up),
+        py_to_julia_vector(ramp_down),
+        py_to_julia_vector(fixed_cost),
+        bool(bat_tech.reservable),
+        py_to_julia_matrix(_storage_availability_matrix(availability, num_nodes, bus_to_node)),
     )
 
 
@@ -1717,16 +1944,6 @@ def convert_power_system_result(jl_result: Any) -> dict:
     if jl_result.gen_startup is not None:
         result["gen_startup"] = julia_to_py_array(jl_result.gen_startup)
 
-    # Handle optional investment fields
-    if jl_result.gen_investment is not None:
-        result["gen_investment"] = julia_to_py_array(jl_result.gen_investment)
-
-    if jl_result.bat_investment_power is not None:
-        result["bat_investment_power"] = julia_to_py_array(jl_result.bat_investment_power)
-
-    if jl_result.bat_investment_capacity is not None:
-        result["bat_investment_capacity"] = julia_to_py_array(jl_result.bat_investment_capacity)
-
     # Convert power flow dict (legacy node-pair aggregated flows)
     power_flow = {}
     for key, value in jl_result.power_flow.items():
@@ -1741,13 +1958,9 @@ def convert_power_system_result(jl_result: Any) -> dict:
             pf_by_line.append(julia_to_py_array(line_pf))
         result["power_flow_by_line"] = pf_by_line
 
-    # Convert transfer investment dict
-    if jl_result.transfer_investment is not None:
-        transfer_inv = {}
-        for key, value in jl_result.transfer_investment.items():
-            py_key = (convert_index_julia_to_py(key[0]), convert_index_julia_to_py(key[1]))
-            transfer_inv[py_key] = float(value)
-        result["transfer_investment"] = transfer_inv
+    # Line losses [bus x hour] (MW): half of each line's loss at each end
+    if jl_result.line_losses is not None:
+        result["line_losses"] = julia_to_py_array(jl_result.line_losses)
 
     # Battery spillage [bat x node x hour]
     if jl_result.bat_spillage is not None:
@@ -1782,8 +1995,11 @@ def convert_power_system_result(jl_result: Any) -> dict:
         result["reservoir_spillage"] = julia_to_py_array(jl_result.reservoir_spillage)
     if jl_result.reservoir_pump is not None:
         result["reservoir_pump"] = julia_to_py_array(jl_result.reservoir_pump)
-    if jl_result.reservoir_invest_capacity is not None:
-        result["reservoir_invest_capacity"] = julia_to_py_array(jl_result.reservoir_invest_capacity)
+
+    # Electrolyzers [electrolyzer x bus x hour]: power (MW), hydrogen (kg/h)
+    if jl_result.electrolyzer_power is not None:
+        result["electrolyzer_power"] = julia_to_py_array(jl_result.electrolyzer_power)
+        result["electrolyzer_h2"] = julia_to_py_array(jl_result.electrolyzer_h2)
 
     # N-1 security results
     if jl_result.n1_gen_reserve_duals is not None:
@@ -1818,125 +2034,29 @@ def convert_power_system_result(jl_result: Any) -> dict:
             "soc_violation_cost": float(cb.soc_violation_cost) * COST_UNSCALE,
             "transfer_margin_cost": float(cb.transfer_margin_cost) * COST_UNSCALE,
             "v2g_compensation": float(cb.v2g_compensation) * COST_UNSCALE,
-            "flexible_demand_benefit": float(cb.flexible_demand_benefit) * COST_UNSCALE,
-            "investment_cost": float(cb.investment_cost) * COST_UNSCALE,
             "electrolyzer_cost": float(cb.electrolyzer_cost) * COST_UNSCALE,
             "converter_cost": float(cb.converter_cost) * COST_UNSCALE,
             "spillage_cost": float(cb.spillage_cost) * COST_UNSCALE,
-            "delay_retirement_cost": float(cb.delay_retirement_cost) * COST_UNSCALE,
             "reservoir_spillage_cost": float(cb.reservoir_spillage_cost) * COST_UNSCALE,
             "demand_shift_cost": float(cb.demand_shift_cost) * COST_UNSCALE,
             "rooftop_curtailment_cost": float(cb.rooftop_curtailment_cost) * COST_UNSCALE,
-            "npv_penalty_cost": float(cb.npv_penalty_cost) * COST_UNSCALE,
-            "reservoir_invest_cost": float(cb.reservoir_invest_cost) * COST_UNSCALE,
             # PrimaryEnergy sub-costs.
             "pe_supply_cost": float(cb.pe_supply_cost) * COST_UNSCALE,
             "pe_loss_cost": float(cb.pe_loss_cost) * COST_UNSCALE,
             "pe_excess_cost": float(cb.pe_excess_cost) * COST_UNSCALE,
             "pe_transport_cost": float(cb.pe_transport_cost) * COST_UNSCALE,
             "pe_investment_cost": float(cb.pe_investment_cost) * COST_UNSCALE,
-            "pe_coupling_slack_cost": float(cb.pe_coupling_slack_cost) * COST_UNSCALE,
             "pe_electrolyzer_cost": float(cb.pe_electrolyzer_cost) * COST_UNSCALE,
             # N-1 SCOPF reliability shortfall.
             "n1_security_shortfall_cost": float(cb.n1_security_shortfall_cost) * COST_UNSCALE,
+            "line_flow_cost": float(cb.line_flow_cost) * COST_UNSCALE,
+            # Operating budget: the money above it and its penalty
+            "operating_budget_excess": float(cb.operating_budget_excess) * COST_UNSCALE,
+            "operating_budget_penalty": float(cb.operating_budget_penalty) * COST_UNSCALE,
             "total": float(cb.total) * COST_UNSCALE,
         }
 
     return result
-
-
-# =============================================================================
-# Multi-System Converters
-# =============================================================================
-
-
-def convert_inter_system_link(link: dict) -> Any:
-    """
-    Convert a Python inter-system link dict to Julia InterSystemLink struct.
-
-    Args:
-        link: Dictionary with link configuration
-
-    Returns:
-        Julia InterSystemLink struct
-    """
-    from esfex.bridge.julia_setup import get_esfex_module
-
-    ESFEX = get_esfex_module()
-
-    from_idx = link.get("from_bus", link["from_node"])
-    to_idx = link.get("to_bus", link["to_node"])
-
-    return ESFEX.InterSystemLink(
-        link["from_system"],
-        link["to_system"],
-        convert_index_py_to_julia(from_idx),
-        convert_index_py_to_julia(to_idx),
-        float(link.get("existing_capacity_mw", 0.0)),
-        float(link.get("max_investment_mw", 0.0)),
-        scale_cost(float(link.get("investment_cost_per_mw", 1e6))),
-        float(link.get("loss_factor", 0.02)),
-        float(link.get("distance_km", 100.0)),
-        scale_cost(float(link.get("cost_per_mw_km", 1.0))),
-        float(link.get("reactance_pu", 0.01)),
-        float(link.get("resistance_pu", 0.001)),
-    )
-
-
-def convert_system_config(
-    name: str,
-    sys_config: "SystemConfig",
-    availability_profiles: Optional[Dict[str, np.ndarray]] = None,
-) -> Any:
-    """
-    Convert a Python SystemConfig to Julia SystemConfig struct.
-
-    Args:
-        name: System name
-        sys_config: Python SystemConfig
-        availability_profiles: Optional dict of availability profiles per generator
-
-    Returns:
-        Julia SystemConfig struct
-    """
-    from esfex.bridge.julia_setup import get_esfex_module, get_julia
-
-    ESFEX = get_esfex_module()
-    jl = get_julia()
-
-    # Convert generators
-    jl_generators = jl.seval("GeneratorConfig[]")
-    for gen_key, gen in sys_config.generators.items():
-        avail = availability_profiles.get(gen_key) if availability_profiles else None
-        jl_gen = convert_generator_config(gen, avail)
-        jl.seval("push!")(jl_generators, jl_gen)
-
-    # Convert batteries
-    jl_batteries = jl.seval("BatteryConfig[]")
-    for bat_key, bat in sys_config.batteries.items():
-        jl_bat = convert_battery_config(bat)
-        jl.seval("push!")(jl_batteries, jl_bat)
-
-    # Convert network (pass per-line data + transformers + buses)
-    jl_network = convert_network_config(
-        sys_config.nodes, sys_config.dc_power_flow,
-        transmission_lines_geo=sys_config.transmission_lines_geo or None,
-        transformers=sys_config.transformers or None,
-        buses=sys_config.buses or None,
-    )
-
-    # Get demand matrix
-    demand = sys_config.demand if hasattr(sys_config, 'demand') else np.zeros((HOURS_STD_YEAR, sys_config.nodes.num_nodes))
-
-    return ESFEX.SystemConfig(
-        name,
-        jl_network,
-        jl_generators,
-        jl_batteries,
-        py_to_julia_matrix(demand),
-        float(getattr(sys_config, 'target_re_penetration', 1.0)),
-        float(getattr(sys_config, 'initial_re_penetration', 0.0)),
-    )
 
 
 def convert_scenario(scenario: dict) -> Any:
@@ -1953,167 +2073,13 @@ def convert_scenario(scenario: dict) -> Any:
 
     ESFEX = get_esfex_module()
 
-    multipliers = scenario.get("multipliers", {})
+    # Validating translates legacy Studio keys and drops keys with no effect
+    mult = ScenarioMultipliers.model_validate(scenario.get("multipliers") or {})
     jl_multipliers = ESFEX.ScenarioMultipliers(
-        float(multipliers.get("invest_cost_renewables", 1.0)),
-        float(multipliers.get("invest_cost_conventional", 1.0)),
-        float(multipliers.get("fuel_cost", 1.0)),
-        float(multipliers.get("maintenance_cost", 1.0)),
-        float(multipliers.get("invest_cost_storage", 1.0)),
-        float(multipliers.get("invest_cost_transmission", 1.0)),
-        float(multipliers.get("discount_rate", 1.0)),
-        float(multipliers.get("demand_growth", 1.0)),
-        float(multipliers.get("fuel_price_growth", 1.0)),
-        float(multipliers.get("carbon_price", 1.0)),
-    )
+        **{name: float(value) for name, value in mult.model_dump().items()})
 
     return ESFEX.Scenario(
         scenario["name"],
         float(scenario["probability"]),
         jl_multipliers,
     )
-
-
-def convert_master_problem_result(jl_result: Any, years: list) -> dict:
-    """
-    Convert a Julia MasterProblemResult to a Python dictionary.
-
-    Args:
-        jl_result: Julia MasterProblemResult struct
-        years: List of years in the planning horizon
-
-    Returns:
-        Python dictionary with solution values
-    """
-    result = {
-        "status": str(jl_result.status),
-        "objective": float(jl_result.objective) * COST_UNSCALE,
-        "solve_time": float(jl_result.solve_time),
-        "years": years,
-    }
-
-    # Convert investment decisions
-    gen_investment = {}
-    for y_idx in range(1, len(years) + 1):
-        year = years[y_idx - 1]
-        gen_investment[year] = {}
-        jl_year_inv = jl_result.gen_investment[y_idx]
-        for g_idx in jl_year_inv.keys():
-            gen_investment[year][int(g_idx)] = julia_to_py_array(jl_year_inv[g_idx])
-    result["gen_investment"] = gen_investment
-
-    bat_power_investment = {}
-    bat_capacity_investment = {}
-    for y_idx in range(1, len(years) + 1):
-        year = years[y_idx - 1]
-        bat_power_investment[year] = {}
-        bat_capacity_investment[year] = {}
-        jl_pow_inv = jl_result.bat_power_investment[y_idx]
-        jl_cap_inv = jl_result.bat_capacity_investment[y_idx]
-        for b_idx in jl_pow_inv.keys():
-            bat_power_investment[year][int(b_idx)] = julia_to_py_array(jl_pow_inv[b_idx])
-            bat_capacity_investment[year][int(b_idx)] = julia_to_py_array(jl_cap_inv[b_idx])
-    result["bat_power_investment"] = bat_power_investment
-    result["bat_capacity_investment"] = bat_capacity_investment
-
-    # Convert transmission investment
-    trans_investment = {}
-    for y_idx in range(1, len(years) + 1):
-        year = years[y_idx - 1]
-        trans_investment[year] = {}
-        jl_trans = jl_result.transfer_investment[y_idx]
-        for key, val in jl_trans.items():
-            py_key = (convert_index_julia_to_py(key[0]), convert_index_julia_to_py(key[1]))
-            trans_investment[year][py_key] = float(val)
-    result["transfer_investment"] = trans_investment
-
-    # Convert life extension decisions
-    gen_life_extension = {}
-    for y_idx in range(1, len(years) + 1):
-        year = years[y_idx - 1]
-        gen_life_extension[year] = {}
-        jl_life = jl_result.gen_life_extension[y_idx]
-        for g_idx in jl_life.keys():
-            gen_life_extension[year][int(g_idx)] = julia_to_py_array(jl_life[g_idx])
-    result["gen_life_extension"] = gen_life_extension
-
-    bat_life_extension = {}
-    for y_idx in range(1, len(years) + 1):
-        year = years[y_idx - 1]
-        bat_life_extension[year] = {}
-        jl_life = jl_result.bat_life_extension[y_idx]
-        for b_idx in jl_life.keys():
-            bat_life_extension[year][int(b_idx)] = julia_to_py_array(jl_life[b_idx])
-    result["bat_life_extension"] = bat_life_extension
-
-    # Summary metrics
-    result["total_investment_by_year"] = julia_to_py_array(jl_result.total_investment_by_year) * COST_UNSCALE
-    result["total_operational_cost_by_year"] = julia_to_py_array(jl_result.total_operational_cost_by_year) * COST_UNSCALE
-    result["re_penetration_by_year"] = julia_to_py_array(jl_result.re_penetration_by_year)
-
-    # Cumulative capacities
-    cumulative_gen_capacity = {}
-    for y_idx in range(1, len(years) + 1):
-        year = years[y_idx - 1]
-        cumulative_gen_capacity[year] = {}
-        jl_cumul = jl_result.cumulative_gen_capacity[y_idx]
-        for g_idx in jl_cumul.keys():
-            cumulative_gen_capacity[year][int(g_idx)] = julia_to_py_array(jl_cumul[g_idx])
-    result["cumulative_gen_capacity"] = cumulative_gen_capacity
-
-    cumulative_bat_capacity = {}
-    for y_idx in range(1, len(years) + 1):
-        year = years[y_idx - 1]
-        cumulative_bat_capacity[year] = {}
-        jl_cumul = jl_result.cumulative_bat_capacity[y_idx]
-        for b_idx in jl_cumul.keys():
-            cumulative_bat_capacity[year][int(b_idx)] = julia_to_py_array(jl_cumul[b_idx])
-    result["cumulative_bat_capacity"] = cumulative_bat_capacity
-
-    return result
-
-
-def convert_npv_iteration_result(jl_result: Any, years: list) -> dict:
-    """
-    Convert a Julia NPVIterationResult to a Python dictionary.
-
-    Args:
-        jl_result: Julia NPVIterationResult struct
-        years: List of years
-
-    Returns:
-        Python dictionary with iteration results
-    """
-    result = {
-        "iterations": int(jl_result.iterations),
-        "converged": bool(jl_result.converged),
-    }
-
-    # Convert the final result
-    if jl_result.final_result is not None:
-        result["final_result"] = convert_master_problem_result(jl_result.final_result, years)
-
-    # Convert forced retirements
-    forced_retirements = []
-    for unit_npv in jl_result.forced_retirements:
-        forced_retirements.append({
-            "unit_type": str(unit_npv.unit_type),
-            "unit_idx": int(unit_npv.unit_idx) - 1,  # Convert to 0-indexed
-            "node": int(unit_npv.node) - 1,  # Convert to 0-indexed
-            "system": str(unit_npv.system),
-            "npv": float(unit_npv.npv) * COST_UNSCALE,
-            "remaining_lifetime": float(unit_npv.remaining_lifetime),
-            "recommend_retirement": bool(unit_npv.recommend_retirement),
-        })
-    result["forced_retirements"] = forced_retirements
-
-    # Convert NPV history
-    npv_history = []
-    for iter_npv in jl_result.npv_history:
-        npv_dict = {}
-        for key, val in iter_npv.items():
-            npv_dict[str(key)] = float(val) * COST_UNSCALE
-        npv_history.append(npv_dict)
-    result["npv_history"] = npv_history
-
-    return result

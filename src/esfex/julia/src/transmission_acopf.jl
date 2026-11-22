@@ -4,8 +4,8 @@ transmission_acopf.jl - AC Optimal Power Flow Formulations
 Implements multiple ACOPF formulations as JuMP constraints, integrated into
 the ESFEX operational dispatch model. The user selects one via power_flow_mode:
 
-  - "acopf_soc"   : Second-Order Cone relaxation (W-space)  — convex, HiGHS
-  - "acopf_qc"    : Quadratic Convex relaxation (W-space + McCormick) — convex, HiGHS
+  - "acopf_soc"   : Second-Order Cone relaxation (W-space)  — convex, conic solver
+  - "acopf_qc"    : Quadratic Convex relaxation (W-space + McCormick) — convex, conic solver
   - "acopf_sdp"   : Semidefinite Programming relaxation — convex, SCS/Mosek
   - "acopf_polar"  : Polar NLP (exact, V-θ) — nonlinear, Ipopt
   - "acopf_rect"   : Rectangular NLP (exact, e-f) — nonlinear, Ipopt
@@ -84,6 +84,8 @@ struct ACOPFBranch
     capacity_mva::Float64
     # Tap ratio (1.0 for lines)
     tap::Float64
+    # line_id (lines) or name (transformers), for scheduled-outage masks
+    id::String
 end
 
 """
@@ -125,10 +127,9 @@ function ACOPFNetwork(network::NetworkConfig, input::PowerSystemInput)
         i, j = line.from_node, line.to_node
         i == j && continue  # skip self-loops
 
-        nc = line.num_circuits
-        r = line.resistance_pu / nc
-        x = line.reactance_pu / nc
-        b_sh = line.susceptance_pu * nc
+        r = line.resistance_pu
+        x = line.reactance_pu
+        b_sh = line.susceptance_pu
 
         if abs(x) < 1e-12 && abs(r) < 1e-12
             continue
@@ -150,8 +151,9 @@ function ACOPFNetwork(network::NetworkConfig, input::PowerSystemInput)
             -g_s, -b_s,                  # g_ft, b_ft
             g_s, b_s + b_sh/2,           # g_tt, b_tt
             -g_s, -b_s,                  # g_tf, b_tf
-            line.capacity_mw * nc,       # capacity_mva (use MW ≈ MVA for consistency)
-            1.0                          # tap
+            line.capacity_mw,            # capacity_mva (use MW ≈ MVA for consistency)
+            1.0,                         # tap
+            line.line_id
         ))
     end
 
@@ -190,7 +192,8 @@ function ACOPFNetwork(network::NetworkConfig, input::PowerSystemInput)
             g_s, b_s,                     # g_tt, b_tt
             -g_s / t, -b_s / t,          # g_tf, b_tf
             trafo.rated_power_mva,       # capacity_mva
-            t                            # tap
+            t,                           # tap
+            trafo.name
         ))
     end
 
@@ -543,8 +546,8 @@ Add formulation-specific constraints that link voltage variables to power flow.
 """
 function add_acopf_voltage_constraints!(model, net, av, hours, ::SOCFormulation)
     # SOC relaxation: wr² + wi² ≤ w_i × w_j (per branch).
-    # Use JuMP's canonical RotatedSecondOrderCone set — Clarabel, Mosek,
-    # Gurobi and HiGHS-conic accept it natively, and MOI's bridge layer
+    # Use JuMP's canonical RotatedSecondOrderCone set — Clarabel, SCS, Mosek
+    # and Gurobi accept it natively (HiGHS does not), and MOI's bridge layer
     # expands it to the equivalent quadratic inequality for Ipopt/NLP.
     # The cone {(t, u, x) : 2·t·u ≥ ‖x‖², t ≥ 0, u ≥ 0} with t=w_i/2,
     # u=w_j, x=[wr, wi] gives exactly 2·(w_i/2)·w_j = w_i·w_j ≥ wr² + wi².
@@ -844,6 +847,8 @@ function add_acopf_power_balance!(model::Model, net::ACOPFNetwork,
         set_objective_coefficient(model, q_slack_neg[i, t], q_penalty)
     end
 
+    shift_net = demand_shift_net(vars)
+
     for t in 1:hours
         for i in 1:n_bus
             # Node index and demand fraction (used by EV and other node-level vars)
@@ -873,7 +878,7 @@ function add_acopf_power_balance!(model::Model, net::ACOPFNetwork,
 
             # Electrolyzer
             electrolyzer_term = vars.electrolyzer_power !== nothing ?
-                vars.electrolyzer_power[i, t] : AffExpr(0.0)
+                electrolyzer_load(vars, i, t) : AffExpr(0.0)
 
             # ACDC converters
             acdc_term = AffExpr(0.0)
@@ -912,8 +917,8 @@ function add_acopf_power_balance!(model::Model, net::ACOPFNetwork,
             if vars.reservoir_pump !== nothing
                 for g in vars.gens_at_bus[i]
                     gen = input.generators[g]
-                    ni = input.network.bus_to_node[i]
-                    if gen.reservoir_capacity[ni] > 0 && gen.reservoir_pump_capacity[ni] > 0
+                    # Reservoir arrays are per bus (expanded by the adapter).
+                    if gen.reservoir_capacity[i] > 0 && gen.reservoir_pump_capacity[i] > 0
                         add_to_expression!(reservoir_pump_term, vars.reservoir_pump[g, i, t])
                     end
                 end
@@ -932,12 +937,14 @@ function add_acopf_power_balance!(model::Model, net::ACOPFNetwork,
             extra_term = extra_injections_fn !== nothing ?
                 extra_injections_fn(i, t) : AffExpr(0.0)
 
+            # Demand moved into this step by demand shifting (net, may be < 0)
+            shift_term = haskey(shift_net, (ni, t)) ? shift_net[(ni, t)] * bus_df : AffExpr(0.0)
+
             # Net active injection (same as DC KCL).  load_shed is per-bus (B2).
             net_inj_p = @expression(model,
                 gen_sum + bat_discharge + ev_v2g_term + vars.load_shed[i, t] +
                 rooftop_gen_term + acdc_term + freq_term + extra_term -
-                bus_demand - electrolyzer_term - bat_charge_sum - reservoir_pump_term -
-                vars.reserve_static[ni, t] * bus_df - vars.reserve_dynamic[ni, t] * bus_df -
+                bus_demand - shift_term - electrolyzer_term - bat_charge_sum - reservoir_pump_term -
                 ev_charging_term - rooftop_curt_term
             )
 
@@ -1009,29 +1016,30 @@ function add_acopf_power_balance!(model::Model, net::ACOPFNetwork,
 
         end
 
-        # load_shed caps (per-bus zero for non-demand, per-node total).
+        # load_shed cap: unserved demand can never exceed the demand actually
+        # sitting on this bus.
+        #
+        # load_shed enters the KCL above on the SUPPLY side, so any bound
+        # looser than the bus's own demand lets the solver use it as a virtual
+        # generator: shed more than the bus consumes and export the surplus
+        # over the network, inflating the shed metric and displacing real
+        # dispatch. The previous per-node ``<= 2.0 * node_demand`` permitted
+        # exactly that, up to one extra times the node's demand; the DC path
+        # (transmission_dc.jl) had no bound at all — Japan: 1 504 MW "shed" at
+        # a 33 MW bus, and 66 % of the reported load shedding was artefact.
+        # Bounding each bus by its own demand is the definition of unserved
+        # demand, is tighter than the per-node sum it replaces, and subsumes
+        # the zero-demand case (connection buses get the bound at 0).
         n_bus_ac = input.network.num_buses
-        buses_per_node_lc = Dict{Int, Vector{Int}}()
         for b in 1:n_bus_ac
             ni = input.network.bus_to_node[b]
             bus_role = input.network.buses[b].role
             is_load_bus = bus_role == "load" || bus_role == "mixed"
             bus_df = is_load_bus ? input.network.buses[b].demand_fraction : 0.0
             bus_demand_t = input.demand[t, ni] * bus_df
-            if bus_demand_t <= 0.0
-                @constraint(model,
-                    vars.load_shed[b, t] <= 0.0,
-                    base_name = "max_load_shed_acopf_b$(b)_t$(t)")
-            end
-            push!(get!(buses_per_node_lc, ni, Int[]), b)
-        end
-        for (ni, bs) in buses_per_node_lc
-            node_demand_t = input.demand[t, ni]
-            if length(bs) > 0 && node_demand_t > 0
-                @constraint(model,
-                    sum(vars.load_shed[b, t] for b in bs) <= 2.0 * node_demand_t,
-                    base_name = "max_load_shed_acopf_node$(ni)_t$(t)")
-            end
+            @constraint(model,
+                vars.load_shed[b, t] <= max(bus_demand_t, 0.0),
+                base_name = "max_load_shed_acopf_b$(b)_t$(t)")
         end
     end
 end
@@ -1057,6 +1065,7 @@ does not support SecondOrderCone).
 #   when the underlying expressions are nonlinear.
 function add_acopf_line_limits!(model::Model, net::ACOPFNetwork,
                                  av::ACOPFVariables,
+                                 vars::PowerSystemVariables,
                                  input::PowerSystemInput,
                                  formulation::ACOPFFormulation)
     hours = size(input.demand, 1)
@@ -1064,23 +1073,22 @@ function add_acopf_line_limits!(model::Model, net::ACOPFNetwork,
     is_nlp = formulation isa PolarNLPFormulation || formulation isa RectNLPFormulation
 
     for (l, br) in enumerate(net.branches)
-        cap = br.capacity_mva
-        cap <= 0 && continue  # no limit
-
-        cap_pu = cap / base_mva
-        cap_pu_sq = cap_pu * cap_pu
+        br.capacity_mva <= 0 && continue  # no limit
 
         for t in 1:hours
+            # Thermal limit (p.u.) × scheduled-outage factor
+            om = branch_outage_factor(input, br.id, t)
+            cap_pu = br.capacity_mva * om / base_mva
             p_from, q_from, p_to, q_to = _branch_flow_expressions(
                 net, av, l, t, formulation)
 
             if is_nlp
                 # Ipopt: nonlinear quadratic constraint
                 @constraint(model,
-                    p_from^2 + q_from^2 <= cap_pu_sq,
+                    p_from^2 + q_from^2 <= cap_pu^2,
                     base_name = "sline_from_$(l)_$(t)")
                 @constraint(model,
-                    p_to^2 + q_to^2 <= cap_pu_sq,
+                    p_to^2 + q_to^2 <= cap_pu^2,
                     base_name = "sline_to_$(l)_$(t)")
             else
                 # Conic relaxation: SOC set
@@ -1134,7 +1142,7 @@ function setup_acopf!(model::Model, vars::PowerSystemVariables,
                               extra_injections_fn=extra_injections_fn)
 
     # Add apparent power line limits
-    add_acopf_line_limits!(model, net, av, input, formulation)
+    add_acopf_line_limits!(model, net, av, vars, input, formulation)
 
     return av
 end
@@ -1144,7 +1152,8 @@ end
 # =============================================================================
 
 function _validate_solver_for_formulation(model, ::Union{SOCFormulation, QCFormulation})
-    # SOC/QC require SOCP support — HiGHS 1.5+, Gurobi, CPLEX, Mosek
+    # SOC/QC require SOCP support — Clarabel, SCS, Gurobi, CPLEX, Xpress, Mosek
+    # (not HiGHS: it rejects second-order cone constraints)
     # No easy way to check at model creation time; solver will error if unsupported
 end
 

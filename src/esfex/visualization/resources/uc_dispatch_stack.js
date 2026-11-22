@@ -39,17 +39,17 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { _ucClearPlot(); showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { _ucClearPlot(); showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            _ucClearPlot(); showStatus(data && data.error ? data.error : "No data", false);
+            _ucClearPlot(); showStatus(data && data.error ? data.error : _t("web.common.no_data"), false);
             return;
         }
         if (!data.hours || data.hours.length === 0) {
-            _ucClearPlot(); showStatus("No dispatch data", false);
+            _ucClearPlot(); showStatus(_t("web.charts.uc_dispatch_stack.no_data"), false);
             return;
         }
         try { renderDispatch(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 
@@ -63,23 +63,26 @@ function hideStatus() {
     document.getElementById("status").style.display = "none";
 }
 
-const RE_LIKE = new Set(["Solar", "Wind", "Hydro", "Biomass", "Geothermal", "OTEC", "Nuclear", "Hydrogen"]);
-function _sortKey(name) {
-    // Renewables first (cheaper marginal cost → bottom of stack
-    // visually), thermal in the middle, batteries last on top.
-    if (RE_LIKE.has(name)) return 0;
-    if (name === "Battery") return 2;
-    return 1;
+function _mean(values) {
+    let sum = 0, n = 0;
+    for (const v of values || []) {
+        if (v != null && isFinite(v)) { sum += v; n++; }
+    }
+    return n ? sum / n : 0;
 }
 
 function renderDispatch(data) {
     const x = data.hours;
     const traces = [];
+    const hoverMW = _t("web.charts.uc_dispatch_stack.hover_hour");
+    const hoverMWAbs = _t("web.charts.uc_dispatch_stack.hover_hour_abs");
 
-    // Generation by tech, stacked. Sort so renewables sit at the
-    // bottom of the stack.
-    const techs = Object.keys(data.gen_by_tech || {}).sort(
-        (a, b) => _sortKey(a) - _sortKey(b) || a.localeCompare(b)
+    // Generation by tech, stacked by mean output, largest first so the
+    // biggest contributors sit at the bottom: the same order as the
+    // Overview's hourly dispatch (dashboard_loader._read_uc_hourly).
+    const gen = data.gen_by_tech || {};
+    const techs = Object.keys(gen).sort(
+        (a, b) => _mean(gen[b]) - _mean(gen[a]) || a.localeCompare(b)
     );
     for (const tech of techs) {
         const series = data.gen_by_tech[tech];
@@ -90,7 +93,7 @@ function renderDispatch(data) {
             stackgroup: "pos", groupnorm: "",
             name: tech,
             fillcolor: (data.tech_colors || {})[tech] || "#95A5A6",
-            hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>" + tech + "</extra>",
+            hovertemplate: hoverMW + "<extra>" + tech + "</extra>",
         });
     }
 
@@ -98,18 +101,18 @@ function renderDispatch(data) {
         traces.push({
             x: x, y: data.bat_discharge,
             type: "scatter", mode: "none",
-            stackgroup: "pos", name: "Battery discharge",
-            fillcolor: "rgba(155, 89, 182, 0.8)",
-            hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>Battery discharge</extra>",
+            stackgroup: "pos", name: _t("web.charts.uc_dispatch_stack.battery_discharge"),
+            fillcolor: "rgba(155, 89, 182, 0.85)",
+            hovertemplate: hoverMW + "<extra>" + _t("web.charts.uc_dispatch_stack.battery_discharge") + "</extra>",
         });
     }
     if (data.load_shed && data.load_shed.some(v => v > 0)) {
         traces.push({
             x: x, y: data.load_shed,
             type: "scatter", mode: "none",
-            stackgroup: "pos", name: "Load shedding",
+            stackgroup: "pos", name: _t("web.charts.uc_dispatch_stack.load_shed"),
             fillcolor: "rgba(231, 76, 60, 0.85)",
-            hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>Load shed</extra>",
+            hovertemplate: hoverMW + "<extra>" + _t("web.charts.uc_dispatch_stack.load_shed") + "</extra>",
         });
     }
 
@@ -118,20 +121,20 @@ function renderDispatch(data) {
         traces.push({
             x: x, y: data.bat_charge.map(v => -Math.abs(v || 0)),
             type: "scatter", mode: "none",
-            stackgroup: "neg", name: "Battery charge",
+            stackgroup: "neg", name: _t("web.charts.uc_dispatch_stack.battery_charge"),
             fillcolor: "rgba(155, 89, 182, 0.45)",
             customdata: data.bat_charge,
-            hovertemplate: "Hour %{x}: %{customdata:,.1f} MW<extra>Battery charge</extra>",
+            hovertemplate: hoverMWAbs + "<extra>" + _t("web.charts.uc_dispatch_stack.battery_charge") + "</extra>",
         });
     }
     if (data.curtailment && data.curtailment.some(v => v > 0)) {
         traces.push({
             x: x, y: data.curtailment.map(v => -Math.abs(v || 0)),
             type: "scatter", mode: "none",
-            stackgroup: "neg", name: "Curtailment",
+            stackgroup: "neg", name: _t("web.charts.uc_dispatch_stack.curtailment"),
             fillcolor: "rgba(241, 196, 15, 0.7)",
             customdata: data.curtailment,
-            hovertemplate: "Hour %{x}: %{customdata:,.1f} MW<extra>Curtailment</extra>",
+            hovertemplate: hoverMWAbs + "<extra>" + _t("web.charts.uc_dispatch_stack.curtailment") + "</extra>",
         });
     }
 
@@ -140,26 +143,19 @@ function renderDispatch(data) {
     if (data.demand && data.demand.length === x.length) {
         traces.push({
             x: x, y: data.demand,
-            type: "scatter", mode: "lines", name: "Demand",
+            type: "scatter", mode: "lines", name: _t("web.charts.uc_dispatch_stack.demand"),
             line: { color: "#000000", width: 2, dash: "solid" },
-            hovertemplate: "Hour %{x}: %{y:,.1f} MW<extra>Demand</extra>",
+            hovertemplate: hoverMW + "<extra>" + _t("web.charts.uc_dispatch_stack.demand") + "</extra>",
         });
     }
 
-    const title = `Hourly Dispatch — Year ${data.year}`;
     const layout = {
-        margin: { t: 90, r: 30, b: 60, l: 70 },
+        margin: { t: 60, r: 30, b: 60, l: 70 },
         showlegend: true,
-        annotations: [
-            { text: "<b>" + title + "</b>",
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.14, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
-        ],
         legend: {
             orientation: "h",
             x: 0.5, xanchor: "center",
-            y: 1.06, yanchor: "bottom",
+            y: 1.02, yanchor: "bottom",
             font: { size: 10 },
             tracegroupgap: 8,
             bgcolor: "rgba(255,255,255,0.85)",
@@ -171,8 +167,8 @@ function renderDispatch(data) {
               x0: 0, x1: 1, y0: 0, y1: 0,
               line: { color: "#000000", width: 1 } },
         ],
-        xaxis: { title: "<b>Hour</b>" },
-        yaxis: { title: "<b>Power (MW)</b>" },
+        xaxis: { title: "<b>" + _t("web.charts.uc_dispatch_stack.axis_hour") + "</b>" },
+        yaxis: { title: "<b>" + _t("web.charts.uc_dispatch_stack.axis_power") + "</b>" },
     };
     Plotly.purge("plot");
     Plotly.newPlot("plot", traces, layout, {

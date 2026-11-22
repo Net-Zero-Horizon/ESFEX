@@ -76,7 +76,6 @@ def _make_generator(
     technology: str | None = None,
     gen_type: str = "Renewable",
     rated_power: float = 100.0,
-    invest_max_power: float = 0.0,
 ) -> GeneratorConfig:
     """Build a minimal GeneratorConfig for testing."""
     return GeneratorConfig(
@@ -102,7 +101,6 @@ def _make_generator(
         fixed_cost=[10.0] * num_nodes,
         maintenance_cost=[5.0] * num_nodes,
         invest_cost=[1500.0] * num_nodes,
-        invest_max_power=[invest_max_power] * num_nodes,
     )
 
 
@@ -128,9 +126,7 @@ def _make_battery(name: str, num_nodes: int) -> BatteryConfig:
         fixed_cost=[5.0] * num_nodes,
         maintenance_cost=[2.0] * num_nodes,
         invest_cost=[800.0] * num_nodes,
-        invest_cost_energy=[200.0] * num_nodes,
         invest_max_power=[100.0] * num_nodes,
-        invest_max_capacity=[400.0] * num_nodes,
         efficiency_charge=[0.95] * num_nodes,
         efficiency_discharge=[0.95] * num_nodes,
         soc_initial=[0.5] * num_nodes,
@@ -734,14 +730,15 @@ class TestFieldNameConstants:
 
     def test_gen_fields_contain_key_entries(self):
         """Generator fields include critical per-node array names."""
-        for expected in ("rated_power", "invest_cost", "invest_max_power", "life_time"):
+        for expected in ("rated_power", "invest_cost", "life_time"):
             assert expected in _GEN_PER_NODE_FIELDS
+        # Existing generators have no build limit (dispatch-only field, removed)
+        assert "invest_max_power" not in _GEN_PER_NODE_FIELDS
 
     def test_bat_fields_contain_key_entries(self):
         """Battery fields include storage-specific per-node array names."""
         for expected in (
-            "rated_power", "invest_cost", "invest_cost_energy",
-            "invest_max_power", "invest_max_capacity",
+            "rated_power", "invest_cost", "invest_max_power",
             "efficiency_charge", "efficiency_discharge",
             "soc_initial", "max_DoD", "capacity",
             "MaxChargePower", "MaxDischargePower",
@@ -749,12 +746,11 @@ class TestFieldNameConstants:
             assert expected in _BAT_PER_NODE_FIELDS
 
     def test_bat_fields_superset_of_gen_common(self):
-        """Battery fields include all the fields in gen fields that are common."""
+        """Battery fields include the generator fields batteries share."""
         common = [
             "life_time", "initial_age", "degradation_rate", "decommissioning_cost",
-            "rated_power", "min_power", "min_up", "min_down", "ramp_up", "ramp_down",
-            "eff_at_rated", "eff_at_min", "inertia", "start_up_cost", "fuel_cost",
-            "fixed_cost", "maintenance_cost", "invest_cost", "invest_max_power",
+            "rated_power", "ramp_up", "ramp_down", "inertia",
+            "fixed_cost", "maintenance_cost", "invest_cost",
         ]
         for f in common:
             assert f in _GEN_PER_NODE_FIELDS, f"{f} missing from gen fields"
@@ -889,8 +885,8 @@ class TestExpandConfigWithZonesSingleZone:
             arr = getattr(gen_out, field_name)
             assert len(arr) == 3, f"Field {field_name} has length {len(arr)}, expected 3"
 
-    def test_matched_generator_invest_max_power(self):
-        """Matched generator gets zone max_capacity_mw as invest_max_power."""
+    def test_matched_generator_copies_invest_cost(self):
+        """Matched generator copies the reference node's invest_cost."""
         zone = _make_zone(technology="Solar", max_capacity_mw=500.0)
         gen = _make_generator("Solar", "Sun", 2)
         cfg = _make_system_config(
@@ -901,7 +897,8 @@ class TestExpandConfigWithZonesSingleZone:
         result_cfg, mappings = expand_config_with_zones(cfg)
         gen_out = result_cfg.generators["solar_1"]
         # Virtual node is index 2 (0-based)
-        assert gen_out.invest_max_power[2] == 500.0
+        ref = mappings[0].nearest_bus_parent_node
+        assert gen_out.invest_cost[2] == gen_out.invest_cost[ref]
 
     def test_matched_generator_rated_power_zero(self):
         """Matched generator has zero rated_power on virtual node (nothing built yet)."""
@@ -916,8 +913,8 @@ class TestExpandConfigWithZonesSingleZone:
         gen_out = result_cfg.generators["solar_1"]
         assert gen_out.rated_power[2] == 0.0
 
-    def test_unmatched_generator_invest_max_zero(self):
-        """Unmatched generator gets zero invest_max_power on virtual node."""
+    def test_unmatched_generator_invest_cost_zero(self):
+        """Unmatched generator gets zero invest_cost on virtual node."""
         zone = _make_zone(technology="Solar")
         gas_gen = _make_generator("Gas", "NaturalGas", 2, gen_type="Non-renewable")
         cfg = _make_system_config(
@@ -927,7 +924,7 @@ class TestExpandConfigWithZonesSingleZone:
         )
         result_cfg, _ = expand_config_with_zones(cfg)
         gen_out = result_cfg.generators["gas_1"]
-        assert gen_out.invest_max_power[2] == 0.0
+        assert gen_out.invest_cost[2] == 0.0
 
     def test_battery_arrays_expanded(self):
         """Battery per-node arrays grow by 1 per zone."""
@@ -1551,3 +1548,161 @@ class TestNoZonesFallback:
         assert mappings == []
         assert result_cfg.nodes.num_nodes == 2
         assert len(result_cfg.technologies["tech_solar"].invest_max_power) == 2
+
+
+# =========================================================================
+# Zone interconnection: the zone reaches the grid through a candidate line
+# =========================================================================
+
+
+class TestZoneInterconnection:
+    def test_candidate_line_to_nearest_bus(self):
+        """Power moves along bus-level lines: the zone gets a 0 MW line to its
+        nearest bus, which the master expands by investment."""
+        cfg = _make_system_config(num_nodes=2, zones=[_make_zone()])
+        result_cfg, mappings = expand_config_with_zones(cfg)
+        m = mappings[0]
+        line = result_cfg.transmission_lines_geo[-1]
+        assert (line.from_bus, line.to_bus) == (m.virtual_bus_idx, m.nearest_bus_idx)
+        assert (line.from_node, line.to_node) == (m.virtual_node_idx, m.nearest_bus_parent_node)
+        assert line.capacity_mw == 0.0
+        assert line.length_km == pytest.approx(m.distance_km)
+
+    def test_every_per_node_list_gets_a_zone_entry(self):
+        """Lists outside the explicit field tables (min_up of a technology,
+        risk_coefficient, reservoir data) must grow too: a merged multi-node
+        config sizes them to the node count and the solver indexes them."""
+        gen = _make_generator("Hydro", "Water", 2).model_copy(update={
+            "risk_coefficient": [0.5, 1.0], "reservoir_capacity": [100.0, 0.0]})
+        tech = _make_technology("solar_new", "Sun", 2).model_copy(update={
+            "min_up": [2, 3], "risk_coefficient": [1.0, 0.8]})
+        cfg = _make_system_config(
+            num_nodes=2, generators={"hydro": gen},
+            technologies={"solar_new": tech}, zones=[_make_zone()])
+        result_cfg, mappings = expand_config_with_zones(cfg)
+        ref = mappings[0].nearest_bus_parent_node
+        g = result_cfg.generators["hydro"]
+        t = result_cfg.technologies["solar_new"]
+        assert t.min_up == [2, 3, [2, 3][ref]]
+        assert t.risk_coefficient[2] == [1.0, 0.8][ref]
+        assert g.risk_coefficient[2] == [0.5, 1.0][ref]
+        assert g.reservoir_capacity[2] == 0.0   # nothing installed in the zone
+        assert g.rated_power[2] == 0.0
+
+
+class TestMergedZones:
+    def _two_systems(self):
+        import sys as _sys
+        _sys.path.insert(0, "tests")
+        from test_runner import _make_esfex_config
+
+        from esfex.config.schema import MetaNetworkConfig
+
+        def system(name, zone):
+            return _make_system_config(
+                num_nodes=2, zones=[zone],
+                technologies={"solar_new": _make_technology("solar_new", "Sun", 2)},
+                buses=[BusConfig(bus_id="b0", parent_node=0, demand_fraction=1.0),
+                       BusConfig(bus_id="b1", parent_node=1, demand_fraction=1.0)],
+            ).model_copy(update={"name": name})
+
+        a = system("A", _make_zone(name="ZA", target_bus=1,
+                                   allowed_technologies={"solar_new": 50.0}))
+        b = system("B", _make_zone(name="ZB", target_bus=0,
+                                   allowed_technologies={"solar_new": 70.0}))
+        return _make_esfex_config(
+            a, systems={"A": a, "B": b}, meta_network=MetaNetworkConfig(systems=["A", "B"]))
+
+    def test_merge_keeps_zones_with_merged_keys(self):
+        """Zones used to be dropped by the merge; their technology keys and
+        target bus follow the merged naming and bus numbering."""
+        from esfex.runner import Orchestrator
+
+        master, operational, _ = Orchestrator._merge_systems(self._two_systems())
+        for cfg in (master, operational):
+            zones = {z.name: z for z in cfg.development_zones}
+            assert set(zones) == {"A__ZA", "B__ZB"}
+            assert zones["A__ZA"].allowed_technologies == {"A__solar_new": 50.0}
+            assert zones["B__ZB"].allowed_technologies == {"B__solar_new": 70.0}
+        zones = {z.name: z for z in operational.development_zones}
+        assert zones["A__ZA"].target_bus == 1
+        assert zones["B__ZB"].target_bus == 2   # B's bus 0 after A's two buses
+        expanded, mappings = expand_config_with_zones(operational)
+        assert [m.matched_technologies for m in mappings] == [["A__solar_new"], ["B__solar_new"]]
+        assert expanded.technologies["B__solar_new"].invest_max_power[-1] == 70.0
+
+
+class TestApplyTransferInvestments:
+    def _orchestrator(self, master, operational, num_nodes):
+        from esfex.runner import Orchestrator
+
+        orch = Orchestrator.__new__(Orchestrator)
+        orch.master_system = master
+        orch.primary_system = operational
+        orch._num_nodes = num_nodes
+        return orch
+
+    def test_shared_bus_network_corridor_applied_once(self):
+        """A single-node master indexes buses: the investment goes to the line
+        joining exactly those buses, once even if both directions are listed."""
+        cfg = _make_system_config(num_nodes=1, coords=[(21.0, -80.0)], zones=[_make_zone()])
+        expanded, mappings = expand_config_with_zones(cfg)
+        orch = self._orchestrator(expanded, expanded, expanded.nodes.num_nodes)
+        zb, nb = mappings[0].virtual_bus_idx, mappings[0].nearest_bus_idx
+        orch._apply_transfer_investments({
+            f"transfer_investment_{zb}_{nb}": 30.0, f"transfer_investment_{nb}_{zb}": 30.0})
+        assert expanded.transmission_lines_geo[-1].capacity_mw == pytest.approx(30.0)
+
+    def test_node_level_master_reaches_the_zone_line(self):
+        """A merged (node-level) master indexes nodes: the zone corridor maps
+        to the zone line of the bus network."""
+        cfg = _make_system_config(
+            num_nodes=2, zones=[_make_zone()],
+            buses=[BusConfig(bus_id="b0", parent_node=0, demand_fraction=1.0),
+                   BusConfig(bus_id="b1", parent_node=1, demand_fraction=1.0),
+                   BusConfig(bus_id="b2", parent_node=1, demand_fraction=0.0)])
+        operational, mappings = expand_config_with_zones(cfg)
+        master, _ = expand_config_with_zones(cfg.model_copy(update={"buses": []}))
+        orch = self._orchestrator(master, operational, operational.nodes.num_nodes)
+        zn, nn = mappings[0].virtual_node_idx, mappings[0].nearest_bus_parent_node
+        orch._apply_transfer_investments({f"transfer_investment_{zn}_{nn}": 25.0})
+        assert operational.transmission_lines_geo[-1].capacity_mw == pytest.approx(25.0)
+
+
+@pytest.mark.julia
+def test_zone_capacity_reaches_the_demand(tmp_path):
+    """End to end: an exclusive zone is the only place new capacity can go.
+    The master builds it there with its interconnection, and the dispatch
+    serves the demand through the zone line."""
+    import sys as _sys
+    _sys.path.insert(0, "tests")
+    from test_runner import _make_esfex_config
+    from test_runner import _make_generator as _gen
+
+    from esfex.config.schema import PenaltiesConfig, TemporalConfig
+    from esfex.runner import Orchestrator
+
+    demand = tmp_path / "demand.csv"
+    np.savetxt(demand, np.full(8760, 80.0))
+    diesel = _gen("Diesel", "Non-renewable", "Diesel", [60.0], degradation_rate=[0.0],
+                  fuel_cost=[80.0], invest_max_power=[0.0])
+    gas = _make_technology("gas_new", "Diesel", 1, tech_type="Non-renewable",
+                           invest_cost=800000.0, invest_max_power=500.0)
+    zone = _make_zone(polygon_coords=[(21.15, -80.05), (21.25, -80.05), (21.25, -79.95), (21.15, -79.95)],
+                      max_capacity_mw=None, allowed_technologies={"gas_new": 200.0}, exclusive=True)
+    sysc = _make_system_config(num_nodes=1, coords=[(21.0, -80.0)], generators={"diesel": diesel},
+                               technologies={"gas_new": gas}, zones=[zone])
+    sysc = sysc.model_copy(update={"demand_path": str(demand),
+                                   "penalties": PenaltiesConfig(loss_of_load=10000.0)})
+    cfg = _make_esfex_config(
+        sysc, simulation_mode="development",
+        temporal=TemporalConfig(resolution_hours=24, rolling_horizon_hours=720, overlap_hours=0))
+    orch = Orchestrator(cfg, output_dir=tmp_path / "out")
+    r = orch.run(years=1)[0]
+
+    zn = orch._zone_mappings[0].virtual_node_idx
+    built = r.investments.get(f"tech_investment_power_0_{zn}", 0.0)
+    assert built > 0
+    assert r.investments.get(f"transfer_investment_{zn}_0", 0.0) == pytest.approx(built)
+    assert float(np.asarray(r.load_shed_array).sum()) == pytest.approx(0.0, abs=1e-3)
+    assert np.asarray(r.gen_output).sum(axis=(0, 2))[zn] > 0

@@ -8,8 +8,8 @@
  *
  * Payload contract (see SystemMetricsEvolutionChart._build_payload):
  *   { years_min, years_max, years: [...],
- *     categories: [{name, color}],   // ordered
- *     metrics: [{label, category, values_str:[...], normalized:[...],
+ *     categories: [{id, name, color}],   // ordered; name is shown
+ *     metrics: [{label, category (an id), values_str:[...], normalized:[...],
  *                min_str, max_str}] }
  */
 "use strict";
@@ -28,20 +28,20 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            showStatus(data && data.error ? data.error : "No data", false);
+            showStatus(data && data.error ? data.error : _t("web.common.no_data"), false);
             return;
         }
         if (!data.metrics || data.metrics.length === 0) {
-            showStatus("No metrics available", false);
+            showStatus(_t("web.charts.system_metrics.no_data"), false);
             return;
         }
         try {
             renderMetrics(data);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error("[system_metrics.js] render threw:", e);
         }
     });
@@ -93,7 +93,7 @@ function renderMetrics(data) {
                 // the rotated category labels (which sit ~60 px past the
                 // plot edge). Layout's margin.r makes room.
                 marker.colorbar = {
-                    title: { text: "Year", side: "right" },
+                    title: { text: _t("web.charts.system_metrics.colorbar_year"), side: "right" },
                     thickness: 14, len: 0.75,
                     x: 1.12, xanchor: "left",
                 };
@@ -110,8 +110,7 @@ function renderMetrics(data) {
             customdata: m.values_str || [],
             hovertemplate:
                 "<b>" + m.label + "</b><br>" +
-                "Year %{marker.color}<br>" +
-                "Value: %{customdata}<extra></extra>",
+                _t("web.charts.system_metrics.hover_point") + "<extra></extra>",
         });
     });
 
@@ -142,7 +141,12 @@ function renderMetrics(data) {
     // Walk the metrics array; whenever the category changes we know
     // the bounds of the previous category's strip.
     const catMap = {};
-    (data.categories || []).forEach((c, idx) => { catMap[c.name] = c.color; });
+    const catName = {};
+    (data.categories || []).forEach(c => {
+        const id = c.id || c.name;
+        catMap[id] = c.color;
+        catName[id] = c.name;
+    });
     let runStart = 0;
     let runCat = metrics[0] ? metrics[0].category : "";
     for (let i = 1; i <= N; i++) {
@@ -159,7 +163,7 @@ function renderMetrics(data) {
                 x: 1.0, y: (runStart + i - 1) / 2,
                 xanchor: "left", yanchor: "middle",
                 xshift: 60,
-                text: "<b>" + runCat + "</b>",
+                text: "<b>" + (catName[runCat] || runCat) + "</b>",
                 showarrow: false, font: { size: 10, color: "#2C3E50" },
                 textangle: 90,
             });
@@ -172,19 +176,15 @@ function renderMetrics(data) {
         // Right margin reserves space for the rotated category labels
         // (which double as the band-colour legend) and the year
         // colorbar that lives further right.
-        margin: { t: 50, r: 260, b: 60, l: 280 },
+        margin: { t: 30, r: 260, b: 60, l: 280 },
         annotations: annotations,
         shapes: shapes,
-        title: {
-            text: "<b>Temporal Evolution of Power System Metrics</b>",
-            x: 0.5, xanchor: "center", y: 0.98, yanchor: "top",
-            font: { size: 16 },
-        },
         xaxis: {
             range: [-20, 130],
             tickvals: [0, 25, 50, 75, 100],
-            ticktext: ["<b>Min</b>", "25%", "50%", "75%", "<b>Max</b>"],
-            title: "<b>Normalized Metric Range (individual scaling)</b>",
+            ticktext: ["<b>" + _t("web.charts.system_metrics.tick_min") + "</b>", "25%", "50%", "75%",
+                       "<b>" + _t("web.charts.system_metrics.tick_max") + "</b>"],
+            title: "<b>" + _t("web.charts.system_metrics.axis_range") + "</b>",
             gridcolor: "rgba(0,0,0,0.06)",
             zeroline: false,
         },

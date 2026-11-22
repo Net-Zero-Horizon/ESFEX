@@ -518,6 +518,22 @@ def test_recalculate_costs(h5_basic):
     assert costs["startup_cost"] >= 0
 
 
+def test_recalculate_costs_fixed_om_per_mw_year():
+    """Fixed O&M is $/MW·yr of rated power for the simulated share of the
+    year, paid by an idle unit too; it was charged per MWh produced."""
+    year_data = {"generation": {"gas": np.zeros((2, 24)),
+                                "coal": np.full((2, 24), 10.0)}}
+    cfgs = [
+        {"name": "coal", "rated_power": [50.0, 0.0], "fixed_cost": 0.0,
+         "maintenance_cost": 2.0},
+        {"name": "gas", "rated_power": [100.0, 40.0], "fixed_cost": 8760.0,
+         "maintenance_cost": 0.0},
+    ]
+    costs = fa._recalculate_costs(year_data, cfgs, [], 1)
+    # gas: 8760 $/MW·yr × 140 MW × 24/8760; coal: 2 $/MWh × 480 MWh
+    assert costs["om_cost"] == pytest.approx(140.0 * 24 + 2.0 * 480.0)
+
+
 def test_compute_system_financials_basic(h5_basic):
     fin = fa.compute_system_financials(h5_basic)
     assert isinstance(fin, fa.SystemFinancials)

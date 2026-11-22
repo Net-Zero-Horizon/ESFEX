@@ -64,8 +64,13 @@ function _load_solver_module(name::String)
         @eval import $pkg_sym
         _SOLVER_MODULES[name] = @eval $pkg_sym
     catch e
-        error("$desc requested but $(pkg_sym).jl is not installed. " *
-              "Install with: ] add $pkg_sym")
+        # Commercial/optional solvers go into ESFEX's solver environment;
+        # the open ones ship with ESFEX, so a missing one means a broken
+        # Julia environment.
+        hint = name in ("gurobi", "cplex", "cbc") ?
+            "Install with: esfex add-solver $name" :
+            "It ships with ESFEX's Julia project: run Pkg.instantiate() on it (see the installation guide)"
+        error("$desc requested but $(pkg_sym).jl is not installed. $hint")
     end
     return _SOLVER_MODULES[name]
 end
@@ -86,6 +91,55 @@ function _get_solver_optimizer(name::String)
     end
 end
 
+# HiGHS from 1.16 on runs every solve of the process on one thread
+# scheduler, sized by the first solve, and ends a solve that asks for another
+# thread count OTHER_ERROR ("the scheduler has already been initialized").
+# A process can mix counts (Benders' single-threaded subproblems, runs with
+# other settings): the scheduler is reset when the count changes.
+const _HIGHS_SCHEDULER_THREADS = Ref{Int}(-1)
+
+"""
+    sync_highs_threads!(model)
+
+Before a solve with HiGHS: when the model asks for another thread count
+than the solve before it, reset HiGHS's thread scheduler. Other solvers,
+and a model without an optimizer, are left alone.
+"""
+function sync_highs_threads!(model::JuMP.Model)
+    name = try
+        JuMP.solver_name(model)
+    catch
+        return
+    end
+    name == "HiGHS" || return
+    threads = Int(JuMP.get_attribute(model, "threads"))
+    if threads != _HIGHS_SCHEDULER_THREADS[]
+        # The first time too: a solve outside ESFEX may have sized it
+        HiGHS.Highs_resetGlobalScheduler(1)
+        _HIGHS_SCHEDULER_THREADS[] = threads
+    end
+    return
+end
+
+# The optimize hook of a model ESFEX builds (`solver_model`); the loss
+# repair's hook (`optimize_exact_losses!`) replaces it and syncs too
+function optimize_synced!(model; kwargs...)
+    sync_highs_threads!(model)
+    return JuMP.optimize!(model; ignore_optimize_hook = true, kwargs...)
+end
+
+"""
+    solver_model(optimizer) -> Model
+
+A JuMP model whose every `optimize!` first syncs HiGHS's thread scheduler
+(`sync_highs_threads!`).
+"""
+function solver_model(optimizer)
+    model = Model(optimizer)
+    JuMP.set_optimize_hook(model, optimize_synced!)
+    return model
+end
+
 # Include type definitions first (depends on JuMP and MOI imports above)
 include("types.jl")
 
@@ -99,12 +153,16 @@ include("transmission_ac.jl")
 include("transmission_acopf.jl")
 include("power_system.jl")
 include("primary_energy.jl")
+include("committed_steps.jl")
 include("master_problem.jl")
+include("master_fuel.jl")   # fuel block of the master (#89)
+include("master_diagnostics.jl")   # binding constraints, duals, paid slacks
 include("benders.jl")
 include("mga.jl")
 include("electrolyzer.jl")
 include("dcopf_benchmark.jl")
 include("acopf_benchmark.jl")
+include("log_forwarding.jl")   # Julia logs → the Python logger
 
 # =============================================================================
 # Exports
@@ -113,7 +171,7 @@ include("acopf_benchmark.jl")
 # Configuration types
 export NetworkConfig, GeneratorConfig, BatteryConfig, BusData
 export TechnologyConfig, BatteryTechnologyConfig
-export CostSegment
+export CostSegment, CO2BudgetGroup
 export TransmissionLineData, TransformerData
 export ACDCConverterData, FrequencyConverterData
 export TemporalConfig, PenaltyConfig, TargetConfig, SolverSettings
@@ -148,8 +206,9 @@ export add_battery_constraints!, add_reserve_constraints!
 export add_inertia_constraints!
 export add_curtailment_constraints!, add_renewable_constraint!, add_co2_constraint!
 export extract_solution
-export recover_uc_duals!
 export recover_uc_duals_via_copy
+export compute_n1_security_cost!
+export add_operating_budget!
 
 # EV types
 export EVConfig, EVVariables, EVResult
@@ -166,7 +225,7 @@ export PrimaryEnergyInput, PrimaryEnergyVariables, PrimaryEnergyResult
 export create_primary_energy_model, create_temporal_mapping
 export build_primary_energy_variables!, add_primary_energy_constraints!
 export get_primary_energy_objective_terms, extract_primary_energy_solution
-export couple_primary_energy_to_power_system!
+export couple_primary_energy_to_power_system!, in_transit_arrivals
 
 # Master Problem types and functions
 export SystemNodeRange
@@ -174,40 +233,41 @@ export MasterProblemInput, MasterProblemVariables, MasterProblemResult
 export create_master_problem, build_master_variables!
 export add_investment_constraints!, add_budget_constraints!
 export add_retirement_cascade_constraints!, add_re_target_constraints!
-export add_re_increment_constraints!
+export add_re_growth_cap!, define_re_share!
 export add_capacity_adequacy_constraints!, add_transmission_symmetry_constraints!
-export build_master_objective!, extract_master_solution
+export build_master_objective!, extract_master_solution, optimize_master!, optimize_dispatch!,
+       loss_repair_bounds
+
+# Fuel block of the master (#89)
+export MasterFuelInput, MasterFuelVariables, add_master_fuel_day!
+export extract_master_fuel_solution, master_fuel_keys
+
+# Binding constraints, duals and paid slacks of a solved master
+export master_diagnostics, master_paid_slacks
 
 # Benders decomposition (optional master-problem solver)
 export BendersResult, run_benders_decomposition
 export extract_master_solution_from_benders
 export calculate_target_ratios, select_representative_days
+export representative_day_offsets, representative_day_ratios, select_matching_days,
+       master_rep_day_offsets, master_rep_days, re_cap_exemption,
+       critical_day_plan, representative_day_weights, master_day_plan,
+       master_storage_firm_hours
 export build_cumulative_capacity_expressions
 
 # Representative Days Validation (CRITICAL for correct RE investment)
 export create_day_ps_vars!, add_day_operational_constraints!
 export calculate_day_operational_cost, add_representative_days_validation!
 
-# Multi-System Master Problem types and functions
-export InterSystemLink, SystemConfig, MultiSystemMasterInput
-export ExtendedMasterVariables, ExtendedMasterResult
-export create_multi_system_master_problem
-export add_inter_system_constraints!, build_multi_system_objective!
-
 # Stochastic Programming types and functions
 export ScenarioMultipliers, Scenario, StochasticMasterInput
 export create_stochastic_master_problem
-export apply_scenario_multipliers, build_stochastic_objective!
-
-# Primary Energy Investment in Master Problem
-export PrimaryEnergyInvestmentConfig
-export add_primary_energy_investment_variables!
-export add_primary_energy_investment_costs!
+export scenario_master_input, build_stochastic_objective!
 
 # NPV Iteration and Retirement
-export UnitNPV, NPVIterationResult
-export calculate_unit_npv, get_units_with_negative_npv
-export force_unit_retirements!, solve_with_npv_iteration
+export UnitNPV, NPVIterationResult, UnitOperation, RetiredUnit
+export calculate_unit_npv, get_units_with_negative_npv, unit_npvs
+export extract_unit_operation, retire_units, solve_with_npv_iteration, npv_round_reference_cost
 
 # MGA / SPORES
 export MGAResult
@@ -238,7 +298,8 @@ Create a configured optimizer with specified parameters.
 # Arguments
 - `solver_name::String="highs"`: Solver name (highs, scip, xpress, gurobi, cplex, cbc, glpk)
 - `threads::Int=4`: Number of solver threads
-- `time_limit::Float64=3600.0`: Maximum solve time in seconds
+- `time_limit::Float64=3600.0`: Maximum solve time in seconds; 0 (or less,
+  or `Inf`) sets no limit (`solver.time_limit: 0`)
 - `gap::Float64=0.01`: MIP optimality gap tolerance
 - `verbose::Bool=false`: Enable solver output
 
@@ -251,15 +312,17 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
                           solver_options::Dict{String, Any}=Dict{String, Any}())
     name = lowercase(solver_name)
     OptimizerType = _get_solver_optimizer(name)
+    # No time limit: the attribute is left at the solver's default (none)
+    limited = has_time_limit(time_limit)
 
     if name == "highs"
         # Base attributes
         attrs = Pair{String,Any}[
             "threads" => threads,
-            "time_limit" => time_limit,
             "mip_rel_gap" => gap,
             "output_flag" => verbose,
         ]
+        limited && push!(attrs, "time_limit" => time_limit)
         # Apply user-provided solver_options (override defaults)
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
@@ -278,7 +341,6 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
         return optimizer_with_attributes(OptimizerType, attrs...)
     elseif name == "scip"
         attrs = Pair{String,Any}[
-            "limits/time" => time_limit,
             "limits/gap" => gap,
             "display/verblevel" => (verbose ? 4 : 0),
             # Thread count for SCIP's concurrent solver. Note: SCIP's default
@@ -286,6 +348,7 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
             # takes effect when SCIP runs in concurrent mode.
             "parallel/maxnthreads" => threads,
         ]
+        limited && push!(attrs, "limits/time" => time_limit)
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
@@ -293,10 +356,11 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
     elseif name == "xpress"
         attrs = Pair{String,Any}[
             "THREADS" => threads,
-            "MAXTIME" => round(Int, time_limit),
             "MIPRELSTOP" => gap,
             "OUTPUTLOG" => (verbose ? 1 : 0),
         ]
+        # At least 1 s: Xpress reads MAXTIME 0 as no limit
+        limited && push!(attrs, "MAXTIME" => max(round(Int, time_limit), 1))
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
@@ -304,10 +368,10 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
     elseif name == "gurobi"
         attrs = Pair{String,Any}[
             "Threads" => threads,
-            "TimeLimit" => time_limit,
             "MIPGap" => gap,
             "OutputFlag" => (verbose ? 1 : 0),
         ]
+        limited && push!(attrs, "TimeLimit" => time_limit)
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
@@ -315,9 +379,9 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
     elseif name == "cplex"
         attrs = Pair{String,Any}[
             "CPXPARAM_Threads" => threads,
-            "CPXPARAM_TimeLimit" => time_limit,
             "CPXPARAM_MIP_Tolerances_MIPGap" => gap,
         ]
+        limited && push!(attrs, "CPXPARAM_TimeLimit" => time_limit)
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
@@ -325,9 +389,9 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
     elseif name == "cbc"
         attrs = Pair{String,Any}[
             "threads" => threads,
-            "seconds" => time_limit,
             "ratioGap" => gap,
         ]
+        limited && push!(attrs, "seconds" => time_limit)
         if !verbose
             push!(attrs, "logLevel" => 0)
         end
@@ -337,28 +401,29 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
         return optimizer_with_attributes(OptimizerType, attrs...)
     elseif name == "glpk"
         attrs = Pair{String,Any}[
-            "tm_lim" => round(Int, time_limit * 1000),  # GLPK uses milliseconds
             "msg_lev" => (verbose ? 3 : 0),  # GLP_MSG_OFF=0, GLP_MSG_ALL=3
         ]
+        # GLPK uses milliseconds
+        limited && push!(attrs, "tm_lim" => max(round(Int, time_limit * 1000), 1))
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
         return optimizer_with_attributes(OptimizerType, attrs...)
     elseif name == "ipopt"
         attrs = Pair{String,Any}[
-            "max_cpu_time" => time_limit,
             "tol" => gap,
             "print_level" => (verbose ? 5 : 0),
         ]
+        limited && push!(attrs, "max_cpu_time" => time_limit)
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
         return optimizer_with_attributes(OptimizerType, attrs...)
     elseif name == "clarabel"
         attrs = Pair{String,Any}[
-            "time_limit" => time_limit,
             "verbose" => verbose,
         ]
+        limited && push!(attrs, "time_limit" => time_limit)
         for (k, v) in solver_options
             push!(attrs, string(k) => v)
         end
@@ -380,6 +445,23 @@ function create_optimizer(; solver_name::String="highs", threads::Int=4,
 end
 
 """
+    has_time_limit(time_limit) -> Bool
+
+Whether `time_limit` (seconds) limits a solve: `solver.time_limit: 0` (or
+less, or `Inf`) means no limit.
+"""
+has_time_limit(time_limit::Real) = time_limit > 0 && isfinite(time_limit)
+
+"""
+    capped_time_limit(time_limit, cap) -> Float64
+
+The smaller of `time_limit` and `cap`; `cap` when `time_limit` sets no limit
+(`has_time_limit`). For solves ESFEX limits below `solver.time_limit`.
+"""
+capped_time_limit(time_limit::Real, cap::Real) =
+    Float64(has_time_limit(time_limit) ? min(time_limit, cap) : cap)
+
+"""
     version()
 
 Return the ESFEX.jl version string.
@@ -395,5 +477,8 @@ export solve_dcopf
 
 # ACOPF Benchmark
 export solve_acopf
+
+# Julia logs → the Python logger
+export CallbackLogger, set_log_callback, flush_log_queue
 
 end # module ESFEX

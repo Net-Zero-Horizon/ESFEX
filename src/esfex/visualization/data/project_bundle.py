@@ -9,9 +9,11 @@ and reservoir inflow (``reservoir_inflow_file``), plus optional external
 ``export_project`` serializes the GUI state, copies every referenced file into a
 staging tree (``demand/`` / ``availability/`` / ``inflow/`` / ``systems/``),
 rewrites the config paths to those relative locations, adds a ``manifest.json``
-and zips it into a single ``.esfexp`` file. ``import_project`` extracts it (with
-a Zip-Slip guard) into a project folder and returns the config path. The runner
-and GUI resolve the now-relative paths under the config directory.
+and zips it into a single ``.esfexp`` file. On request the project's remembered
+results file goes into ``results/`` and the config's ``_last_results`` key
+points at it. ``import_project`` extracts it (with a Zip-Slip guard) into a
+project folder and returns the config path. The runner and GUI resolve the
+now-relative paths under the config directory.
 
 Pure (no Qt) so it is unit-testable.
 """
@@ -41,6 +43,7 @@ class ExportReport:
     dest: str
     bundled: list[str] = field(default_factory=list)   # relative paths inside the zip
     missing: list[str] = field(default_factory=list)   # referenced paths not found on disk
+    results: str | None = None   # bundle-relative results file, if included
 
 
 class _Bundler:
@@ -94,25 +97,34 @@ class _Bundler:
         return rel
 
 
-def _rewrite_refs(cfg: dict, bundler: _Bundler) -> None:
-    """Walk a config dict, bundling every referenced file and rewriting its
-    path to the bundle-relative location (kept as-is when not found)."""
+def map_data_paths(cfg: dict, fn) -> None:
+    """Rewrite every data-file reference of a config dict in place.
+
+    ``fn(path, kind)`` is called for each non-empty path string, with ``kind``
+    one of ``"demand"``, ``"availability"`` or ``"inflow"``; it returns the
+    replacement, or ``None`` to keep the path. Covers ``demand_paths`` /
+    ``demand_path`` and the availability / inflow files of generators,
+    batteries and technologies — the files a runnable config needs besides
+    itself. Shared by the project bundler and the serializer's path rebasing.
+    """
     systems = cfg.get("systems")
     if not isinstance(systems, dict):
         return
+
+    def _apply(v, kind):
+        if isinstance(v, str) and v:
+            return fn(v, kind) or v
+        return v
+
     for sys in systems.values():
         if not isinstance(sys, dict):
             continue  # external system file refs are inlined by the GUI exporter
 
         dps = sys.get("demand_paths")
         if isinstance(dps, list):
-            sys["demand_paths"] = [
-                (bundler.add(p, "demand") or p) if isinstance(p, str) else p
-                for p in dps
-            ]
-        dp = sys.get("demand_path")
-        if isinstance(dp, str) and dp:
-            sys["demand_path"] = bundler.add(dp, "demand") or dp
+            sys["demand_paths"] = [_apply(p, "demand") for p in dps]
+        if "demand_path" in sys:
+            sys["demand_path"] = _apply(sys["demand_path"], "demand")
 
         for grp in ("generators", "batteries", "technologies",
                     "battery_technologies"):
@@ -123,13 +135,17 @@ def _rewrite_refs(cfg: dict, bundler: _Bundler) -> None:
                 if not isinstance(e, dict):
                     continue
                 for key in ("Availability", "availability_file"):
-                    v = e.get(key)
-                    if isinstance(v, str) and v:
-                        e[key] = bundler.add(v, "availability") or v
-                inflow = e.get("reservoir_inflow_file")
-                if isinstance(inflow, str) and inflow:
-                    e["reservoir_inflow_file"] = (
-                        bundler.add(inflow, "inflow") or inflow)
+                    if key in e:
+                        e[key] = _apply(e[key], "availability")
+                if "reservoir_inflow_file" in e:
+                    e["reservoir_inflow_file"] = _apply(
+                        e["reservoir_inflow_file"], "inflow")
+
+
+def _rewrite_refs(cfg: dict, bundler: _Bundler) -> None:
+    """Walk a config dict, bundling every referenced file and rewriting its
+    path to the bundle-relative location (kept as-is when not found)."""
+    map_data_paths(cfg, bundler.add)
 
 
 def export_project(
@@ -145,14 +161,20 @@ def export_project(
     project_name: str = "",
     src_base=None,
     geo_assets=None,
+    results_file=None,
 ) -> ExportReport:
     """Export the current GUI state + all referenced files to a ``.esfexp``.
 
     ``src_base`` is the directory relative source paths are resolved against
     (typically the loaded config's directory); absolute paths are used as-is.
+    ``results_file`` (absolute path of the project's results file) is bundled
+    as ``results/<name>`` and remembered by the config; ``None`` (the default)
+    exports no results and the config remembers none. Results are stored
+    uncompressed: they can be GBs and HDF5 compresses its own datasets.
     """
     import yaml
 
+    from esfex.visualization.data.project_results import RESULTS_DIRNAME, RESULTS_KEY
     from esfex.visualization.data.serializer import gui_state_to_yaml
 
     dest_path = Path(dest_path)
@@ -174,6 +196,15 @@ def export_project(
         bundler = _Bundler(staging, src_base)
         _rewrite_refs(cfg, bundler)
 
+        results_src = Path(results_file) if results_file else None
+        results_rel = None
+        if results_src is not None:
+            if results_src.is_file():
+                results_rel = f"{RESULTS_DIRNAME}/{results_src.name}"
+                cfg[RESULTS_KEY] = results_rel
+            else:
+                bundler.missing.append(str(results_src))
+
         with open(cfg_yaml, "w", encoding="utf-8") as f:
             yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
 
@@ -183,6 +214,7 @@ def export_project(
             "created_at": created_at,
             "files": bundler.bundled,
             "missing": bundler.missing,
+            "results": results_rel,
         }
         (staging / MANIFEST_NAME).write_text(
             json.dumps(manifest, indent=2), encoding="utf-8")
@@ -192,12 +224,16 @@ def export_project(
             for fp in sorted(staging.rglob("*")):
                 if fp.is_file():
                     zf.write(fp, fp.relative_to(staging).as_posix())
+            if results_rel is not None:
+                # Streamed from the source: no staging copy of a GB-sized file.
+                zf.write(results_src, results_rel, compress_type=zipfile.ZIP_STORED)
 
     if bundler.missing:
         logger.warning("export_project: %d referenced file(s) not found: %s",
                         len(bundler.missing), bundler.missing)
     return ExportReport(
-        dest=str(dest_path), bundled=bundler.bundled, missing=bundler.missing)
+        dest=str(dest_path), bundled=bundler.bundled, missing=bundler.missing,
+        results=results_rel)
 
 
 def _validate_zip_paths(zf: zipfile.ZipFile, target_root: Path) -> None:

@@ -1,19 +1,26 @@
 """Orchestrator for availability profile generation.
 
 Scans an ESFEX config for renewable generators, computes hourly capacity
-factor time series using weather data, and saves CSV files.
+factor time series using weather data, and saves CSV files on the model
+clock (see :mod:`esfex.utils.model_clock`).
 """
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import numpy as np
 
 from solarex import compute_solar_hourly_cf
 from windrex import compute_wind_hourly_cf
+
+from esfex.utils.model_clock import (
+    ModelClock,
+    resolve_model_clock,
+    weather_to_model_clock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +41,21 @@ def _guess_profile_type(fuel: str) -> str:
     return ""
 
 
+def config_model_clock(config: Any) -> ModelClock:
+    """The model clock for *config*: ``temporal.model_clock`` as set, or for
+    ``auto`` the zone with the most nodes among the simulated systems' node
+    coordinates (demand is not read here)."""
+    setting = getattr(getattr(config, "temporal", None), "model_clock", "auto")
+    coords: list[tuple[float, float]] = []
+    names = list(getattr(getattr(config, "meta_network", None), "systems", [])
+                 or config.systems)
+    for name in names:
+        system = config.systems.get(name)
+        c = _get_node_coordinates(system) if system is not None else None
+        coords.extend(c or [])
+    return resolve_model_clock(setting, coords)
+
+
 def generate_availability_profiles(
     config: Any,
     years: list[int],
@@ -44,8 +66,12 @@ def generate_availability_profiles(
     generator_filter: Optional[list[str]] = None,
     profile_type_map: Optional[dict[str, str]] = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
+    model_clock: Optional[Union[ModelClock, str]] = None,
 ) -> dict[str, Path]:
     """Generate hourly availability CSVs for all renewable generators.
+
+    The weather comes in UTC (NASA POWER: local solar time); each series is
+    moved onto the model clock before it is saved. The year wraps.
 
     Parameters
     ----------
@@ -72,6 +98,9 @@ def generate_availability_profiles(
         When *None* (CLI mode), profile type is guessed from the fuel name.
     progress_callback : callable or None
         ``callback(percent, message)`` for progress updates.
+    model_clock : ModelClock, str or None
+        Clock of the saved series. None: :func:`config_model_clock`. Record
+        the clock used in the case (``update_config_yaml(..., model_clock=)``).
 
     Returns
     -------
@@ -89,6 +118,14 @@ def generate_availability_profiles(
         _progress(progress_callback, 100, "No renewable generators found.")
         return {}
 
+    if model_clock is None:
+        clock = config_model_clock(config)
+    elif isinstance(model_clock, ModelClock):
+        clock = model_clock
+    else:
+        clock = resolve_model_clock(model_clock)
+    logger.info("Availability profiles on the model clock: %s", clock.label)
+
     total_steps = len(tasks) * len(years)
     step = 0
     result_map: dict[str, Path] = {}
@@ -105,13 +142,9 @@ def generate_availability_profiles(
             node_cfs: list[np.ndarray] = []
 
             for node_idx in range(num_nodes):
-                # Skip nodes without capacity or investment potential
-                has_capacity = gen.rated_power[node_idx] > 0
-                has_invest = (
-                    node_idx < len(gen.invest_max_power)
-                    and gen.invest_max_power[node_idx] > 0
-                )
-                if not has_capacity and not has_invest:
+                # Skip nodes without capacity (new capacity is built from
+                # technologies, which have their own profiles)
+                if gen.rated_power[node_idx] <= 0:
                     node_cfs.append(np.ones(_HOURS_PER_YEAR))
                     continue
 
@@ -145,7 +178,8 @@ def generate_availability_profiles(
                 else:
                     cf = np.ones(_HOURS_PER_YEAR)
 
-                node_cfs.append(cf)
+                node_cfs.append(weather_to_model_clock(
+                    cf, data_source, lon, clock, year))
 
             # Stack nodes into (8760, num_nodes) array
             year_array = np.column_stack(node_cfs)
@@ -260,6 +294,7 @@ def _progress(
 def update_config_yaml(
     config_path: Path,
     gen_file_map: dict[str, Path],
+    model_clock: Optional[Union[ModelClock, str]] = None,
 ) -> None:
     """Patch a YAML config file to set availability_file paths.
 
@@ -269,7 +304,12 @@ def update_config_yaml(
         Path to the ESFEX YAML configuration file.
     gen_file_map : dict[str, Path]
         Mapping of ``"system_name/gen_key"`` to CSV file path.
+    model_clock : ModelClock, str or None
+        When given, recorded as ``temporal.model_clock`` (the clock the
+        profiles are on).
     """
+    clock_zone = (model_clock.zone if isinstance(model_clock, ModelClock)
+                  else model_clock)
     try:
         from ruamel.yaml import YAML
         # `typ='safe'` refuses `!!python/object` and other tags that
@@ -295,6 +335,10 @@ def update_config_yaml(
             gens = sys_block.get("generators", {})
             gen_block = gens.get(gen_key, {})
             gen_block["Availability"] = str(rel_path)
+        if clock_zone:
+            if data.get("temporal") is None:
+                data["temporal"] = {}
+            data["temporal"]["model_clock"] = clock_zone
 
         with config_path.open("w", encoding="utf-8") as f:
             pyyaml.dump(data, f, default_flow_style=False, allow_unicode=True)
@@ -312,6 +356,10 @@ def update_config_yaml(
             )
         except (KeyError, TypeError):
             logger.warning("Could not update path for %s in YAML.", full_key)
+    if clock_zone:
+        if data.get("temporal") is None:
+            data["temporal"] = {}
+        data["temporal"]["model_clock"] = clock_zone
 
     yaml.dump(data, config_path)
     logger.info("Updated %s with availability file paths.", config_path)

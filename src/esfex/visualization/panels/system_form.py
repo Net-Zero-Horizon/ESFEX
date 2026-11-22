@@ -87,6 +87,30 @@ class SystemForm(QWidget):
         self._base_lcoe.editingFinished.connect(self._on_changed)
         gl.addRow(tr("system_form.base_lcoe"), self._base_lcoe)
 
+        # NPV-based retirement of existing units (development runs)
+        self._npv_return_rate = QDoubleSpinBox()
+        self._npv_return_rate.setRange(0, 1)
+        self._npv_return_rate.setDecimals(3)
+        self._npv_return_rate.setSingleStep(0.01)
+        self._npv_return_rate.editingFinished.connect(self._on_changed)
+        gl.addRow(tr("system_form.npv_return_rate"), self._npv_return_rate)
+
+        self._npv_retirement = QCheckBox(tr("common.enable"))
+        self._npv_retirement.setToolTip(tr("system_form.npv_retirement_tip"))
+        self._npv_retirement.toggled.connect(self._on_changed)
+        gl.addRow(tr("system_form.npv_retirement"), self._npv_retirement)
+
+        self._npv_max_iter = QSpinBox()
+        self._npv_max_iter.setRange(0, 100)
+        self._npv_max_iter.editingFinished.connect(self._on_changed)
+        gl.addRow(tr("system_form.npv_max_iterations"), self._npv_max_iter)
+
+        self._npv_threshold = QDoubleSpinBox()
+        self._npv_threshold.setRange(-1e15, 1e15)
+        self._npv_threshold.setDecimals(0)
+        self._npv_threshold.editingFinished.connect(self._on_changed)
+        gl.addRow(tr("system_form.npv_threshold"), self._npv_threshold)
+
         self._target_re = QDoubleSpinBox()
         self._target_re.setRange(0, 1)
         self._target_re.setDecimals(3)
@@ -108,15 +132,10 @@ class SystemForm(QWidget):
         self._max_increment.editingFinished.connect(self._on_changed)
         gl.addRow(tr("system_form.max_increment"), self._max_increment)
 
-        self._loss_demand_thr = QDoubleSpinBox()
-        self._loss_demand_thr.setRange(0, 1)
-        self._loss_demand_thr.setDecimals(4)
-        self._loss_demand_thr.editingFinished.connect(self._on_changed)
-        gl.addRow(tr("system_form.loss_demand_thr"), self._loss_demand_thr)
-
         self._inertia_limit_thr = QDoubleSpinBox()
-        self._inertia_limit_thr.setRange(0, 1)
-        self._inertia_limit_thr.setDecimals(4)
+        # Absolute MW·s (Σ output × H of online units), not a fraction.
+        self._inertia_limit_thr.setRange(0, 1e8)
+        self._inertia_limit_thr.setDecimals(1)
         self._inertia_limit_thr.editingFinished.connect(self._on_changed)
         gl.addRow(tr("system_form.inertia_limit_thr"), self._inertia_limit_thr)
 
@@ -143,29 +162,27 @@ class SystemForm(QWidget):
         cl.setContentsMargins(6, 6, 6, 6)
         cl.setSpacing(4)
 
-        self._max_annual_cost = QDoubleSpinBox()
-        self._max_annual_cost.setRange(0, 1e15)
-        self._max_annual_cost.setDecimals(0)
-        self._max_annual_cost.editingFinished.connect(self._on_changed)
-        cl.addRow(tr("system_form.max_annual_cost"), self._max_annual_cost)
+        self._max_annual_investment = QDoubleSpinBox()
+        self._max_annual_investment.setRange(0, 1e15)
+        self._max_annual_investment.setDecimals(0)
+        self._max_annual_investment.editingFinished.connect(self._on_changed)
+        cl.addRow(tr("system_form.max_annual_investment"), self._max_annual_investment)
 
-        self._max_npv_penalty = QDoubleSpinBox()
-        self._max_npv_penalty.setRange(0, 1e12)
-        self._max_npv_penalty.setDecimals(0)
-        self._max_npv_penalty.editingFinished.connect(self._on_changed)
-        cl.addRow(tr("system_form.max_npv_penalty"), self._max_npv_penalty)
+        self._budget_scope = QComboBox()
+        self._budget_scope.addItem(tr("system_form.budget_scope_investment"), "investment")
+        self._budget_scope.addItem(tr("system_form.budget_scope_total"), "total")
+        self._budget_scope.setToolTip(tr("system_form.budget_scope_tip"))
+        self._budget_scope.currentIndexChanged.connect(self._on_changed)
+        cl.addRow(tr("system_form.budget_scope"), self._budget_scope)
 
-        self._max_decom_cost = QDoubleSpinBox()
-        self._max_decom_cost.setRange(0, 1e12)
-        self._max_decom_cost.setDecimals(0)
-        self._max_decom_cost.editingFinished.connect(self._on_changed)
-        cl.addRow(tr("system_form.max_decom_cost"), self._max_decom_cost)
-
-        self._force_replacement = QDoubleSpinBox()
-        self._force_replacement.setRange(-1e12, 1e12)
-        self._force_replacement.setDecimals(0)
-        self._force_replacement.editingFinished.connect(self._on_changed)
-        cl.addRow(tr("system_form.force_replacement"), self._force_replacement)
+        # 0 = no operating budget (shown as "Off")
+        self._max_annual_operating = QDoubleSpinBox()
+        self._max_annual_operating.setRange(0, 1e15)
+        self._max_annual_operating.setDecimals(0)
+        self._max_annual_operating.setSpecialValueText(tr("system_form.operating_cost_off"))
+        self._max_annual_operating.setToolTip(tr("system_form.max_annual_operating_cost_tip"))
+        self._max_annual_operating.editingFinished.connect(self._on_changed)
+        cl.addRow(tr("system_form.max_annual_operating_cost"), self._max_annual_operating)
 
         self._life_ext_factor = QDoubleSpinBox()
         self._life_ext_factor.setRange(0, 10)
@@ -188,20 +205,14 @@ class SystemForm(QWidget):
             ("loss_of_reserve_dynamic", tr("system_form.penalty_reserve_dynamic"), 0, 1e9),
             ("loss_of_inertia", tr("system_form.penalty_inertia"), 0, 1e9),
             ("transfer_margin", tr("system_form.penalty_transfer"), 0, 1e9),
-            ("curtailment", tr("system_form.penalty_curtailment"), 0, 1e9),
             ("max_curtailment_ratio", tr("system_form.penalty_curtailment_ratio"), 0, 1),
             ("curtailment_cost", tr("system_form.penalty_curtailment_cost"), 0, 1e9),
-            ("curtailment_excess_penalty", tr("system_form.penalty_curtailment_excess"), 0, 1e9),
-            ("re_excess_penalty", tr("system_form.penalty_re_excess"), 0, 1e9),
             ("rooftop_curtailment", tr("system_form.penalty_rooftop_curt"), 0, 1e9),
             ("co2_cost", tr("system_form.penalty_co2_cost"), 0, 1e9),
             ("co2_budget_violation", tr("system_form.penalty_co2_budget"), 0, 1e9),
             ("fre_penetration_loss", tr("system_form.penalty_fre"), 0, 1e9),
             ("ev_loss", tr("system_form.penalty_ev"), 0, 1e9),
             ("loss_of_fuel_supply", tr("system_form.penalty_fuel_supply"), 0, 1e9),
-            ("coupling_slack_penalty", tr("system_form.penalty_coupling_slack"), 0, 1e9),
-            ("transport_congestion", tr("system_form.penalty_transport"), 0, 1e9),
-            ("storage_violation", tr("system_form.penalty_storage"), 0, 1e9),
             ("non_electric_demand_loss", tr("system_form.penalty_non_elec"), 0, 1e9),
         ]
         for field_name, label, lo, hi in penalty_fields:
@@ -245,10 +256,13 @@ class SystemForm(QWidget):
         self._demand_scale.setValue(s.demand_scale)
         self._discount_rate.setValue(s.discount_rate)
         self._base_lcoe.setValue(s.base_lcoe)
+        self._npv_return_rate.setValue(s.npv_annual_return_rate)
+        self._npv_retirement.setChecked(s.npv_retirement)
+        self._npv_max_iter.setValue(s.npv_retirement_max_iterations)
+        self._npv_threshold.setValue(s.npv_retirement_threshold)
         self._target_re.setValue(s.target_re_penetration)
         self._min_increment.setValue(s.min_annual_increment)
         self._max_increment.setValue(s.max_annual_increment)
-        self._loss_demand_thr.setValue(s.loss_demand_threshold)
         self._inertia_limit_thr.setValue(s.inertia_limit_threshold)
         self._sim_rooftop.setChecked(s.sim_rooftop)
 
@@ -257,10 +271,10 @@ class SystemForm(QWidget):
         self._co2_annual.setValue(s.co2_annual_budget)
 
         # Cost Limits
-        self._max_annual_cost.setValue(s.max_annual_system_cost)
-        self._max_npv_penalty.setValue(s.max_npv_penalty_per_mw)
-        self._max_decom_cost.setValue(s.max_decommission_cost_per_mw)
-        self._force_replacement.setValue(s.force_replacement)
+        self._max_annual_investment.setValue(s.max_annual_investment)
+        i = self._budget_scope.findData(s.budget_scope)
+        self._budget_scope.setCurrentIndex(max(i, 0))
+        self._max_annual_operating.setValue(s.max_annual_operating_cost or 0.0)
         self._life_ext_factor.setValue(s.life_extension_cost_factor)
 
         # Penalties
@@ -298,10 +312,13 @@ class SystemForm(QWidget):
         s.demand_scale = self._demand_scale.value()
         s.discount_rate = self._discount_rate.value()
         s.base_lcoe = self._base_lcoe.value()
+        s.npv_annual_return_rate = self._npv_return_rate.value()
+        s.npv_retirement = self._npv_retirement.isChecked()
+        s.npv_retirement_max_iterations = self._npv_max_iter.value()
+        s.npv_retirement_threshold = self._npv_threshold.value()
         s.target_re_penetration = self._target_re.value()
         s.min_annual_increment = self._min_increment.value()
         s.max_annual_increment = self._max_increment.value()
-        s.loss_demand_threshold = self._loss_demand_thr.value()
         s.inertia_limit_threshold = self._inertia_limit_thr.value()
         s.sim_rooftop = self._sim_rooftop.isChecked()
 
@@ -310,10 +327,9 @@ class SystemForm(QWidget):
         s.co2_annual_budget = self._co2_annual.value()
 
         # Cost Limits
-        s.max_annual_system_cost = self._max_annual_cost.value()
-        s.max_npv_penalty_per_mw = self._max_npv_penalty.value()
-        s.max_decommission_cost_per_mw = self._max_decom_cost.value()
-        s.force_replacement = self._force_replacement.value()
+        s.max_annual_investment = self._max_annual_investment.value()
+        s.budget_scope = self._budget_scope.currentData() or "investment"
+        s.max_annual_operating_cost = self._max_annual_operating.value() or None
         s.life_extension_cost_factor = self._life_ext_factor.value()
 
         # Penalties

@@ -17,9 +17,12 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from PySide6.QtCore import QThread, Signal
+
+if TYPE_CHECKING:
+    import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +59,6 @@ class DemandEstimationConfig:
     reference_profile: str = "tropical_island"
 
     # Climate parameters
-    hdd_base_temp: float = 18.0    # °C base for heating degree-hours
-    cdd_base_temp: float = 24.0    # °C base for cooling degree-hours
     heating_sensitivity: float = 0.0    # MW / degree-hour (tropical → 0)
     cooling_sensitivity: float = 0.02   # MW / degree-hour
 
@@ -114,7 +115,7 @@ class DemandEstimationConfig:
 
     # ML engine control
     force_archetype: bool = False   # True → skip ML even if model available
-    ml_engine: str = "auto"         # "auto" | "tft" | "xgboost"
+    ml_engine: str = "auto"         # "auto" | "xgboost" (the same model)
     # Prefer the spatial demand-DENSITY model (predicts MW/km² per node) over
     # the national-shape model when it is available. This is what makes the
     # per-node forecast genuinely spatial instead of ~total/num_nodes.
@@ -193,6 +194,15 @@ class MeteoData:
     be supplied via ``hdd_by_year`` / ``cdd_by_year`` dicts (year → hourly
     list).  If a simulation year is not found in those dicts, the base-year
     data is reused.
+
+    Hourly series are on local civil time, like the calendar features of the
+    shape-ML and archetype engines: index ``h`` is the local hour ``h`` of the
+    year and holds the weather of that instant. ``node_temperature_hourly``
+    (and the per-node HDD/CDD) give each node its own local time; the
+    system-level fields are on the local time at ``(lat, lon)``.
+    ``temperature_utc_hourly`` keeps the same weather on UTC hours (29 February
+    dropped) for the density model, whose hours are UTC.
+    :func:`meteo_from_utc_temperature` builds them from a UTC weather series.
     """
 
     temperature_hourly: list[float] = field(default_factory=list)   # hourly °C
@@ -207,13 +217,108 @@ class MeteoData:
     hdd_by_year: dict[int, list[float]] = field(default_factory=dict)
     cdd_by_year: dict[int, list[float]] = field(default_factory=dict)
 
-    # Per-node base-year climate (node_index → hourly list)
+    # Per-node base-year climate (node_index → hourly list), each node on its
+    # own local civil time
+    node_temperature_hourly: dict[int, list[float]] = field(default_factory=dict)
     node_hdd_hourly: dict[int, list[float]] = field(default_factory=dict)
     node_cdd_hourly: dict[int, list[float]] = field(default_factory=dict)
 
     # Per-node per-year overrides (node_index → {year → hourly list})
     node_hdd_by_year: dict[int, dict[int, list[float]]] = field(default_factory=dict)
     node_cdd_by_year: dict[int, dict[int, list[float]]] = field(default_factory=dict)
+
+    # The base weather year on UTC hours (8760, 29 February dropped), as
+    # fetched at (lat, lon): what the density model reads
+    temperature_utc_hourly: list[float] = field(default_factory=list)
+
+    def node_temperature(self, ni: int, hpy: int) -> Optional["np.ndarray"]:
+        """Base-year hourly temperature of node *ni* (its own local time), or
+        the system-level series; None when neither has *hpy* hours."""
+        import numpy as np
+
+        for series in (self.node_temperature_hourly.get(ni),
+                       self.temperature_hourly):
+            if series is not None and len(series) >= hpy:
+                return np.array(series[:hpy], dtype=np.float64)
+        return None
+
+    def node_temperature_utc(self, ni: int, hpy: int, lat: float, lon: float,
+                             year: Optional[int] = None) -> Optional["np.ndarray"]:
+        """Base-year hourly temperature of node *ni* on UTC hours.
+
+        The UTC series when the meteo data has one; else the node's local
+        series (:meth:`node_temperature`) moved from the time zone at
+        (*lat*, *lon*) to UTC (*year*, default ``self.year``, sets the
+        daylight-saving dates). None when there is no series.
+        """
+        import numpy as np
+
+        if len(self.temperature_utc_hourly) >= hpy:
+            return np.array(self.temperature_utc_hourly[:hpy], dtype=np.float64)
+        local = self.node_temperature(ni, hpy)
+        if local is None:
+            return None
+        if hpy != 8760:
+            return local
+        from esfex.utils.model_clock import node_time_zone, to_model_clock
+
+        zone = node_time_zone(round(float(lat), 4), round(float(lon), 4))
+        return to_model_clock(local, zone, "UTC", int(year or self.year or 2025))
+
+
+def meteo_from_utc_temperature(
+    temperature_utc,
+    year: int,
+    lat: float,
+    lon: float,
+    node_lats: list[float],
+    node_lons: list[float],
+    hdd_base: float = 18.0,
+    cdd_base: float = 24.0,
+) -> MeteoData:
+    """:class:`MeteoData` from one calendar year of UTC hourly temperature.
+
+    *temperature_utc* is the year *year* from 1 Jan 00:00 UTC (ERA5 via
+    Open-Meteo; ``None`` gaps allowed). The demand models read local civil
+    time, so each node gets the series on its own time zone (from its
+    coordinates, DST-aware): the temperature paired with local hour ``h`` is
+    that of the same instant. The system-level fields are on the time zone at
+    (*lat*, *lon*); ``temperature_utc_hourly`` keeps the UTC hours (gaps
+    filled), for the density model. 29 February is dropped, so every series
+    has 8760 hours.
+    """
+    import numpy as np
+
+    from esfex.utils.model_clock import node_time_zone, utc_year_on_local_time
+
+    values = list(temperature_utc)
+    if not any(v is not None and math.isfinite(v) for v in values):
+        return MeteoData(lat=lat, lon=lon, year=year)
+
+    by_zone: dict[str, tuple] = {}
+
+    def _local(la: float, lo: float) -> tuple:
+        zone = node_time_zone(round(float(la), 4), round(float(lo), 4))
+        if zone not in by_zone:
+            t = utc_year_on_local_time(values, zone, year)
+            by_zone[zone] = (t, np.maximum(hdd_base - t, 0.0),
+                             np.maximum(t - cdd_base, 0.0))
+        return by_zone[zone]
+
+    t_sys, hdd_sys, cdd_sys = _local(lat, lon)
+    meteo = MeteoData(
+        temperature_hourly=t_sys.tolist(),
+        hdd_hourly=hdd_sys.tolist(),
+        cdd_hourly=cdd_sys.tolist(),
+        lat=lat, lon=lon, year=year,
+        temperature_utc_hourly=utc_year_on_local_time(values, "UTC", year).tolist(),
+    )
+    for ni, (la, lo) in enumerate(zip(node_lats, node_lons)):
+        t, hdd, cdd = _local(la, lo)       # one array per zone, shared
+        meteo.node_temperature_hourly[ni] = t
+        meteo.node_hdd_hourly[ni] = hdd
+        meteo.node_cdd_hourly[ni] = cdd
+    return meteo
 
 
 @dataclass
@@ -678,9 +783,10 @@ class DemandProfileBuilder:
 
     Call `build()` to produce a `DemandEstimationResult`.
 
-    Two engines available:
-      - **ML** (default if trained model exists): XGBoost 3h envelope +
-        Fourier harmonic reconstruction to hourly.
+    Three engines, tried in this order:
+      - **Density** (default): spatial demand-density model per node.
+      - **ML** (fallback without the density model): the national XGBoost
+        model of hourly shape factors (``demand_ml``).
       - **Archetype** (fallback): hierarchical decomposition using
         regional archetype shapes + HDD/CDD corrections.
     """
@@ -698,17 +804,26 @@ class DemandProfileBuilder:
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> DemandEstimationResult:
         """Dispatch to density → shape-ML → archetype engines (in that order)."""
+        from esfex.data_assets import clear_failures
+        clear_failures()        # retry downloads that failed in an earlier run
         if not self._cfg.force_archetype:
             # Preferred: spatial demand-density model (per-node MW/km²).
-            if (getattr(self._cfg, "use_density_model", True)
-                    and self._cfg.ml_engine in ("auto", "xgboost", "density", "ml")
-                    and self._density_available()):
+            wants_density = (getattr(self._cfg, "use_density_model", True)
+                             and self._cfg.ml_engine in ("auto", "xgboost", "density", "ml"))
+            if wants_density and self._density_available():
                 try:
                     return self._build_density(proxy, macro, meteo, progress_callback)
                 except Exception as exc:
                     logger.warning(
                         "Density engine failed, falling back to shape-ML: %s", exc)
                     self._warnings.append(f"Density fallback: {exc}")
+            elif wants_density:
+                # The model ships with ESFEX, so this is a broken install (or
+                # xgboost missing): say so instead of degrading to a trend.
+                from esfex.paths import BUNDLED_MODELS_DIR
+                logger.warning("Demand-density model not usable from %s; "
+                               "using a fallback engine.", BUNDLED_MODELS_DIR)
+                self._warnings.append(f"Density model not found in {BUNDLED_MODELS_DIR}")
             # Fallback: national-shape ML model.
             if self._ml_available():
                 try:
@@ -758,11 +873,8 @@ class DemandProfileBuilder:
             self._cfg.num_nodes = num_nodes
         years = self._cfg.simulation_years
 
-        engine_map = {"auto": "auto", "tft": "tft", "xgboost": "xgboost", "ml": "xgboost"}
-        engine = engine_map.get(getattr(self._cfg, "ml_engine", "auto"), "auto")
-
-        emit(5, f"Loading ML model ({engine})…")
-        model = DemandMLModel.load_bundled(engine=engine)
+        emit(5, "Loading ML model (xgboost)…")
+        model = DemandMLModel.load_bundled(engine="xgboost")
 
         emit(10, "Computing spatial weights…")
         w_spatial = self._compute_spatial_weights(proxy)
@@ -772,34 +884,22 @@ class DemandProfileBuilder:
         base_annual_mwh = self._calibrate_annual(base_annual_mwh)
         annual_traj = self._compute_annual_trajectory(base_annual_mwh, macro, proxy)
 
-        # Hourly temperature
-        emit(25, "Preparing features…")
-        if len(meteo.temperature_hourly) >= hpy:
-            temp_h = np.array(meteo.temperature_hourly[:hpy], dtype=np.float64)
-        else:
-            temp_h = np.zeros(hpy, dtype=np.float64)
-
-        # Per-node ML inference (hourly, no Fourier)
+        # Per-node ML inference (hourly, no Fourier). The features are those
+        # the model was trained on: the static ones sampled at each node,
+        # degree hours on the model's own 18/24 °C bases.
         emit(35, f"ML inference ({model.engine})…")
         hourly_all = np.zeros((years, hpy, num_nodes), dtype=np.float64)
 
         for ni in range(num_nodes):
-            node_pop = macro.population * w_spatial[ni]
             lat = proxy.node_lats[ni] if ni < len(proxy.node_lats) else 0.0
             lon = proxy.node_lons[ni] if ni < len(proxy.node_lons) else 0.0
 
             features = build_hourly_features(
-                gdp_per_capita=macro.gdp_per_capita,
-                population=node_pop,
-                urbanization_pct=macro.urbanization_pct,
-                electricity_access_pct=macro.electricity_access_pct,
-                temperature_hourly=temp_h,
-                latitude=lat,
-                longitude=lon,
+                macro.country_iso,
+                meteo.node_temperature(ni, hpy),
+                lat, lon,
                 base_year=self._cfg.base_year,
                 simulation_years=years,
-                hdd_base=self._cfg.hdd_base_temp,
-                cdd_base=self._cfg.cdd_base_temp,
                 gdp_growth_by_year=macro.gdp_growth_by_year or None,
                 pop_growth_by_year=macro.pop_growth_by_year or None,
             )
@@ -854,18 +954,29 @@ class DemandProfileBuilder:
         """Per-CELL spatial pipeline (the authoritative use of the density
         model). For every 0.25° grid cell of the study region, predict a demand
         DENSITY (MW/km²) from the cell's own population/GDP density + climate +
-        calendar, multiply by the cell area, and SUM the cells of each node.
+        calendar, multiply by the cell's land in the region, and SUM the cells of
+        each node.
         The trajectory comes from re-running the model each year with that
         year's gridded SSP GDP (nearest 5-year step, no interpolation); the
         level is the raw model integral, optionally anchored to a national
-        demand override."""
+        demand override.
+
+        The model's hours are UTC (its temperature is read on UTC hours); each
+        node's result is then put on the node's local civil time, like the
+        other engines' forecasts."""
         import numpy as np
+
         from esfex.models.demand_density_ml import (
             DemandDensityModel,
-            region_cells_025,
-            sample_cells_socio,
-            predict_region_cell_demand,
             fetch_cmip6_node_temps,
+            place_predictors,
+            predict_region_cell_demand,
+            region_cells_025,
+        )
+        from esfex.utils.model_clock import (
+            node_time_zones,
+            to_local_time,
+            to_model_clock,
         )
 
         def emit(pct: int, msg: str) -> None:
@@ -888,7 +999,7 @@ class DemandProfileBuilder:
 
         # ── 0.25° grid cells over the study region ─────────────────
         emit(12, "Enumerating 0.25° grid cells…")
-        clats, clons, careas = region_cells_025(
+        clats, clons, cell_km2, cell_inside = region_cells_025(
             polygon_latlon=poly, bounds=bnds,
             node_lats=list(proxy.node_lats), node_lons=list(proxy.node_lons))
         if len(clats) == 0:
@@ -906,27 +1017,42 @@ class DemandProfileBuilder:
             for i in range(len(clats))
         ])
 
-        if len(meteo.temperature_hourly) >= hpy:
-            temp_h = np.array(meteo.temperature_hourly[:hpy], dtype=np.float64)
-        else:
-            temp_h = np.full(hpy, 20.0, dtype=np.float64)
+        # Each node's time zone: the model reads UTC hours, the forecast is
+        # returned on each node's local civil time.
+        node_coords = [
+            (float(proxy.node_lats[nd]), float(proxy.node_lons[nd]))
+            if nd < min(len(proxy.node_lats), len(proxy.node_lons))
+            else (float(meteo.lat), float(meteo.lon))
+            for nd in range(num_nodes)]
+        zones = node_time_zones(node_coords)
 
-        # ── Active cells (base-year population or GDP) ─────────────
+        # Base-year temperature per node on UTC hours, for the years CMIP6
+        # does not cover.
+        weather_year = int(meteo.year or base_year - 1)
+        node_temp = []
+        for nd in range(num_nodes):
+            t = meteo.node_temperature_utc(nd, hpy, *node_coords[nd], year=weather_year)
+            node_temp.append(t if t is not None
+                             else np.full(hpy, 20.0, dtype=np.float64))
+
+        # ── Cell population and land area (the article's grids) ────
+        # Densities are per km² of LAND and the predicted density covers the
+        # cell's land, as in the training table and the article's maps. A cell
+        # the region boundary crosses counts with the share of its land inside
+        # the region (coastal cells whole, border cells split).
         emit(20, "Sampling population & GDP per cell…")
-        from esfex.models.demand_density_ml import _ssp_gdp_total_nearest
-        log_pd0, _gd0, _gpc0, keep = sample_cells_socio(
-            clats, clons, careas, base_year, ssp)
-        idx = np.where(keep)[0]
+        from esfex.models.demand_density_ml import _ssp_gdp_total_nearest, land_overlap_weight
+        pop0, land0 = model.context.population_and_land(clats, clons)
+        cell_w = land_overlap_weight(cell_inside, land0, cell_km2)
+        idx = np.where((pop0 > 0) & (land0 > 0))[0]
         if idx.size == 0:
-            raise ValueError("No populated/economic cells in the study region.")
-        alat = clats[idx]; alon = clons[idx]; aarea = careas[idx]
-        a_node = cell_node[idx]
-        base_pd = np.power(10.0, log_pd0[idx])           # people/km² (spatial)
+            raise ValueError("No populated cells in the study region.")
 
-        # Per-cell GDP density (USD/km²) at each 5-year SSP step spanning the
-        # horizon → geometrically interpolated per year (GDP compounds; smooth
-        # so the model isn't whipped across XGBoost split thresholds by 5-yr
-        # jumps). GDP AND population are the demand-trend drivers.
+        # Per-cell GDP density (USD per km² of land) at each 5-year SSP step
+        # spanning the horizon → geometrically interpolated per year (GDP
+        # compounds; smooth so the model isn't whipped across XGBoost split
+        # thresholds by 5-yr jumps). GDP AND population are the demand-trend
+        # drivers.
         def _floor5(yv):
             return (yv // 5) * 5
         last_year = base_year + max(years - 1, 0)
@@ -935,16 +1061,16 @@ class DemandProfileBuilder:
         for st in step_years:
             st_c = min(max(st, 2025), 2100)
             arr = np.zeros(idx.size, dtype=np.float64)
-            for k in range(idx.size):
-                gt = _ssp_gdp_total_nearest(float(alat[k]), float(alon[k]), st_c, ssp)
-                arr[k] = (gt / max(float(aarea[k]), 1e-6)) if gt else 0.0
+            for k, c in enumerate(idx):
+                gt = _ssp_gdp_total_nearest(float(clats[c]), float(clons[c]), st_c, ssp)
+                arr[k] = (gt / land0[c]) if gt else 0.0
             gdp_step[st] = arr
 
         def _gdp_dens_year(yv):
             lo = _floor5(yv); hi = lo + 5
             a = gdp_step.get(lo); b = gdp_step.get(hi)
             if a is None and b is None:
-                return np.zeros(idx.size)
+                return np.zeros(len(next(iter(gdp_step.values()))))
             if a is None:
                 return b.copy()
             if b is None:
@@ -956,6 +1082,17 @@ class DemandProfileBuilder:
             only_b = (a <= 0) & (b > 0)
             out[only_b] = b[only_b]
             return out
+
+        # A cell has predictors where it has people, land and GDP (s08).
+        has_gdp = _gdp_dens_year(base_year) > 0
+        idx = idx[has_gdp]
+        gdp_step = {k: v[has_gdp] for k, v in gdp_step.items()}
+        if idx.size == 0:
+            raise ValueError("No populated cells with GDP in the study region.")
+        alat = clats[idx]; alon = clons[idx]; aarea = land0[idx]
+        a_land_w = aarea * cell_w[idx]                   # land of the cell in the region
+        a_node = cell_node[idx]
+        base_pd = pop0[idx] / aarea                      # people per km² of land
 
         # Population growth (SSP / UN WPP per-year rates from the projection
         # table) applied to the base spatial population.
@@ -975,10 +1112,32 @@ class DemandProfileBuilder:
         n_cmip6 = sum(1 for c in cmip6 if c)
         cells_by_node = [np.where(a_node == nd)[0] for nd in range(num_nodes)]
 
+        def _temp_utc(nd, yr):
+            """Node *nd*'s temperature of year *yr* on UTC hours: CMIP6 (a
+            curve on the node's local time) when it covers the year, else the
+            base weather year."""
+            ct = cmip6[nd]
+            if ct and yr in ct:
+                t = np.asarray(ct[yr], dtype=np.float64)
+                if len(t) == 8760:
+                    return to_model_clock(t, zones[nd], "UTC", yr)
+                return t
+            return node_temp[nd]
+
         # ── Per-year, per-node: per-cell density inference → node demand ──
         emit(32, "Per-cell density inference (per year, GDP+pop+CMIP6)…")
         hourly_all = np.zeros((years, hpy, num_nodes), dtype=np.float64)
         cell_annual = np.zeros(idx.size, dtype=np.float64)   # base-year MWh/cell
+        # Climate normals, electricity-use context and local-date offset of
+        # every cell: fixed over the horizon (present-day, as in the article).
+        places = {}
+        for nd in range(num_nodes):
+            a = cells_by_node[nd]
+            if a.size:
+                places[nd] = place_predictors(
+                    model, alat[a], alon[a], macro.country_iso,
+                    fallback_temperature_utc=_temp_utc(nd, base_year),
+                    fallback_year=base_year)
         for y in range(years):
             yr = base_year + y
             pd_y = np.maximum(base_pd * pop_factor[y], 1e-6)     # population evolves
@@ -989,19 +1148,26 @@ class DemandProfileBuilder:
                 a = cells_by_node[nd]
                 if a.size == 0:
                     continue
-                ct = cmip6[nd]
-                temp_ny = (np.asarray(ct[yr], dtype=np.float64)
-                           if (ct and yr in ct) else temp_h)
                 cell_mw = predict_region_cell_demand(
-                    model, alat[a], alon[a], aarea[a],
+                    model, alat[a], alon[a], a_land_w[a],
                     lpd[a], lgd[a], lgpc[a],
-                    temp_ny, yr, country_iso=macro.country_iso,
-                    hdd_base=self._cfg.hdd_base_temp, cdd_base=self._cfg.cdd_base_temp,
-                )                                            # (n_cells_nd, hpy) MW
+                    _temp_utc(nd, yr), yr, country_iso=macro.country_iso,
+                    places=places[nd],
+                )                                            # (n_cells_nd, hpy) MW, UTC
                 hourly_all[y, :, nd] = cell_mw.sum(axis=0)
                 if y == 0:
                     cell_annual[a] = cell_mw.sum(axis=1)     # MWh per cell, base yr
             emit(32 + int(58 * (y + 1) / years), f"Year {yr}: {idx.size} cells")
+
+        # UTC hours → each node's local civil time (the forecast's time base;
+        # the saved demand is then put on the model clock).
+        if hpy == 8760:
+            hourly_all = to_local_time(
+                hourly_all.reshape(-1, num_nodes), "UTC", zones, base_year,
+            ).reshape(years, hpy, num_nodes)
+        else:
+            logger.warning("Density forecast left on UTC hours: %d hours per "
+                           "year is not an 8760-h calendar.", hpy)
 
         # ── Anchoring: scale to a national override if set, else raw model ─
         base_gwh = float(hourly_all[0].sum()) / 1000.0
@@ -1043,6 +1209,13 @@ class DemandProfileBuilder:
         result.resolution_hours = self._cfg.resolution_hours
         self._demand_source = "ml_density"
         result.demand_source = self._demand_source
+        from esfex.data_assets import failures
+        failed = failures()
+        if failed:
+            # Cells without population or GDP get no demand: the forecast is
+            # still produced, but the user must know it is incomplete.
+            self._warnings.append(
+                "Data download failed: " + ", ".join(sorted(failed)))
         result.warnings = list(self._warnings)
         result.level0_annual_mwh_by_year = [
             float(hourly_all[y].sum()) for y in range(years)
@@ -1632,6 +1805,8 @@ class DemandProfileBuilder:
         """
         import numpy as np
 
+        from esfex.utils.temporal import year_row_dates
+
         years, _, n = monthly_mwh.shape
         month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
@@ -1662,18 +1837,17 @@ class DemandProfileBuilder:
         daily = np.zeros((years, 365, n), dtype=np.float64)
 
         for y in range(years):
-            # Determine day-of-week for January 1 of this year
+            # Real day of week of each of the 365 days (0=Mon; 29 Feb
+            # skipped in a leap year)
             cal_year = self._cfg.base_year + y
-            # Zeller-like: Jan 1 day-of-week (0=Mon)
-            import datetime
-            jan1_dow = datetime.date(cal_year, 1, 1).weekday()
+            dows = year_row_dates(cal_year)[::24].dayofweek
 
             day_idx = 0
             for m in range(12):
                 days_in_m = month_days[m]
                 # Compute raw weights for each day in this month
                 raw = np.array([
-                    dow_factor[(jan1_dow + day_idx + d) % 7]
+                    dow_factor[dows[day_idx + d]]
                     for d in range(days_in_m)
                 ])
                 raw_sum = raw.sum()
@@ -1705,6 +1879,8 @@ class DemandProfileBuilder:
         Returns shape (years, hours_per_year, num_nodes) in MW (power).
         """
         import numpy as np
+
+        from esfex.utils.temporal import year_row_dates
 
         hpy = self._cfg.hours_per_year
         years, _, n = daily_mwh.shape
@@ -1780,16 +1956,15 @@ class DemandProfileBuilder:
         month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
 
         for y in range(years):
-            import datetime
             cal_year = self._cfg.base_year + y
-            jan1_dow = datetime.date(cal_year, 1, 1).weekday()
+            dows = year_row_dates(cal_year)[::24].dayofweek
 
             day_idx = 0
             for m in range(12):
                 si = month_to_season[m]
                 for d in range(month_days[m]):
                     global_day = day_idx + d
-                    dow = (jan1_dow + global_day) % 7
+                    dow = dows[global_day]
                     if dow == 5:
                         di = 1
                     elif dow == 6:

@@ -1,6 +1,12 @@
 # REUSE specification (https://reuse.software) — declares copyright and
 # licensing for the whole tree without per-file SPDX headers, so the project
-# is REUSE-compliant. The license text lives in LICENSES/Apache-2.0.txt.
+# is REUSE-compliant. The license texts live in LICENSES/.
+#
+# Everything is the ESFEX authors' work under Apache-2.0 (first table), except
+# the files listed after it: third-party JavaScript libraries bundled with
+# Studio, and data files derived from third-party datasets. Those tables use
+# precedence = "override", so they replace the first one for their files.
+# DATA_SOURCES.md gives the attributions and citations the data terms ask for.
 version = 1
 
 [[annotations]]
@@ -8,3 +14,130 @@ path = "**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Manuel Soto Calvo and Han Soo Lee"
 SPDX-License-Identifier = "Apache-2.0"
+
+# ── Demand density model: data grids derived from third-party datasets ──────
+# t_mean, t_range: NEX-GDDP-CMIP6 (CC0-1.0); pop_2020: WorldPop 2020 1 km
+# counts (CC-BY-4.0); land_km2: Natural Earth 10m admin-0 (public domain);
+# hh_elec_share, bld_share_elec: UN Energy Balances via UNdata, Statistics
+# Canada table 25-10-0029-01 (Open Licence), EIA SEDS (US-Government public
+# domain). Aggregation to the 0.25 degree grid is the ESFEX authors' work.
+[[annotations]]
+path = "src/esfex/assets/models/demand_density_v2.grids.npz"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Manuel Soto Calvo and Han Soo Lee",
+    "NASA Earth Exchange, NEX-GDDP-CMIP6 (Thrasher et al. 2022), and the CMIP6 modelling groups",
+    "2018 WorldPop, University of Southampton, and CIESIN, Columbia University",
+    "Natural Earth",
+    "United Nations Statistics Division (UNdata)",
+    "Statistics Canada",
+    "U.S. Energy Information Administration",
+]
+SPDX-License-Identifier = "Apache-2.0 AND CC0-1.0 AND CC-BY-4.0 AND LicenseRef-NaturalEarth-PublicDomain AND LicenseRef-UNdata AND LicenseRef-StatCan-Open-Licence AND LicenseRef-US-Government-Public-Domain"
+
+# hh_elec_share, bld_share_elec by country (same energy statistics as above).
+[[annotations]]
+path = "src/esfex/assets/models/demand_density_v2.countries.csv"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Manuel Soto Calvo and Han Soo Lee",
+    "United Nations Statistics Division (UNdata)",
+    "Statistics Canada",
+    "U.S. Energy Information Administration",
+]
+SPDX-License-Identifier = "Apache-2.0 AND LicenseRef-UNdata AND LicenseRef-StatCan-Open-Licence AND LicenseRef-US-Government-Public-Domain"
+
+# Test fixture: predictors of Cuban cells derived from the same datasets as the
+# grids above, plus ERA5 temperature and gridded GDP (both CC-BY-4.0); not
+# shipped in the wheel.
+[[annotations]]
+path = "tests/fixtures/demand_density_v2_rows.csv"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Manuel Soto Calvo and Han Soo Lee",
+    "NASA Earth Exchange, NEX-GDDP-CMIP6 (Thrasher et al. 2022), and the CMIP6 modelling groups",
+    "2018 WorldPop, University of Southampton, and CIESIN, Columbia University",
+    "Copernicus Climate Change Service, ERA5 (hourly temperature)",
+    "Wang and Sun (2022), gridded GDP",
+    "Natural Earth",
+    "United Nations Statistics Division (UNdata)",
+    "Statistics Canada",
+    "U.S. Energy Information Administration",
+]
+SPDX-License-Identifier = "Apache-2.0 AND CC0-1.0 AND CC-BY-4.0 AND LicenseRef-NaturalEarth-PublicDomain AND LicenseRef-UNdata AND LicenseRef-StatCan-Open-Licence AND LicenseRef-US-Government-Public-Domain"
+
+# ── Studio base map: country outlines ────────────────────────────────────────
+# Country polygons and names of Natural Earth admin-0 (public domain).
+[[annotations]]
+path = "src/esfex/visualization/resources/world_countries.geojson"
+precedence = "override"
+SPDX-FileCopyrightText = "Natural Earth"
+SPDX-License-Identifier = "LicenseRef-NaturalEarth-PublicDomain"
+
+# ── Third-party JavaScript libraries bundled with Studio ─────────────────────
+# D3 7.9.0
+[[annotations]]
+path = "src/esfex/visualization/resources/d3.v7.min.js"
+precedence = "override"
+SPDX-FileCopyrightText = "2010-2023 Mike Bostock"
+SPDX-License-Identifier = "ISC"
+
+# elkjs (Eclipse Layout Kernel)
+[[annotations]]
+path = "src/esfex/visualization/resources/elk.bundled.js"
+precedence = "override"
+SPDX-FileCopyrightText = "2017 Kiel University and others"
+SPDX-License-Identifier = "EPL-2.0"
+
+# Leaflet 1.9.4, with its stylesheet and images
+[[annotations]]
+path = [
+    "src/esfex/visualization/resources/leaflet.js",
+    "src/esfex/visualization/resources/leaflet.css",
+    "src/esfex/visualization/resources/images/layers.png",
+    "src/esfex/visualization/resources/images/layers-2x.png",
+    "src/esfex/visualization/resources/images/marker-icon.png",
+    "src/esfex/visualization/resources/images/marker-icon-2x.png",
+    "src/esfex/visualization/resources/images/marker-shadow.png",
+]
+precedence = "override"
+SPDX-FileCopyrightText = ["2010-2023 Vladimir Agafonkin", "2010-2011 CloudMade"]
+SPDX-License-Identifier = "BSD-2-Clause"
+
+# Leaflet.draw 1.0.4, with its stylesheet and sprites
+[[annotations]]
+path = [
+    "src/esfex/visualization/resources/leaflet.draw.js",
+    "src/esfex/visualization/resources/leaflet.draw.css",
+    "src/esfex/visualization/resources/images/spritesheet.png",
+    "src/esfex/visualization/resources/images/spritesheet-2x.png",
+    "src/esfex/visualization/resources/images/spritesheet.svg",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "2012-2017 Jacob Toye, Jon West, Smartrak, Leaflet"
+SPDX-License-Identifier = "MIT"
+
+# plotly.js 2.35.2
+[[annotations]]
+path = [
+    "src/esfex/visualization/resources/plotly.min.js",
+    "src/esfex/visualization/resources/plotly.min.js.LICENSE.txt",
+]
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2012-2024 Plotly, Inc.",
+    "The authors of the bundled dependencies listed in plotly.min.js.LICENSE.txt (polybooljs, object-assign, buffer, is-buffer, pad-left, repeat-string, native-promise-only, ieee754, safe-buffer, MapLibre GL JS)",
+]
+# plotly.js is MIT; its bundle includes BSD-3-Clause code (ieee754, MapLibre GL JS).
+SPDX-License-Identifier = "MIT AND BSD-3-Clause"
+
+# xterm.js and its fit add-on
+[[annotations]]
+path = [
+    "src/esfex/visualization/resources/xterm.js",
+    "src/esfex/visualization/resources/xterm.css",
+    "src/esfex/visualization/resources/xterm-addon-fit.js",
+]
+precedence = "override"
+SPDX-FileCopyrightText = ["2014 The xterm.js authors", "2012-2013 Christopher Jeffrey"]
+SPDX-License-Identifier = "MIT"

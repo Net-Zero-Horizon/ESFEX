@@ -30,17 +30,17 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { _ucClearPlot(); showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { _ucClearPlot(); showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            _ucClearPlot(); showStatus(data && data.error ? data.error : "No data", false);
+            _ucClearPlot(); showStatus(data && data.error ? data.error : _t("web.common.no_data"), false);
             return;
         }
         if (!data.hours || data.hours.length === 0) {
-            _ucClearPlot(); showStatus("No price data", false);
+            _ucClearPlot(); showStatus(_t("web.charts.uc_hourly_price.no_data"), false);
             return;
         }
         try { renderProfile(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 
@@ -65,50 +65,43 @@ function renderProfile(data) {
         && data.node_max.length === x.length) {
         traces.push({
             x: x, y: data.node_min,
-            type: "scatter", mode: "lines", name: "Nodal min",
+            type: "scatter", mode: "lines", name: _t("web.charts.uc_hourly_price.nodal_min"),
             line: { color: "rgba(52, 152, 219, 0)", width: 0 },
             showlegend: false,
             hoverinfo: "skip",
         });
         traces.push({
             x: x, y: data.node_max,
-            type: "scatter", mode: "lines", name: "Nodal range",
+            type: "scatter", mode: "lines", name: _t("web.charts.uc_hourly_price.nodal_range"),
             line: { color: "rgba(52, 152, 219, 0)", width: 0 },
             fill: "tonexty",
             fillcolor: "rgba(52, 152, 219, 0.18)",
-            hovertemplate: "Hour %{x}: max %{y:,.1f} USD/MWh<extra></extra>",
+            hovertemplate: _t("web.charts.uc_hourly_price.hover_max") + "<extra></extra>",
         });
     }
 
     // System-average line — the headline series.
     traces.push({
         x: x, y: data.system_avg,
-        type: "scatter", mode: "lines", name: "System average",
+        type: "scatter", mode: "lines", name: _t("web.charts.uc_hourly_price.system_average"),
         line: { color: "#2C3E50", width: 2 },
-        hovertemplate: "Hour %{x}: %{y:,.2f} USD/MWh<extra></extra>",
+        hovertemplate: _t("web.charts.uc_hourly_price.hover_avg") + "<extra></extra>",
     });
 
-    const title = `Hourly Electricity Price — Year ${data.year}`;
     const layout = {
-        margin: { t: 90, r: 30, b: 60, l: 70 },
+        margin: { t: 60, r: 30, b: 60, l: 70 },
         showlegend: true,
-        annotations: [
-            { text: "<b>" + title + "</b>",
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.14, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
-        ],
         legend: {
             orientation: "h",
             x: 0.5, xanchor: "center",
-            y: 1.06, yanchor: "bottom",
+            y: 1.02, yanchor: "bottom",
             font: { size: 10 },
             bgcolor: "rgba(255,255,255,0.85)",
             bordercolor: "rgba(0,0,0,0.1)",
             borderwidth: 1,
         },
-        xaxis: { title: "<b>Hour</b>" },
-        yaxis: { title: "<b>LMP (USD/MWh)</b>", rangemode: "tozero" },
+        xaxis: { title: "<b>" + _t("web.charts.uc_hourly_price.axis_hour") + "</b>" },
+        yaxis: { title: "<b>" + _t("web.charts.uc_hourly_price.axis_lmp") + "</b>", rangemode: "tozero" },
     };
     Plotly.purge("plot");
     Plotly.newPlot("plot", traces, layout, {

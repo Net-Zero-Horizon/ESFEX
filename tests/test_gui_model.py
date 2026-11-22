@@ -300,8 +300,9 @@ class TestGuiGeneratorInstance:
         assert g.eff_at_min == 0.25
         assert g.min_up == 0
         assert g.min_down == 0
-        assert g.ramp_up == 0.0
-        assert g.ramp_down == 0.0
+        # 0 used to freeze the unit's output; 1.0 = full capacity per hour
+        assert g.ramp_up == 1.0
+        assert g.ramp_down == 1.0
         assert g.inertia == 0.0
         assert g.start_up_cost == 0.0
         assert g.decommissioning_cost == 0.0
@@ -359,17 +360,14 @@ class TestGuiBatteryInstance:
         assert b.life_time == 20
         assert b.initial_age == 0
         assert b.degradation_rate == 0.0
-        assert b.min_power == 0.0
-        assert b.min_up == 0
-        assert b.min_down == 0
         assert b.ramp_up == 1.0
         assert b.ramp_down == 1.0
-        assert b.eff_at_rated == 0.9
-        assert b.eff_at_min == 0.9
         assert b.inertia == 0.0
-        assert b.start_up_cost == 0.0
-        assert b.fuel_cost == 0.0
         assert b.fixed_cost == 0.0
+        # Generator fields with no meaning for storage are gone
+        for gone in ("min_power", "min_up", "min_down", "eff_at_rated",
+                     "eff_at_min", "start_up_cost", "fuel_cost"):
+            assert not hasattr(b, gone)
         assert b.maintenance_cost == 0.0
         assert b.throughput_degradation_cost == 0.0
         assert b.decommissioning_cost == 0.0
@@ -405,7 +403,6 @@ class TestGuiTransmissionLine:
         assert tl.from_endpoint is None
         assert tl.to_endpoint is None
         assert tl.length_km is None
-        assert tl.base_impedance is None
         assert tl.reactance_per_km is None
         assert tl.reactance_pu is None
         assert tl.resistance_pu is None
@@ -714,12 +711,12 @@ class TestGuiSystemSettings:
         assert ss.target_re_penetration == 1.0
         assert ss.min_annual_increment == 0.01
         assert ss.max_annual_increment == 0.10
-        assert ss.max_annual_system_cost == 20e9
-        assert ss.max_npv_penalty_per_mw == 1e6
-        assert ss.max_decommission_cost_per_mw == 5e5
-        assert ss.force_replacement == -5e5
+        assert ss.max_annual_investment == 20e9
+        assert ss.max_annual_operating_cost is None
+        assert ss.budget_scope == "investment"
+        assert not hasattr(ss, "max_npv_penalty_per_mw")
+        assert not hasattr(ss, "force_replacement")
         assert ss.life_extension_cost_factor == 0.20
-        assert ss.loss_demand_threshold == 0.05
         assert ss.inertia_limit_threshold == 0.1
         assert ss.sim_rooftop is False
         assert ss.co2_budget_enabled is True
@@ -747,16 +744,13 @@ class TestGuiPenalties:
         assert p.loss_of_reserve_dynamic == 100.0
         assert p.loss_of_inertia == 200.0
         assert p.transfer_margin == 100.0
-        assert p.curtailment == 100.0
         assert p.max_curtailment_ratio == 0.05
         assert p.rooftop_curtailment == 5.0
         assert p.co2_cost == 10.0
         assert p.co2_budget_violation == 500.0
         assert p.fre_penetration_loss == 100.0
-        assert p.ev_loss == 10.0
+        assert p.ev_loss == p.loss_of_load
         assert p.loss_of_fuel_supply == 100.0
-        assert p.transport_congestion == 100.0
-        assert p.storage_violation == 100.0
         assert p.non_electric_demand_loss == 100.0
         # Criticality penalties (single-digit relative weights, not absolute $).
         assert p.criticality_critical == 3.0
@@ -833,15 +827,11 @@ class TestGuiElectrolyzerInstance:
     def test_defaults(self):
         e = self._make()
         assert e.fuel == "Hydrogen"
-        assert e.technology == "PEM"
         assert e.technology_id is None
         assert e.bus == "bus_0"
         assert e.node == 0
         assert e.life_time == 20
-        assert e.initial_age == 0
-        assert e.degradation_rate == 0.01
         assert e.rated_power == 0.0
-        assert e.min_power == 0.1
         assert e.ramp_up == 0.5
         assert e.ramp_down == 0.5
         assert e.eff_at_rated == 0.65
@@ -852,9 +842,11 @@ class TestGuiElectrolyzerInstance:
         assert e.water_cost == 0.001
         assert isinstance(e.style, VisualStyle)
 
-    def test_alkaline_type(self):
-        e = self._make(technology="Alkaline")
-        assert e.technology == "Alkaline"
+    def test_removed_fields(self):
+        # technology, min_power, initial_age and degradation_rate had no effect
+        e = self._make()
+        for f in ("technology", "min_power", "initial_age", "degradation_rate"):
+            assert not hasattr(e, f)
 
 
 # ======================================================================
@@ -924,9 +916,6 @@ class TestGuiRooftopSolar:
         assert rs.simulation_seed == 42
         assert rs.performance_ratio == 0.75
         assert rs.degradation_rate == 0.005
-        assert rs.cost_per_kw == 1200.0
-        assert rs.cost_reduction_rate == 0.08
-        assert rs.o_and_m_cost == 20.0
         assert rs.base_year == 2025
         assert rs.target_year == 2050
         assert rs.systems_per_node == []
@@ -957,7 +946,6 @@ class TestGuiDemandSector:
         assert ds.flexibility_ratio == 0.0
         assert ds.criticality == "medium"
         assert ds.delay_tolerance == 0
-        assert ds.price_sensitivity == 0.0
 
     def test_flexible_sector(self):
         ds = GuiDemandSector(
@@ -978,12 +966,9 @@ class TestGuiNonElectricDemand:
         assert ned.demand_id == "heat_gas"
         assert ned.fuel == "Gas"
         assert ned.unit == "MMBTU"
-        assert ned.is_flexible is False
-        assert ned.flexibility_ratio == 0.0
-        assert ned.criticality == "medium"
-        assert ned.delay_tolerance == 0
-        assert ned.price_sensitivity == 0.0
         assert ned.demand == []
+        # A fixed annual demand: the primary-energy model has no flexibility
+        assert not hasattr(ned, "is_flexible")
 
     def test_with_demand(self):
         ned = GuiNonElectricDemand(
@@ -1050,7 +1035,10 @@ class TestNormalizePx:
 
 
 class TestGuiGlobalSettings:
-    def test_defaults(self):
+    def test_defaults(self, monkeypatch):
+        # Shipped defaults, not whatever the developer's own preferences file holds.
+        import esfex.visualization.preferences as prefs
+        monkeypatch.setattr(prefs, "load_preferences", lambda: {})
         gs = GuiGlobalSettings()
         assert gs.simulation_mode == "development"
         assert gs.unit_commitment_hours == 24
@@ -1059,7 +1047,7 @@ class TestGuiGlobalSettings:
         # Temporal
         assert gs.resolution_hours == 6
         assert gs.rolling_horizon_hours == 48
-        assert gs.overlap_hours == 0
+        assert gs.overlap_hours == 24
         assert gs.investment_resolution == 8760  # HOURS_STD_YEAR
         assert gs.primary_energy_resolution == 24
         assert gs.use_rolling_horizon is True
@@ -1069,11 +1057,11 @@ class TestGuiGlobalSettings:
         assert gs.solver_time_limit == 3600
         assert gs.solver_gap == 0.001
         assert gs.solver_verbose is False
-        assert gs.solver_scale_constraints is False
         assert gs.solver_specific_options == {}
         # N1
         assert gs.n1_enabled is False
-        assert gs.n1_apply_to_modes == ["unit_commitment"]
+        # Same default as N1SecurityConfig.apply_to_modes (was UC only).
+        assert gs.n1_apply_to_modes == ["development", "unit_commitment"]
         assert gs.n1_transmission_enabled is True
         assert gs.n1_transmission_reserve_factor == 0.70
         assert gs.n1_critical_line_threshold == 0.0
@@ -1251,8 +1239,8 @@ class TestGuiInvestmentEntry:
         assert ie.target_key == ""
         assert ie.technology_id == ""
         assert ie.node_data == []
-        assert ie.invest_cost_energy == {}
-        assert ie.invest_max_capacity == {}
+        # The battery energy columns went with the dispatch's own investment
+        assert not hasattr(ie, "invest_cost_energy")
 
     def test_with_node_data(self):
         nd = [

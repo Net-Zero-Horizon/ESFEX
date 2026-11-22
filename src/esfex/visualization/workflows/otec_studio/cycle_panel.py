@@ -32,19 +32,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from esfex.visualization.i18n import tr
 from esfex.visualization.workflows.otec_studio import cycles as cyc
 from esfex.visualization.workflows.otec_studio.project import StudioConfig
 from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
 
-_CYCLES = [
-    ("rankine_closed", "Rankine — Closed"),
-    ("rankine_open", "Rankine — Open (flash)"),
-    ("rankine_hybrid", "Rankine — Hybrid"),
-    ("kalina", "Kalina (NH₃-H₂O)"),
-    ("uehara", "Uehara (two-stage)"),
-]
+# Cycle / fluid ids; their labels are ``otec_studio.cycle_<id>`` and
+# ``otec_studio.fluid_<id>`` (also used by the scenario comparison table).
+_CYCLES = ["rankine_closed", "rankine_open", "rankine_hybrid", "kalina", "uehara"]
 _FLUIDS = ["ammonia", "R134a", "R245fa", "propane", "isobutane"]
 
 
@@ -65,20 +62,21 @@ class CyclePanel(QWidget):
         root = QHBoxLayout(self)
 
         # ── Left: controls ──
-        ctrl = QGroupBox("Cycle & operating point")
+        ctrl = QGroupBox(tr("otec_studio.cycle_group"))
         form = QFormLayout(ctrl)
         ctrl.setMaximumWidth(320)
 
         self._combo_cycle = QComboBox()
-        for key, label in _CYCLES:
-            self._combo_cycle.addItem(label, key)
+        for key in _CYCLES:
+            self._combo_cycle.addItem(tr(f"otec_studio.cycle_{key}"), key)
         self._combo_cycle.currentIndexChanged.connect(self._on_cycle_changed)
-        form.addRow("Cycle:", self._combo_cycle)
+        form.addRow(tr("otec_studio.cycle_label"), self._combo_cycle)
 
         self._combo_fluid = QComboBox()
-        self._combo_fluid.addItems(_FLUIDS)
+        for key in _FLUIDS:
+            self._combo_fluid.addItem(tr(f"otec_studio.fluid_{key}"), key)
         self._combo_fluid.currentIndexChanged.connect(self._recompute)
-        form.addRow("Working fluid:", self._combo_fluid)
+        form.addRow(tr("otec_studio.cycle_working_fluid"), self._combo_fluid)
 
         self._spin_x = QDoubleSpinBox()
         self._spin_x.setRange(0.50, 0.95)
@@ -86,18 +84,15 @@ class CyclePanel(QWidget):
         self._spin_x.setDecimals(2)
         self._spin_x.setValue(0.70)
         self._spin_x.valueChanged.connect(self._recompute)
-        form.addRow("NH₃ concentration:", self._spin_x)
+        form.addRow(tr("otec_studio.cycle_nh3_concentration"), self._spin_x)
 
         self._spin_tevap = self._temp_spin(25.0)
         self._spin_tcond = self._temp_spin(8.0)
-        form.addRow("T evaporator:", self._spin_tevap)
-        form.addRow("T condenser:", self._spin_tcond)
+        form.addRow(tr("otec_studio.cycle_t_evaporator"), self._spin_tevap)
+        form.addRow(tr("otec_studio.cycle_t_condenser"), self._spin_tcond)
 
-        self._btn_apply = QPushButton("Apply to scenario config")
-        self._btn_apply.setToolTip(
-            "Push cycle / fluid / NH₃ concentration into the active scenario "
-            "so the Optimization panel uses them"
-        )
+        self._btn_apply = QPushButton(tr("otec_studio.cycle_apply"))
+        self._btn_apply.setToolTip(tr("otec_studio.cycle_apply_tip"))
         self._btn_apply.clicked.connect(self._apply_to_scenario)
         form.addRow(self._btn_apply)
 
@@ -114,20 +109,21 @@ class CyclePanel(QWidget):
         self._fig_ts = Figure(figsize=(5, 4), dpi=100, layout="constrained")
         self._canvas_ts = FigureCanvasQTAgg(self._fig_ts)
         self._ax_ts = self._fig_ts.add_subplot(111)
-        self._tabs.addTab(self._canvas_ts, "T-s diagram")
+        self._tabs.addTab(self._canvas_ts, tr("otec_studio.cycle_ts_diagram"))
 
         self._fig_ph = Figure(figsize=(5, 4), dpi=100, layout="constrained")
         self._canvas_ph = FigureCanvasQTAgg(self._fig_ph)
         self._ax_ph = self._fig_ph.add_subplot(111)
-        self._tabs.addTab(self._canvas_ph, "P-h diagram")
+        self._tabs.addTab(self._canvas_ph, tr("otec_studio.cycle_ph_diagram"))
 
         self._table = QTableWidget()
         self._table.setColumnCount(2)
-        self._table.setHorizontalHeaderLabels(["State", "Value"])
+        self._table.setHorizontalHeaderLabels(
+            [tr("otec_studio.cycle_col_state"), tr("otec_studio.cycle_col_value")])
         self._table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
         )
-        self._tabs.addTab(self._table, "State table")
+        self._tabs.addTab(self._table, tr("otec_studio.cycle_state_table"))
 
         root.addWidget(self._tabs, 1)
 
@@ -148,7 +144,7 @@ class CyclePanel(QWidget):
     def _current_config(self) -> StudioConfig:
         return StudioConfig(
             cycle_type=self._combo_cycle.currentData(),
-            fluid_type=self._combo_fluid.currentText(),
+            fluid_type=self._combo_fluid.currentData(),
             ammonia_concentration=self._spin_x.value(),
         )
 
@@ -161,7 +157,7 @@ class CyclePanel(QWidget):
         idx = self._combo_cycle.findData(cfg.cycle_type)
         if idx >= 0:
             self._combo_cycle.setCurrentIndex(idx)
-        fidx = self._combo_fluid.findText(cfg.fluid_type)
+        fidx = self._combo_fluid.findData(cfg.fluid_type)
         if fidx >= 0:
             self._combo_fluid.setCurrentIndex(fidx)
         self._spin_x.setValue(cfg.ammonia_concentration)
@@ -184,13 +180,10 @@ class CyclePanel(QWidget):
             return
         self._project.update_active_config(
             cycle_type=self._combo_cycle.currentData(),
-            fluid_type=self._combo_fluid.currentText(),
+            fluid_type=self._combo_fluid.currentData(),
             ammonia_concentration=self._spin_x.value(),
         )
-        self._lbl_info.setText(
-            "Applied to scenario — Optimization will use this cycle "
-            "(cached results were invalidated)."
-        )
+        self._lbl_info.setText(tr("otec_studio.cycle_applied"))
 
     # ------------------------------------------------------------------
     # Compute + draw
@@ -201,12 +194,12 @@ class CyclePanel(QWidget):
         t_evap = self._spin_tevap.value()
         t_cond = self._spin_tcond.value()
         if t_evap <= t_cond:
-            self._lbl_info.setText("T evaporator must exceed T condenser.")
+            self._lbl_info.setText(tr("otec_studio.cycle_t_order_error"))
             return
         try:
             out = cyc.compute_states(cfg, t_evap, t_cond)
         except Exception as exc:  # noqa: BLE001
-            self._lbl_info.setText(f"Cycle error: {exc}")
+            self._lbl_info.setText(tr("otec_studio.cycle_error", error=exc))
             return
 
         mf = out["mass_flow"]
@@ -215,15 +208,14 @@ class CyclePanel(QWidget):
         elif isinstance(mf, (int, float)):
             mf_txt = f"{mf:,.1f} kg/s"
         else:
-            mf_txt = "n/a"
+            mf_txt = tr("otec_studio.not_available")
         # Carnot ceiling for this operating point — the theoretical max any
         # cycle could reach between these reservoirs (OTEC is a few %).
         from esfex.visualization.workflows.otec_studio import engineering as eng
         carnot = eng.carnot_efficiency(t_evap, t_cond)
-        self._lbl_info.setText(
-            f"Mass flow: {mf_txt}  ·  Carnot ceiling (T_evap/T_cond): "
-            f"{carnot * 100:.2f}%"
-        )
+        self._lbl_info.setText(tr(
+            "otec_studio.cycle_info", mass_flow=mf_txt,
+            carnot=f"{carnot * 100:.2f}"))
 
         self._draw_diagrams(cfg, out, t_evap, t_cond)
         self._fill_table(out["states"])
@@ -239,21 +231,24 @@ class CyclePanel(QWidget):
         ax.clear()
         ax.plot(dome["s_liq"], dome["T"], color="#2980b9", lw=1)
         ax.plot(dome["s_vap"], dome["T"], color="#2980b9", lw=1,
-                label="saturation dome")
+                label=tr("otec_studio.cycle_saturation_dome"))
         if is_loop:
             s, T = cyc.closed_loop_ts(states, t_evap, t_cond, fluid)
-            ax.plot(s, T, "o-", color="#e74c3c", ms=3, lw=1.5, label="cycle")
+            ax.plot(s, T, "o-", color="#e74c3c", ms=3, lw=1.5,
+                    label=tr("otec_studio.cycle_legend_cycle"))
             for i, key in enumerate(("1", "2", "3", "4"), start=0):
                 sp = states[f"s_{key}"]
                 tp = t_evap if key == "3" else t_cond
                 ax.annotate(key, (sp, tp), fontsize=9, fontweight="bold",
                             color="#c0392b")
         else:
-            ax.text(0.5, 0.06, f"{cfg.cycle_type}: states in table tab",
+            ax.text(0.5, 0.06, tr("otec_studio.cycle_states_in_table",
+                                  cycle=self._combo_cycle.currentText()),
                     transform=ax.transAxes, ha="center", fontsize=8, color="#888")
-        ax.set_xlabel("Entropy s (kJ/kg·K)")
-        ax.set_ylabel("Temperature T (°C)")
-        ax.set_title("T-s diagram", fontsize=11, fontweight="bold")
+        ax.set_xlabel(tr("otec_studio.cycle_axis_entropy"))
+        ax.set_ylabel(tr("otec_studio.cycle_axis_temperature"))
+        ax.set_title(tr("otec_studio.cycle_ts_diagram"), fontsize=11,
+                     fontweight="bold")
         ax.legend(fontsize=8)
         ax.grid(alpha=0.3)
         self._canvas_ts.draw()
@@ -263,17 +258,20 @@ class CyclePanel(QWidget):
         ax2.clear()
         ax2.plot(dome["h_liq"], dome["p"], color="#2980b9", lw=1)
         ax2.plot(dome["h_vap"], dome["p"], color="#2980b9", lw=1,
-                 label="saturation dome")
+                 label=tr("otec_studio.cycle_saturation_dome"))
         if is_loop:
             h, p = cyc.closed_loop_ph(states, out["p_evap"], out["p_cond"])
-            ax2.plot(h, p, "o-", color="#e74c3c", ms=3, lw=1.5, label="cycle")
+            ax2.plot(h, p, "o-", color="#e74c3c", ms=3, lw=1.5,
+                     label=tr("otec_studio.cycle_legend_cycle"))
         else:
-            ax2.text(0.5, 0.06, f"{cfg.cycle_type}: states in table tab",
+            ax2.text(0.5, 0.06, tr("otec_studio.cycle_states_in_table",
+                                   cycle=self._combo_cycle.currentText()),
                      transform=ax2.transAxes, ha="center", fontsize=8, color="#888")
         ax2.set_yscale("log")
-        ax2.set_xlabel("Enthalpy h (kJ/kg)")
-        ax2.set_ylabel("Pressure p (bar, log)")
-        ax2.set_title("P-h diagram", fontsize=11, fontweight="bold")
+        ax2.set_xlabel(tr("otec_studio.cycle_axis_enthalpy"))
+        ax2.set_ylabel(tr("otec_studio.cycle_axis_pressure"))
+        ax2.set_title(tr("otec_studio.cycle_ph_diagram"), fontsize=11,
+                      fontweight="bold")
         ax2.legend(fontsize=8)
         ax2.grid(alpha=0.3, which="both")
         self._canvas_ph.draw()

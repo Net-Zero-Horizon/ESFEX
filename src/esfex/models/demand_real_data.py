@@ -19,6 +19,7 @@ Sources:
 
 from __future__ import annotations
 
+import calendar
 import logging
 import time
 from pathlib import Path
@@ -26,14 +27,124 @@ from typing import Any, Optional
 
 import numpy as np
 
+from esfex.utils.temporal import drop_leap_days
+
 logger = logging.getLogger(__name__)
 
 # Standard output format: {iso3: {year: ndarray(8760)}} in MW
 RealLoadData = dict[str, dict[int, np.ndarray]]
 
+# Time base of the arrays each fetcher returns: row h of year Y is the hour
+# h after 1 Jan 00:00 of Y in this zone. "UTC", a fixed zone (Etc/GMT-1 is
+# UTC+1: the IANA sign is inverted) or an IANA zone whose civil time
+# (DST-aware) the rows follow. fetch_all_real_load puts every series on the
+# local civil time of its country (the demand models' convention).
+#
+# - opsd: the singleindex CSV's index column is utc_timestamp.
+# - entsoe: queried from 1 Jan 00:00 Europe/Brussels; the hourly values are
+#   consecutive instants from that midnight (CET, UTC+1, all year).
+# - rte: rows in French civil time, placed at their instants and averaged
+#   per hour of CET (UTC+1 all year; _rte_hourly).
+# - uk: rows in UK civil time, concatenated: consecutive instants from local
+#   midnight on 1 Jan, i.e. standard time all year.
+# - brazil: din_instante, Brasilia civil time (no DST since 2019).
+# - turkey: queried with +03:00 offsets.
+# - chile / mexico: civil time concatenated from 1 Jan, which Chile starts
+#   in summer time (UTC-3) and Mexico in standard time (UTC-6).
+# - usa: EIA-930 hourly data are UTC.
+# - the rest: local civil time of zones without DST.
+SOURCE_TIME_BASES: dict[str, str] = {
+    "opsd": "UTC",
+    "entsoe": "Etc/GMT-1",
+    "brazil": "America/Sao_Paulo",
+    "colombia": "America/Bogota",
+    "japan": "Asia/Tokyo",
+    "rte": "Etc/GMT-1",
+    "uk": "UTC",
+    "eskom": "Africa/Johannesburg",
+    "australia": "Australia/Perth",
+    "usa": "UTC",
+    "turkey": "Etc/GMT-3",
+    "chile": "Etc/GMT+3",
+    "argentina": "America/Argentina/Buenos_Aires",
+    "mexico": "Etc/GMT+6",
+    "korea": "Asia/Seoul",
+    "taiwan": "Asia/Taipei",
+    "peru": "America/Lima",
+}
 
-def _pad_or_trim(arr: np.ndarray, target: int = 8760) -> Optional[np.ndarray]:
-    """Ensure array is exactly 8760. Return None if too short."""
+# Every source fetch_all_real_load can fetch (its ``include_<name>`` flags):
+# the names ``build_dataset(sources=...)`` and ``build-demand-dataset
+# --sources`` accept, besides "all".
+DEMAND_SOURCES: tuple[str, ...] = tuple(SOURCE_TIME_BASES)
+
+# Where each country's series is placed (capital city; AUS: Perth, the
+# national AUS series is Western Australia): its ERA5 temperature
+# and the time zone of its local civil time.
+COUNTRY_COORDS: dict[str, tuple[float, float]] = {
+    "AUT": (48.2, 16.4), "BEL": (50.8, 4.4), "BGR": (42.7, 23.3),
+    "CHE": (46.9, 7.4), "CZE": (50.1, 14.4), "DEU": (52.5, 13.4),
+    "DNK": (55.7, 12.6), "EST": (59.4, 24.7), "ESP": (40.4, -3.7),
+    "FIN": (60.2, 24.9), "FRA": (48.9, 2.3), "GBR": (51.5, -0.1),
+    "GRC": (37.9, 23.7), "HRV": (45.8, 16.0), "HUN": (47.5, 19.1),
+    "IRL": (53.3, -6.3), "ITA": (41.9, 12.5), "LTU": (54.7, 25.3),
+    "LUX": (49.6, 6.1), "LVA": (56.9, 24.1), "MNE": (42.4, 19.3),
+    "MKD": (42.0, 21.4), "NLD": (52.4, 4.9), "NOR": (59.9, 10.7),
+    "POL": (52.2, 21.0), "PRT": (38.7, -9.1), "ROU": (44.4, 26.1),
+    "SRB": (44.8, 20.5), "SWE": (59.3, 18.1), "SVN": (46.1, 14.5),
+    "SVK": (48.1, 17.1), "BRA": (-15.8, -47.9), "COL": (4.7, -74.1),
+    "JPN": (35.7, 139.7), "CUB": (23.1, -82.4), "AUS": (-31.95, 115.86),
+    "USA": (38.9, -77.0), "ZAF": (-33.9, 18.4), "MEX": (19.4, -99.1),
+    "KOR": (37.6, 127.0), "IND": (28.6, 77.2), "ARG": (-34.6, -58.4),
+    "CHL": (-33.4, -70.7), "PER": (-12.0, -77.0), "THA": (13.8, 100.5),
+    "IDN": (-6.2, 106.8), "EGY": (30.0, 31.2), "NGA": (9.1, 7.5),
+    "KEN": (-1.3, 36.8), "MAR": (34.0, -6.8), "TUR": (39.9, 32.9),
+    "TWN": (25.0, 121.6),
+}
+
+
+def series_time_zone(lat: float, lon: float) -> str:
+    """Time zone whose civil time a series placed at (*lat*, *lon*) is on."""
+    from esfex.utils.model_clock import node_time_zone
+    return node_time_zone(round(float(lat), 4), round(float(lon), 4))
+
+
+def on_local_time(data: RealLoadData, time_base: Optional[str],
+                  coords: dict[str, tuple[float, float]]) -> RealLoadData:
+    """*data* (8760-h years on *time_base*) on each country's local civil time.
+
+    The zone comes from the country's coordinates in *coords*. A
+    *time_base* of None means the series already are on local civil time; a
+    country without coordinates is left as it is, with a warning.
+    """
+    if time_base is None:
+        return data
+    from esfex.utils.model_clock import to_local_time
+
+    out: RealLoadData = {}
+    for iso3, years in data.items():
+        lat, lon = coords.get(iso3, (0.0, 0.0))
+        if lat == 0.0 and lon == 0.0:
+            logger.warning("%s: no coordinates, its demand stays on %s",
+                           iso3, time_base)
+            out[iso3] = years
+            continue
+        zone = series_time_zone(lat, lon)
+        out[iso3] = {yr: to_local_time(arr, time_base, zone, yr)
+                     for yr, arr in years.items()}
+    return out
+
+
+def _pad_or_trim(arr: np.ndarray, target: int = 8760,
+                 year: Optional[int] = None) -> Optional[np.ndarray]:
+    """Ensure array is exactly 8760. Return None if too short.
+
+    A full leap *year* (8784 values or more) loses Feb 29, not 31 December
+    (``drop_leap_days``), so the series follows ESFEX's 8760-h calendar.
+    """
+    arr = np.asarray(arr)
+    if year is not None and len(arr) >= 8784 and calendar.isleap(year):
+        arr = drop_leap_days(arr[:8784])
     if len(arr) >= target:
         return arr[:target].astype(np.float64)
     if len(arr) >= target - 48:  # allow up to 2 days missing
@@ -96,7 +207,7 @@ def fetch_opsd(cache_dir: Path) -> RealLoadData:
         years = series.index.year.unique()
         for yr in years:
             yr_data = series[series.index.year == yr].values
-            arr = _pad_or_trim(yr_data)
+            arr = _pad_or_trim(yr_data, year=yr)
             if arr is not None and arr.mean() > 0:
                 result.setdefault(iso3, {})[int(yr)] = arr
 
@@ -169,7 +280,7 @@ def _try_brazil_s3(yr: int, cache_dir: Path) -> Optional[np.ndarray]:
     else:
         vals = pd.to_numeric(df[load_col], errors="coerce").dropna().values
 
-    return _pad_or_trim(vals.astype(np.float64))
+    return _pad_or_trim(vals.astype(np.float64), year=yr)
 
 
 def _try_brazil_hf(yr: int, cache_dir: Path) -> Optional[np.ndarray]:
@@ -192,7 +303,7 @@ def _try_brazil_hf(yr: int, cache_dir: Path) -> Optional[np.ndarray]:
         df["din_instante"] = pd.to_datetime(df["din_instante"])
         total = df.groupby("din_instante")["val_cargaenergiahomwmed"].sum()
         total = total.sort_index()
-        arr = _pad_or_trim(total.values)
+        arr = _pad_or_trim(total.values, year=yr)
         if arr is not None and arr.mean() > 0:
             return arr
     return None
@@ -301,7 +412,7 @@ def fetch_colombia_xm(
             time.sleep(0.3)
 
         if ok and hourly_vals:
-            arr = _pad_or_trim(np.array(hourly_vals, dtype=np.float64))
+            arr = _pad_or_trim(np.array(hourly_vals, dtype=np.float64), year=yr)
             if arr is not None and arr.mean() > 0:
                 result["COL"][yr] = arr
                 np.save(cache_file, arr)
@@ -358,7 +469,7 @@ def fetch_tepco_japan(
                         continue
 
             if vals:
-                arr = _pad_or_trim(np.array(vals, dtype=np.float64))
+                arr = _pad_or_trim(np.array(vals, dtype=np.float64), year=yr)
                 if arr is not None and arr.mean() > 0:
                     result["JPN"][yr] = arr
                     np.save(cache_file, arr)
@@ -433,7 +544,7 @@ def fetch_aemo_australia(
                 n_hours = len(vals) // 2
                 vals = vals[: n_hours * 2].reshape(n_hours, 2).mean(axis=1)
 
-            arr = _pad_or_trim(vals)
+            arr = _pad_or_trim(vals, year=yr)
             if arr is not None and arr.mean() > 0:
                 result["AUS"][yr] = arr
                 np.save(cache_file, arr)
@@ -490,7 +601,7 @@ def fetch_usa_gridstatus(
                         break
                 if load_col:
                     vals = df[load_col].dropna().values.astype(np.float64)
-                    arr = _pad_or_trim(vals)
+                    arr = _pad_or_trim(vals, year=yr)
                     if arr is not None and arr.mean() > 0:
                         result["USA"][yr] = arr
                         np.save(cache_file, arr)
@@ -580,7 +691,7 @@ def fetch_entsoe_europe(
                     ts = ts.resample("1h").mean()
 
                 vals = ts.values.astype(np.float64)
-                arr = _pad_or_trim(vals)
+                arr = _pad_or_trim(vals, year=yr)
                 if arr is not None and arr.mean() > 0:
                     # For zones that map to the same ISO3 (e.g. DK_1, DK_2),
                     # sum the values if we already have data for that year
@@ -607,13 +718,76 @@ _RTE_URL = (
 )
 
 
+def _rte_wall_times(dates, hours):
+    """Naive wall times from eco2mix ``Date`` and ``Heures`` columns (NaT if unreadable)."""
+    import pandas as pd
+
+    text = dates.astype(str).str.strip() + " " + hours.astype(str).str.strip()
+    best = None
+    for fmt in ("%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M"):
+        wall = pd.to_datetime(text, format=fmt, errors="coerce")
+        if best is None or wall.notna().sum() > best.notna().sum():
+            best = wall
+    return best
+
+
+def _rte_hourly(df, conso_col: str, year: int) -> Optional[np.ndarray]:
+    """Hourly mean consumption of one eco2mix *year* (8760 values) or None.
+
+    eco2mix rows are French civil time (``Date``, ``Heures``) at the file's
+    own step: 15 minutes, or 30 with the quarters in between left empty. The
+    rows are placed at their instants (Europe/Paris with daylight saving
+    time; the hour repeated in October in file order) and averaged per hour
+    of CET, UTC+1 all year (the ``rte`` entry of :data:`SOURCE_TIME_BASES`),
+    whatever the step. Hours without data are interpolated; a year missing
+    more than two days is rejected. A table without the date and hour
+    columns is cut into hours by its number of values per hour.
+    """
+    import pandas as pd
+
+    vals = pd.to_numeric(df[conso_col], errors="coerce")
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    date_col = cols.get("date")
+    hour_col = next((c for k, c in cols.items() if k.startswith("heure")), None)
+    full = 8784 if calendar.isleap(year) else 8760
+    if date_col is None or hour_col is None:
+        v = vals.dropna().to_numpy(dtype=np.float64)
+        step = int(round(len(v) / full))
+        if step > 1:
+            v = v[:len(v) // step * step].reshape(-1, step).mean(axis=1)
+        return _pad_or_trim(v, year=year)
+
+    wall = _rte_wall_times(df[date_col], df[hour_col])
+    ok = (wall.notna() & vals.notna()).to_numpy()
+    wall = pd.DatetimeIndex(wall[ok])
+    vals = vals[ok].to_numpy(dtype=np.float64)
+    try:
+        local = wall.tz_localize("Europe/Paris", ambiguous="infer",
+                                 nonexistent="shift_forward")
+    except Exception:       # the repeated hour appears once: summer time
+        local = wall.tz_localize("Europe/Paris",
+                                 ambiguous=np.ones(len(wall), dtype=bool),
+                                 nonexistent="shift_forward")
+    hour = local.tz_convert("Etc/GMT-1").floor("h")
+    hourly = pd.Series(vals, index=hour).groupby(level=0).mean()
+    grid = pd.date_range(f"{year}-01-01", periods=full, freq="h", tz="Etc/GMT-1")
+    series = hourly.reindex(grid)
+    if series.isna().sum() > 48:
+        logger.debug("RTE France %d: %d hours without data", year,
+                     int(series.isna().sum()))
+        return None
+    series = series.interpolate(limit_direction="both")
+    return _pad_or_trim(series.to_numpy(dtype=np.float64), year=year)
+
+
 def fetch_rte_france(
     cache_dir: Path,
     years: range = range(2012, 2024),
 ) -> RealLoadData:
     """Download RTE eco2mix French national consumption data.
 
-    Each year is a ZIP containing a CSV with half-hourly or hourly consumption.
+    Each year is a ZIP holding a table of consumption at a sub-hourly step
+    (15 or 30 minutes; see :func:`_rte_hourly` for the hourly means).
     Returns {\"FRA\": {year: ndarray(8760)}}.
     """
     import requests
@@ -640,7 +814,9 @@ def fetch_rte_france(
 
             # Extract CSV from ZIP
             zf = zipfile.ZipFile(io.BytesIO(resp.content))
-            csv_names = [n for n in zf.namelist() if n.endswith(".csv") or n.endswith(".CSV")]
+            # The eco2mix archives hold tab-separated text, named .xls.
+            csv_names = [n for n in zf.namelist()
+                         if n.lower().endswith((".csv", ".xls"))]
             if not csv_names:
                 logger.debug("RTE France %d: no CSV in ZIP", yr)
                 continue
@@ -681,14 +857,7 @@ def fetch_rte_france(
                 logger.debug("RTE France %d: no consumption column in %s", yr, list(df.columns)[:10])
                 continue
 
-            vals = pd.to_numeric(df[conso_col], errors="coerce").dropna().values.astype(np.float64)
-
-            # If half-hourly (>10000 points), aggregate to hourly
-            if len(vals) > 10000:
-                n_hours = len(vals) // 2
-                vals = vals[: n_hours * 2].reshape(n_hours, 2).mean(axis=1)
-
-            arr = _pad_or_trim(vals)
+            arr = _rte_hourly(df, conso_col, yr)
             if arr is not None and arr.mean() > 0:
                 result["FRA"][yr] = arr
                 np.save(cache_file, arr)
@@ -776,7 +945,7 @@ def fetch_uk_nationalgrid(
                 n_hours = len(vals) // 2
                 vals = vals[: n_hours * 2].reshape(n_hours, 2).mean(axis=1)
 
-            arr = _pad_or_trim(vals)
+            arr = _pad_or_trim(vals, year=yr)
             if arr is not None and arr.mean() > 0:
                 result["GBR"][yr] = arr
                 np.save(cache_file, arr)
@@ -894,7 +1063,7 @@ def fetch_eskom_southafrica(
                 n_hours = len(vals) // 2
                 vals = vals[: n_hours * 2].reshape(n_hours, 2).mean(axis=1)
 
-            arr = _pad_or_trim(vals)
+            arr = _pad_or_trim(vals, year=yr)
             if arr is not None and arr.mean() > 0:
                 result["ZAF"][yr] = arr
                 np.save(cache_file, arr)
@@ -956,7 +1125,7 @@ def fetch_turkey_epias(
             time.sleep(0.5)
 
         if ok and hourly_vals:
-            arr = _pad_or_trim(np.array(hourly_vals, dtype=np.float64))
+            arr = _pad_or_trim(np.array(hourly_vals, dtype=np.float64), year=yr)
             if arr is not None and arr.mean() > 0:
                 result["TUR"][yr] = arr
                 np.save(cache_file, arr)
@@ -1021,7 +1190,7 @@ def fetch_chile_cen(
                 demand_col = df.columns[-1]
 
             vals = pd.to_numeric(df[demand_col], errors="coerce").dropna().values
-            arr = _pad_or_trim(np.array(vals, dtype=np.float64))
+            arr = _pad_or_trim(np.array(vals, dtype=np.float64), year=yr)
             if arr is not None and arr.mean() > 0:
                 result["CHL"][yr] = arr
                 np.save(cache_file, arr)
@@ -1086,7 +1255,7 @@ def fetch_argentina_cammesa(
             time.sleep(0.3)
 
         if ok and len(hourly_vals) >= 8000:
-            arr = _pad_or_trim(np.array(hourly_vals, dtype=np.float64))
+            arr = _pad_or_trim(np.array(hourly_vals, dtype=np.float64), year=yr)
             if arr is not None and arr.mean() > 0:
                 result["ARG"][yr] = arr
                 np.save(cache_file, arr)
@@ -1142,7 +1311,7 @@ def fetch_mexico_cenace(
             numeric_cols = df.select_dtypes(include=[np.number]).columns
             if len(numeric_cols) > 0:
                 vals = df[numeric_cols].sum(axis=1).values
-                arr = _pad_or_trim(np.array(vals, dtype=np.float64))
+                arr = _pad_or_trim(np.array(vals, dtype=np.float64), year=yr)
                 if arr is not None and arr.mean() > 0:
                     result["MEX"][yr] = arr
                     np.save(cache_file, arr)
@@ -1210,7 +1379,7 @@ def fetch_korea_kpx(
                 time.sleep(0.5)
 
             if ok and len(hourly_vals) >= 8000:
-                arr = _pad_or_trim(np.array(hourly_vals, dtype=np.float64))
+                arr = _pad_or_trim(np.array(hourly_vals, dtype=np.float64), year=yr)
                 if arr is not None and arr.mean() > 0:
                     result["KOR"][yr] = arr
                     np.save(cache_file, arr)
@@ -1270,7 +1439,7 @@ def fetch_taiwan_taipower(
 
             if demand_col:
                 vals = pd.to_numeric(df[demand_col], errors="coerce").dropna().values
-                arr = _pad_or_trim(np.array(vals, dtype=np.float64))
+                arr = _pad_or_trim(np.array(vals, dtype=np.float64), year=yr)
                 if arr is not None and arr.mean() > 0:
                     result["TWN"][yr] = arr
                     np.save(cache_file, arr)
@@ -1333,7 +1502,7 @@ def fetch_peru_coes(
             numeric_cols = df.select_dtypes(include=[np.number]).columns
             if len(numeric_cols) > 0:
                 vals = df[numeric_cols[0]].values
-                arr = _pad_or_trim(np.array(vals, dtype=np.float64))
+                arr = _pad_or_trim(np.array(vals, dtype=np.float64), year=yr)
                 if arr is not None and arr.mean() > 0:
                     result["PER"][yr] = arr
                     np.save(cache_file, arr)
@@ -1507,11 +1676,16 @@ def fetch_all_real_load(
                 "population": {year: float}, "gdp_per_capita": {year: float},
                 "urbanization_pct": float, "electricity_access_pct": float}}
 
+        A file is read as local civil time of (lat, lon); give
+        ``"time_zone"`` ("UTC", "Etc/GMT+5", an IANA zone) when it is not.
+
     Returns
     -------
     (load_data, metadata)
-        load_data: {iso3: {year: ndarray(8760)}} — MW values
-        metadata: {iso3: {"lat": float, "lon": float, ...}} — per-country info
+        load_data: {iso3: {year: ndarray(8760)}} — MW values, on the local
+            civil time of each country (zone from its coordinates; see
+            :data:`SOURCE_TIME_BASES` for what each source comes in)
+        metadata: {iso3: {"lat": float, "lon": float, "time_zone": str, ...}}
     """
     if cache_dir is None:
         cache_dir = Path.home() / ".cache" / "esfex" / "real_load_data"
@@ -1525,23 +1699,13 @@ def fetch_all_real_load(
             progress_cb(pct, msg)
         logger.info("[%d%%] %s", pct, msg)
 
-    # Country coordinates for metadata (capital cities)
-    _COORDS = {
-        "AUT": (48.2, 16.4), "BEL": (50.8, 4.4), "BGR": (42.7, 23.3),
-        "CHE": (46.9, 7.4), "CZE": (50.1, 14.4), "DEU": (52.5, 13.4),
-        "DNK": (55.7, 12.6), "EST": (59.4, 24.7), "ESP": (40.4, -3.7),
-        "FIN": (60.2, 24.9), "FRA": (48.9, 2.3), "GBR": (51.5, -0.1),
-        "GRC": (37.9, 23.7), "HRV": (45.8, 16.0), "HUN": (47.5, 19.1),
-        "IRL": (53.3, -6.3), "ITA": (41.9, 12.5), "LTU": (54.7, 25.3),
-        "LUX": (49.6, 6.1), "LVA": (56.9, 24.1), "MNE": (42.4, 19.3),
-        "MKD": (42.0, 21.4), "NLD": (52.4, 4.9), "NOR": (59.9, 10.7),
-        "POL": (52.2, 21.0), "PRT": (38.7, -9.1), "ROU": (44.4, 26.1),
-        "SRB": (44.8, 20.5), "SWE": (59.3, 18.1), "SVN": (46.1, 14.5),
-        "SVK": (48.1, 17.1), "BRA": (-15.8, -47.9), "COL": (4.7, -74.1),
-        "JPN": (35.7, 139.7), "CUB": (23.1, -82.4),
-        "AUS": (-33.9, 151.2), "USA": (38.9, -77.0),
-        "ZAF": (-33.9, 18.4),
-    }
+    coords = dict(COUNTRY_COORDS)
+    for iso3, info in (local_files or {}).items():
+        if "lat" in info and "lon" in info:
+            coords[iso3] = (float(info["lat"]), float(info["lon"]))
+
+    def _local(data: RealLoadData, source: str) -> RealLoadData:
+        return on_local_time(data, SOURCE_TIME_BASES[source], coords)
 
     step = 0
     total_steps = sum([include_opsd, include_entsoe, include_brazil, include_colombia,
@@ -1554,7 +1718,7 @@ def fetch_all_real_load(
     if include_opsd:
         _emit(int(step / total_steps * 80), "Fetching OPSD (Europe)...")
         try:
-            opsd = fetch_opsd(cache_dir / "opsd")
+            opsd = _local(fetch_opsd(cache_dir / "opsd"), "opsd")
             all_data.update(opsd)
         except Exception as exc:
             logger.warning("OPSD fetch failed: %s", exc)
@@ -1564,7 +1728,7 @@ def fetch_all_real_load(
     if include_entsoe:
         _emit(int(step / total_steps * 80), "Fetching ENTSO-E (Europe)...")
         try:
-            entsoe = fetch_entsoe_europe(cache_dir / "entsoe")
+            entsoe = _local(fetch_entsoe_europe(cache_dir / "entsoe"), "entsoe")
             # Merge: ENTSO-E data supplements OPSD (prefer longer series)
             for iso3, years_data in entsoe.items():
                 for yr, arr in years_data.items():
@@ -1578,7 +1742,7 @@ def fetch_all_real_load(
     if include_brazil:
         _emit(int(step / total_steps * 80), "Fetching Brazil ONS...")
         try:
-            brazil = fetch_brazil_ons(cache_dir / "brazil")
+            brazil = _local(fetch_brazil_ons(cache_dir / "brazil"), "brazil")
             all_data.update(brazil)
         except Exception as exc:
             logger.warning("Brazil ONS fetch failed: %s", exc)
@@ -1588,7 +1752,7 @@ def fetch_all_real_load(
     if include_colombia:
         _emit(int(step / total_steps * 80), "Fetching Colombia XM...")
         try:
-            colombia = fetch_colombia_xm(cache_dir / "colombia")
+            colombia = _local(fetch_colombia_xm(cache_dir / "colombia"), "colombia")
             all_data.update(colombia)
         except Exception as exc:
             logger.warning("Colombia XM fetch failed: %s", exc)
@@ -1598,7 +1762,7 @@ def fetch_all_real_load(
     if include_japan:
         _emit(int(step / total_steps * 80), "Fetching TEPCO Japan...")
         try:
-            japan = fetch_tepco_japan(cache_dir / "japan")
+            japan = _local(fetch_tepco_japan(cache_dir / "japan"), "japan")
             all_data.update(japan)
         except Exception as exc:
             logger.warning("TEPCO Japan fetch failed: %s", exc)
@@ -1608,7 +1772,7 @@ def fetch_all_real_load(
     if include_rte:
         _emit(int(step / total_steps * 80), "Fetching RTE France...")
         try:
-            rte = fetch_rte_france(cache_dir / "rte")
+            rte = _local(fetch_rte_france(cache_dir / "rte"), "rte")
             # RTE supplements OPSD/ENTSO-E for France — fill missing years
             for yr, arr in rte.get("FRA", {}).items():
                 if "FRA" not in all_data or yr not in all_data.get("FRA", {}):
@@ -1621,7 +1785,7 @@ def fetch_all_real_load(
     if include_uk:
         _emit(int(step / total_steps * 80), "Fetching UK National Grid ESO...")
         try:
-            uk = fetch_uk_nationalgrid(cache_dir / "uk_eso")
+            uk = _local(fetch_uk_nationalgrid(cache_dir / "uk_eso"), "uk")
             # UK ESO supplements OPSD/ENTSO-E for GBR — fill missing years
             for yr, arr in uk.get("GBR", {}).items():
                 if "GBR" not in all_data or yr not in all_data.get("GBR", {}):
@@ -1634,7 +1798,7 @@ def fetch_all_real_load(
     if include_eskom:
         _emit(int(step / total_steps * 80), "Fetching Eskom South Africa...")
         try:
-            eskom = fetch_eskom_southafrica(cache_dir / "eskom")
+            eskom = _local(fetch_eskom_southafrica(cache_dir / "eskom"), "eskom")
             all_data.update(eskom)
         except Exception as exc:
             logger.warning("Eskom South Africa fetch failed: %s", exc)
@@ -1644,7 +1808,7 @@ def fetch_all_real_load(
     if include_australia:
         _emit(int(step / total_steps * 80), "Fetching AEMO Australia...")
         try:
-            aus = fetch_aemo_australia(cache_dir / "aemo")
+            aus = _local(fetch_aemo_australia(cache_dir / "aemo"), "australia")
             all_data.update(aus)
         except Exception as exc:
             logger.warning("AEMO Australia fetch failed: %s", exc)
@@ -1654,7 +1818,7 @@ def fetch_all_real_load(
     if include_usa:
         _emit(int(step / total_steps * 80), "Fetching USA GridStatus...")
         try:
-            usa = fetch_usa_gridstatus(cache_dir / "usa")
+            usa = _local(fetch_usa_gridstatus(cache_dir / "usa"), "usa")
             all_data.update(usa)
         except Exception as exc:
             logger.warning("USA GridStatus fetch failed: %s", exc)
@@ -1664,7 +1828,7 @@ def fetch_all_real_load(
     if include_turkey:
         _emit(int(step / total_steps * 80), "Fetching Turkey EPIAS...")
         try:
-            tur = fetch_turkey_epias(cache_dir / "turkey")
+            tur = _local(fetch_turkey_epias(cache_dir / "turkey"), "turkey")
             all_data.update(tur)
         except Exception as exc:
             logger.warning("Turkey EPIAS fetch failed: %s", exc)
@@ -1674,7 +1838,7 @@ def fetch_all_real_load(
     if include_chile:
         _emit(int(step / total_steps * 80), "Fetching Chile CEN...")
         try:
-            chl = fetch_chile_cen(cache_dir / "chile")
+            chl = _local(fetch_chile_cen(cache_dir / "chile"), "chile")
             all_data.update(chl)
         except Exception as exc:
             logger.warning("Chile CEN fetch failed: %s", exc)
@@ -1684,7 +1848,7 @@ def fetch_all_real_load(
     if include_argentina:
         _emit(int(step / total_steps * 80), "Fetching Argentina CAMMESA...")
         try:
-            arg = fetch_argentina_cammesa(cache_dir / "argentina")
+            arg = _local(fetch_argentina_cammesa(cache_dir / "argentina"), "argentina")
             all_data.update(arg)
         except Exception as exc:
             logger.warning("Argentina CAMMESA fetch failed: %s", exc)
@@ -1694,7 +1858,7 @@ def fetch_all_real_load(
     if include_mexico:
         _emit(int(step / total_steps * 80), "Fetching Mexico CENACE...")
         try:
-            mex = fetch_mexico_cenace(cache_dir / "mexico")
+            mex = _local(fetch_mexico_cenace(cache_dir / "mexico"), "mexico")
             all_data.update(mex)
         except Exception as exc:
             logger.warning("Mexico CENACE fetch failed: %s", exc)
@@ -1704,7 +1868,7 @@ def fetch_all_real_load(
     if include_korea:
         _emit(int(step / total_steps * 80), "Fetching South Korea KPX...")
         try:
-            kor = fetch_korea_kpx(cache_dir / "korea")
+            kor = _local(fetch_korea_kpx(cache_dir / "korea"), "korea")
             all_data.update(kor)
         except Exception as exc:
             logger.warning("Korea KPX fetch failed: %s", exc)
@@ -1714,7 +1878,7 @@ def fetch_all_real_load(
     if include_taiwan:
         _emit(int(step / total_steps * 80), "Fetching Taiwan Taipower...")
         try:
-            twn = fetch_taiwan_taipower(cache_dir / "taiwan")
+            twn = _local(fetch_taiwan_taipower(cache_dir / "taiwan"), "taiwan")
             all_data.update(twn)
         except Exception as exc:
             logger.warning("Taiwan Taipower fetch failed: %s", exc)
@@ -1724,7 +1888,7 @@ def fetch_all_real_load(
     if include_peru:
         _emit(int(step / total_steps * 80), "Fetching Peru COES...")
         try:
-            per = fetch_peru_coes(cache_dir / "peru")
+            per = _local(fetch_peru_coes(cache_dir / "peru"), "peru")
             all_data.update(per)
         except Exception as exc:
             logger.warning("Peru COES fetch failed: %s", exc)
@@ -1736,7 +1900,8 @@ def fetch_all_real_load(
         for iso3, info in local_files.items():
             try:
                 local = load_local_demand(info["path"], iso3, info["start_year"])
-                all_data.update(local)
+                # Local civil time unless the file says otherwise.
+                all_data.update(on_local_time(local, info.get("time_zone"), coords))
                 # Store metadata from local_files
                 metadata[iso3] = {k: v for k, v in info.items() if k != "path"}
             except Exception as exc:
@@ -1745,8 +1910,11 @@ def fetch_all_real_load(
     # Build metadata for all countries
     for iso3 in all_data:
         if iso3 not in metadata:
-            lat, lon = _COORDS.get(iso3, (0.0, 0.0))
+            lat, lon = coords.get(iso3, (0.0, 0.0))
             metadata[iso3] = {"lat": lat, "lon": lon}
+        lat, lon = metadata[iso3].get("lat", 0.0), metadata[iso3].get("lon", 0.0)
+        if lat or lon:
+            metadata[iso3]["time_zone"] = series_time_zone(lat, lon)
 
     n_countries = len(all_data)
     n_years = sum(len(v) for v in all_data.values())

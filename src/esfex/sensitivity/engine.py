@@ -33,7 +33,12 @@ KPI_NAMES = [
     "load_shedding",
 ]
 
-# Config-level parameter definitions (match ScenarioMultipliers fields)
+# Config-level parameter definitions. Keys follow ScenarioMultipliers; see
+# _apply_config_multipliers for the fields each one scales. demand_growth
+# scales the demand level (demand_scale): a deterministic run has no demand
+# growth to vary. fuel_price_growth has no counterpart (fuel prices escalate
+# by each fuel's price_growth_rate, a rate rather than a level to scale), so
+# it is not offered.
 CONFIG_PARAMETERS = [
     ("invest_cost_renewables", "RE Investment Cost", (0.5, 2.0)),
     ("invest_cost_storage", "Storage Investment Cost", (0.5, 2.0)),
@@ -41,8 +46,7 @@ CONFIG_PARAMETERS = [
     ("invest_cost_transmission", "Transmission Inv. Cost", (0.5, 2.0)),
     ("fuel_cost", "Fuel Cost", (0.5, 3.0)),
     ("maintenance_cost", "Maintenance Cost", (0.5, 2.0)),
-    ("demand_growth", "Demand Growth", (0.8, 1.5)),
-    ("fuel_price_growth", "Fuel Price Growth", (0.5, 2.0)),
+    ("demand_growth", "Demand Level", (0.8, 1.5)),
     ("carbon_price", "Carbon Price", (0.0, 3.0)),
 ]
 
@@ -70,6 +74,8 @@ class SobolResult:
     ST_conf: dict[str, np.ndarray] = field(default_factory=dict)
     n_samples: int = 0
     n_evaluations: int = 0
+    # Evaluations without a finite value per KPI; their indices are NaN
+    n_failed: dict[str, int] = field(default_factory=dict)
 
     def to_csv(self, filepath: str | Path) -> None:
         """Export Sobol indices to CSV file."""
@@ -101,11 +107,14 @@ class SensitivityEngine:
         parameters: list[SensitivityParameter],
         kpi_names: list[str] | None = None,
         n_base_samples: int = 128,
+        years: int | None = None,
     ):
         self.mode = mode  # "lp" or "config"
         self.parameters = parameters
         self.kpi_names = kpi_names or list(KPI_NAMES)
         self.n_base_samples = n_base_samples
+        # Years per config-mode run (None: the `esfex run` default, DEFAULT_RUN_YEARS)
+        self.years = years
 
     @property
     def problem(self) -> dict:
@@ -230,7 +239,7 @@ class SensitivityEngine:
 
             # Run simulation
             run_output = str(output_base / f"run_{i:04d}")
-            kpis = _run_simulation_and_extract(tmp_path, run_output)
+            kpis = _run_simulation_and_extract(tmp_path, run_output, self.years)
 
             for kpi_name in self.kpi_names:
                 evaluations[kpi_name].append(kpis.get(kpi_name, float("nan")))
@@ -256,18 +265,30 @@ class SensitivityEngine:
             n_evaluations=n_eval,
         )
 
+        n_params = len(self.parameters)
         for kpi_name in self.kpi_names:
-            Y = np.array(evaluations[kpi_name])
+            Y = np.array(evaluations[kpi_name], dtype=float)
 
-            # Replace inf/nan with large value to avoid SALib errors
-            finite_mask = np.isfinite(Y)
-            if not finite_mask.all():
-                max_finite = np.nanmax(Y[finite_mask]) if finite_mask.any() else 1e12
-                Y = np.where(finite_mask, Y, max_finite * 10)
+            # The Saltelli design needs every evaluation: a failed run (or an
+            # infeasible LP) cannot be dropped, and any stand-in value would
+            # bias the indices, so the KPI gets no indices.
+            n_failed = int(np.count_nonzero(~np.isfinite(Y)))
+            result.n_failed[kpi_name] = n_failed
+            if n_failed:
+                logger.warning(
+                    "KPI %s: %d of %d evaluations have no finite value; "
+                    "its Sobol indices are not computed (NaN)",
+                    kpi_name, n_failed, n_eval,
+                )
+                nan = np.full(n_params, np.nan)
+                result.S1[kpi_name] = nan.copy()
+                result.ST[kpi_name] = nan.copy()
+                result.S1_conf[kpi_name] = nan.copy()
+                result.ST_conf[kpi_name] = nan.copy()
+                continue
 
             # Check for zero variance
             if np.std(Y) < 1e-15:
-                n_params = len(self.parameters)
                 result.S1[kpi_name] = np.zeros(n_params)
                 result.ST[kpi_name] = np.zeros(n_params)
                 result.S1_conf[kpi_name] = np.zeros(n_params)
@@ -369,21 +390,32 @@ def _apply_config_multipliers(
     schema: new capacity is invested through ``technologies`` (and
     ``battery_technologies``); ``generators``/``batteries`` describe existing
     units. Components may be name-keyed dicts or lists; both are handled.
-
-    Unmapped multipliers (invest_cost_transmission, maintenance_cost,
-    demand_growth, fuel_price_growth, carbon_price) are intentionally left as
-    no-ops here because cuba.yaml has no single field they map to cleanly;
-    they should be wired explicitly if/when those sweeps are needed.
+    The fields follow the stochastic scenario multipliers, except
+    ``demand_growth``, which scales the demand level (``demand_scale``).
+    A key without a mapping (e.g. ``fuel_price_growth``) raises ValueError.
     """
     import copy
     config = copy.deepcopy(base_config)
 
     multipliers = {p.key: float(sample_row[i]) for i, p in enumerate(parameters)}
+    unknown = set(multipliers) - {key for key, _, _ in CONFIG_PARAMETERS}
+    if unknown:
+        raise ValueError(f"Config parameters without a config field: {sorted(unknown)}")
     re_mult = multipliers.get("invest_cost_renewables")
     conv_mult = multipliers.get("invest_cost_conventional")
     fuel_mult = multipliers.get("fuel_cost")
     storage_mult = multipliers.get("invest_cost_storage")
+    trans_mult = multipliers.get("invest_cost_transmission")
+    maint_mult = multipliers.get("maintenance_cost")
     demand_mult = multipliers.get("demand_growth")
+    carbon_mult = multipliers.get("carbon_price")
+
+    # Inter-system links are expanded at their investment_cost_per_MW
+    if trans_mult is not None:
+        for link in (config.get("meta_network") or {}).get("systems_links") or []:
+            if isinstance(link, dict):
+                for key in ("investment_cost_per_MW", "investment_cost_per_mw"):
+                    _scale_field(link, key, trans_mult)
 
     for sys_config in config.get("systems", {}).values():
         if not isinstance(sys_config, dict):
@@ -407,25 +439,54 @@ def _apply_config_multipliers(
                                       "invest_cost_energy", "invest_cost_capacity"):
                         _scale_field(bat, field_key, storage_mult)
 
-        # Demand growth (applied when sys_config carries a top-level demand.growth_rate).
+        # Maintenance cost ($/MWh) of every unit type, as in the scenarios
+        if maint_mult is not None:
+            for comp_key in ("generators", "technologies", "batteries",
+                             "battery_technologies"):
+                for comp in _iter_components(sys_config.get(comp_key)):
+                    _scale_field(comp, "maintenance_cost", maint_mult)
+
+        # Transmission investment: corridor cost per node and the line and
+        # transformer costs of development-zone connections
+        if trans_mult is not None:
+            nodes = sys_config.get("nodes")
+            if isinstance(nodes, dict):
+                _scale_field(nodes, "transference_invest_cost", trans_mult)
+            for zone in _iter_components(sys_config.get("development_zones")):
+                _scale_field(zone, "line_cost_per_mw_km", trans_mult)
+                _scale_field(zone, "transformer_cost_per_mw", trans_mult)
+
+        # Demand level: demand_scale multiplies the demand read from file
         if demand_mult is not None:
-            demand_cfg = sys_config.get("demand")
-            if isinstance(demand_cfg, dict):
-                _scale_field(demand_cfg, "growth_rate", demand_mult)
+            sys_config["demand_scale"] = float(sys_config.get("demand_scale") or 1.0) * demand_mult
+
+        # Carbon price: penalties.co2_cost (keys are case-insensitive)
+        if carbon_mult is not None:
+            penalties = sys_config.setdefault("penalties", {})
+            if isinstance(penalties, dict):
+                keys = [k for k in penalties if str(k).lower() == "co2_cost"]
+                if not keys:
+                    from esfex.config.schema import PenaltiesConfig
+                    penalties["co2_cost"] = PenaltiesConfig().co2_cost
+                    keys = ["co2_cost"]
+                for k in keys:
+                    _scale_field(penalties, k, carbon_mult)
 
     return config
 
 
-def _run_simulation_and_extract(config_path: str, output_dir: str) -> dict[str, float]:
+def _run_simulation_and_extract(
+    config_path: str, output_dir: str, years: int | None = None,
+) -> dict[str, float]:
     """Run a single ESFEX simulation and extract KPIs from results."""
     kpis = {kpi: float("nan") for kpi in KPI_NAMES}
 
+    cmd = [sys.executable, "-m", "esfex.cli", "run",
+           "--config", config_path, "--output", output_dir]
+    if years is not None:
+        cmd += ["--years", str(years)]
     try:
-        result = subprocess.run(
-            [sys.executable, "-m", "esfex.cli", "run",
-             "--config", config_path, "--output", output_dir],
-            capture_output=True, text=True, timeout=3600,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
 
         if result.returncode != 0:
             logger.warning(f"Simulation failed: {result.stderr[:200]}")
@@ -445,30 +506,32 @@ def _run_simulation_and_extract(config_path: str, output_dir: str) -> dict[str, 
 def _extract_kpis_from_results(output_dir: str) -> dict[str, float]:
     """Extract KPI values from the HDF5 results written by an ESFEX run.
 
-    The runner names outputs ``esfex_run_*.h5`` and stores year-indexed
-    aggregates under the top-level ``summary_results`` group (total_cost,
-    loss_of_load) with curtailment living per-year under ``detailed_results``.
+    A run writes one ``<system>_<timestamp>.h5`` file into its output
+    directory, with year-indexed aggregates under ``summary_results``
+    (total_cost, loss_of_load), and per-year groups under
+    ``detailed_results`` holding curtailment and the master's investments
+    (``investment_*`` attributes, new capacity of that year). If the
+    directory holds files of earlier runs, only the newest is read.
     """
     import h5py
 
     kpis = {kpi: float("nan") for kpi in KPI_NAMES}
     output_path = Path(output_dir)
 
-    h5_files: list[Path] = []
-    for pattern in ("esfex_run_*.h5", "results_*.h5", "*.h5",
-                    "**/esfex_run_*.h5", "**/*.h5"):
-        h5_files = sorted(output_path.glob(pattern))
-        if h5_files:
-            break
+    h5_files = list(output_path.glob("*.h5")) or list(output_path.glob("**/*.h5"))
     if not h5_files:
         logger.warning(f"No HDF5 results found under {output_dir}")
         return kpis
+    h5_files = [max(h5_files, key=lambda p: p.stat().st_mtime)]
 
     total_cost = 0.0
     load_shedding = 0.0
     curtailment = 0.0
+    inv_gen = 0.0
+    inv_bat = 0.0
     found_summary = False
     found_curt = False
+    found_years = False
 
     for h5_path in h5_files:
         try:
@@ -485,9 +548,18 @@ def _extract_kpis_from_results(output_dir: str) -> dict[str, float]:
                 if detailed is not None:
                     for yname in detailed:
                         yg = detailed[yname]
-                        if isinstance(yg, h5py.Group) and "curtailment" in yg:
+                        if not isinstance(yg, h5py.Group):
+                            continue
+                        found_years = True
+                        if "curtailment" in yg:
                             curtailment += float(np.sum(yg["curtailment"][...]))
                             found_curt = True
+                        # Investments below 0.1 MW are not written (count as 0)
+                        for key, val in yg.attrs.items():
+                            if key.startswith("investment_tech_investment_power_"):
+                                inv_gen += float(val)
+                            elif key.startswith("investment_bat_tech_investment_power_"):
+                                inv_bat += float(val)
         except Exception as e:
             logger.warning(f"Error reading {h5_path}: {e}")
 
@@ -496,8 +568,8 @@ def _extract_kpis_from_results(output_dir: str) -> dict[str, float]:
         kpis["load_shedding"] = load_shedding
     if found_curt:
         kpis["curtailment"] = curtailment
-    # inv_gen_total / inv_bat_total are not exported as scalar summaries by the
-    # runner, so they remain NaN here; the analyzer flattens zero-variance KPIs.
-    # Wire them only if the runner gains an investment-MW summary dataset.
+    if found_years:
+        kpis["inv_gen_total"] = inv_gen
+        kpis["inv_bat_total"] = inv_bat
 
     return kpis

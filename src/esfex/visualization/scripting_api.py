@@ -385,68 +385,56 @@ class _WorkflowsNamespace:
     # ── Demand Estimation ─────────────────────────────────────
 
     @staticmethod
-    def estimate_demand(gdp_per_capita, population, urbanization_pct,
-                        temperatures_hourly, latitude, longitude,
-                        base_temp=21.0, beta_cdd=0.0, beta_hdd=0.0):
-        """Estimate hourly demand using the ML+econometric model.
+    def estimate_demand(iso3, latitude, longitude, year,
+                        temperatures_hourly=None, annual_demand_mwh=None,
+                        static_features=None):
+        """Hourly demand profile of a site from ESFEX's national XGBoost
+        demand model (the Demand Estimation workflow's fallback model).
 
-        Requires xgboost, which ships with the core esfex install.
+        The features are built as the model was trained: the calendar and
+        holidays of *iso3*, the temperature and its daily statistics, and GDP
+        per capita, population density and urbanization sampled at the site.
 
         Parameters
         ----------
-        gdp_per_capita : float
-            USD per capita.
-        population : int
-            Total population.
-        urbanization_pct : float
-            0-100.
-        temperatures_hourly : array
-            Hourly temperatures (°C), length = n_days × 24.
+        iso3 : str
+            Country code (holidays and the model's country encoding).
         latitude, longitude : float
             Site coordinates.
+        year : int
+            Calendar year of the profile (8760 h, 29 February dropped).
+        temperatures_hourly : array, optional
+            8760 hourly temperatures (°C) on the site's local time. None
+            uses 20 °C, as the model's training data do without a series.
+        annual_demand_mwh : float, optional
+            Annual energy. Given: the profile is in MW and sums to it.
+            None: dimensionless shape factors with mean 1.
+        static_features : dict, optional
+            ``log_gdp_per_cap``, ``log_pop_density`` and ``urbanization`` (as
+            in the training data) instead of sampling them at the site, which
+            downloads the GDP and population rasters on first use.
 
         Returns
         -------
         np.ndarray
-            Hourly demand estimate (MW), same length as temperatures.
+            8760 hourly values (MW, or shape factors).
         """
-        import numpy as np
-        from esfex.models.demand_ml import (
-            DemandMLModel, build_inference_features, harmonic_reconstruct,
-            aggregate_to_3h, compute_hdd_cdd_3h,
-        )
+        from esfex.models.demand_ml import DemandMLModel, build_hourly_features
 
-        if not DemandMLModel.is_available():
+        if not DemandMLModel.is_available("xgboost"):
             raise RuntimeError(
                 "Demand ML model not available. xgboost ships with esfex; "
                 "reinstall with: pip install --upgrade --force-reinstall esfex"
             )
 
-        model = DemandMLModel.load_bundled()
-        temps = np.asarray(temperatures_hourly)
-        n_days = len(temps) // 24
-        temps_daily = temps[:n_days * 24].reshape(n_days, 24)
-        temps_3h = aggregate_to_3h(temps_daily)
-        hdd_3h, cdd_3h = compute_hdd_cdd_3h(temps_3h, base_temp)
-
-        # Predict 3-hourly shape factors
-        demand_3h = np.zeros((n_days, 8))
-        for d in range(n_days):
-            for h in range(8):
-                features = build_inference_features(
-                    gdp_per_capita, population, urbanization_pct,
-                    100.0,  # electricity_access
-                    temps_3h[d, h], hdd_3h[d, h], cdd_3h[d, h],
-                    h * 3, (d % 365) // 30 + 1, d % 7,
-                    latitude, longitude,
-                )
-                demand_3h[d, h] = model.predict(features)[0]
-
-        # Reconstruct hourly
-        hourly = harmonic_reconstruct(
-            demand_3h, temps_daily, beta_cdd, beta_hdd, base_temp,
-        )
-        return hourly.ravel()
+        model = DemandMLModel.load_bundled(engine="xgboost")
+        features = build_hourly_features(
+            iso3, temperatures_hourly, latitude, longitude, int(year),
+            static_features=static_features)
+        shape = model.predict(features)
+        if annual_demand_mwh is None:
+            return shape
+        return shape * (float(annual_demand_mwh) / len(shape))
 
     # ── Climate Profiles ──────────────────────────────────────
 
@@ -510,12 +498,12 @@ class _WorkflowsNamespace:
 
     @staticmethod
     def tsam_cluster(demand, n_periods=10, method="kmedoids"):
-        """Cluster demand into representative periods.
+        """Cluster demand into representative days (24-h periods).
 
         Parameters
         ----------
-        demand : array (n_hours,) or (n_days, 24)
-            Demand time series.
+        demand : array (n_hours,) or (n_hours, n_nodes)
+            Hourly demand: one series, or one column per node.
         n_periods : int
             Number of representative periods.
         method : str
@@ -524,13 +512,18 @@ class _WorkflowsNamespace:
         Returns
         -------
         TSAMResult
-            ``.representative_days``, ``.weights``, ``.mapping``.
+            ``.period_start_hours`` (first hour of each representative
+            day), ``.period_weights`` (days each one stands for),
+            ``.day_period`` (the representative period of each day of the
+            year, in calendar order), ``.num_periods`` and
+            ``.critical_periods``.
         """
         from esfex.models.tsam import compute_tsam_periods
         import numpy as np
-        return compute_tsam_periods(
-            np.asarray(demand), n_periods=n_periods, method=method,
-        )
+        demand = np.asarray(demand, dtype=float)
+        if demand.ndim == 1:
+            demand = demand.reshape(-1, 1)
+        return compute_tsam_periods(demand, num_periods=n_periods, method=method)
 
     @staticmethod
     def help():
@@ -558,7 +551,7 @@ class _WorkflowsNamespace:
     esfex.workflows.ev_profiles(...)               → DataFrame (MW/h)
 
   Demand:
-    esfex.workflows.estimate_demand(...)            → hourly MW array
+    esfex.workflows.estimate_demand(iso3, lat, lon, year) → 8760 h profile
     esfex.workflows.climate_demand_adjustment(...)  → adjusted MW array
 
   OTEC:
@@ -644,24 +637,44 @@ class ESFEXAPI:
     # ── Results I/O ───────────────────────────────────────────
 
     @staticmethod
-    def load_results(path: Union[str, Path]) -> dict[str, Any]:
+    def load_results(
+        path: Union[str, Path], years: list[int] | None = None,
+    ) -> dict[str, Any]:
         """Load simulation results from an HDF5 file.
 
-        Returns a dict with numpy arrays organized by category and year::
+        Reads the ``detailed_results`` and ``summary_results`` groups the
+        runner writes (see the HDF5 output schema) into numpy arrays keyed
+        by year::
 
             {
                 "years": [2025, 2026, ...],
-                "generation": {2025: ndarray, ...},
-                "demand": {2025: ndarray, ...},
-                "prices": {2025: ndarray, ...},
-                "storage": {2025: ndarray, ...},
-                "power_flow": {2025: ndarray, ...},
-                "curtailment": {2025: ndarray, ...},
-                "investments": {2025: {"Solar_PV": 100.0, ...}, ...},
-                "summary": {2025: {"objective": ..., "re_penetration": ...}},
+                "generation": {2025: ndarray[generator, step], ...},
+                "storage": {2025: ndarray[battery, step], ...},   # SOC, MWh
+                "demand": {2025: ndarray[node, step], ...},
+                "prices": {2025: ndarray[node, step], ...},
+                "power_flow": {2025: ndarray[node, node, step], ...},
+                "curtailment": {2025: ndarray[node, step], ...},
+                "investments": {2025: {"Solar PV": 100.0, ...}, ...},
+                "summary": {2025: {"total_cost": ..., "renewable_penetration": ...}},
                 "generator_names": [...],
                 "battery_names": [...],
             }
+
+        ``generation`` and ``storage`` are summed over nodes; rows follow
+        ``generator_names`` / ``battery_names`` (zeros for a unit absent in a
+        year). ``prices`` are the nodal prices (the mean price over nodes
+        when a file has none). ``investments`` is the new capacity of each
+        technology in the year, in MW, summed over nodes. ``summary`` holds
+        the year's scalars (``total_cost``, ``renewable_penetration``,
+        ``co2_emissions``, ``loss_of_load``, ``solve_time``, ...).
+
+        Parameters
+        ----------
+        path : str or Path
+            HDF5 results file.
+        years : list of int, optional
+            Years to read (default: all). Large runs need a lot of memory
+            for all years at once.
 
         Example
         -------
@@ -669,8 +682,12 @@ class ESFEXAPI:
         >>> print(r["years"])
         >>> gen = r["generation"][2025]  # numpy array
         """
+        import re
+
         import h5py
         import numpy as np
+
+        from esfex.io.exporter import demand_node_hours
 
         path = Path(path)
         if not path.exists():
@@ -690,61 +707,107 @@ class ESFEXAPI:
             "battery_names": [],
         }
 
+        def _unit_rows(group, names: list[str]) -> dict[str, np.ndarray]:
+            """{name: series summed over nodes} for a per-unit group."""
+            rows = {}
+            for name, ds in group.items():
+                arr = np.asarray(ds[()], dtype=float)
+                rows[name] = arr.sum(axis=0) if arr.ndim == 2 else arr
+                if name not in names:
+                    names.append(name)
+            return rows
+
+        def _tech_names(f, group: str, prefix: str) -> dict[int, str]:
+            grp = f.get(f"system_configuration/{group}")
+            if grp is None:
+                return {}
+            out_names = {}
+            for key, sub in grp.items():
+                if key.startswith(prefix) and key[len(prefix):].isdigit():
+                    name = sub.attrs.get("name", key)
+                    out_names[int(key[len(prefix):])] = (
+                        name.decode() if isinstance(name, bytes) else str(name))
+            return out_names
+
+        inv_patterns = [
+            (re.compile(r"^investment_tech_investment_power_(\d+)_\d+$"), "tech"),
+            (re.compile(r"^investment_bat_tech_investment_power_(\d+)_\d+$"), "bat"),
+        ]
+
+        gen_rows: dict[int, dict[str, np.ndarray]] = {}
+        soc_rows: dict[int, dict[str, np.ndarray]] = {}
         with h5py.File(path, "r") as f:
-            # Extract years from detailed_results groups
-            for key in sorted(f.keys()):
-                if key.startswith("detailed_results"):
-                    # Nested: detailed_results/year_XXXX_threshold_Y/
-                    for sub in sorted(f[key].keys()):
-                        parts = sub.split("_")
-                        for i, p in enumerate(parts):
-                            if p == "year" and i + 1 < len(parts):
-                                try:
-                                    yr = int(parts[i + 1])
-                                    if yr not in out["years"]:
-                                        out["years"].append(yr)
-                                    grp = f[key][sub]
-                                    # Load available datasets
-                                    for ds_name, out_key in [
-                                        ("generation", "generation"),
-                                        ("demand", "demand"),
-                                        ("prices", "prices"),
-                                        ("storage", "storage"),
-                                        ("power_flow", "power_flow"),
-                                        ("curtailment", "curtailment"),
-                                    ]:
-                                        if ds_name in grp:
-                                            out[out_key][yr] = np.array(grp[ds_name])
-                                except (ValueError, IndexError):
-                                    pass
+            names_by_kind = {
+                "tech": _tech_names(f, "technologies", "technology_"),
+                "bat": _tech_names(f, "battery_technologies", "battery_technology_"),
+            }
+            scenarios = {}
+            for key, grp in (f.get("detailed_results") or {}).items():
+                m = re.match(r"^year_(\d+)", key)
+                if m and (years is None or int(m.group(1)) in years):
+                    scenarios[int(m.group(1))] = grp
 
-            # Summary results
-            if "summary_results" in f:
-                for key in f["summary_results"]:
-                    try:
-                        yr = int(key.replace("year_", ""))
-                        grp = f["summary_results"][key]
-                        summary = {}
-                        for attr in grp.attrs:
-                            summary[attr] = grp.attrs[attr]
-                        for ds in grp:
-                            summary[ds] = np.array(grp[ds])
-                        out["summary"][yr] = summary
-                    except (ValueError, KeyError):
-                        pass
+            for yr in sorted(scenarios):
+                grp = scenarios[yr]
+                out["years"].append(yr)
+                ep = grp.get("electricity_prices")
+                if "demand" in grp:
+                    # [node, step]; old files may hold [step, node]
+                    out["demand"][yr] = demand_node_hours(
+                        grp["demand"], ep.shape[0] if ep is not None else None)
+                for ds_name in ("power_flow", "curtailment"):
+                    if ds_name in grp:
+                        out[ds_name][yr] = np.asarray(grp[ds_name][()])
+                if "nodal_electricity_prices" in grp:
+                    out["prices"][yr] = np.asarray(grp["nodal_electricity_prices"][()])
+                elif ep is not None:
+                    out["prices"][yr] = np.asarray(ep[()])[np.newaxis, :]
+                if "generation" in grp:
+                    gen_rows[yr] = _unit_rows(grp["generation"], out["generator_names"])
+                if "battery_soc" in grp:
+                    soc_rows[yr] = _unit_rows(grp["battery_soc"], out["battery_names"])
 
-            # Generator/battery names from system_configuration
-            if "system_configuration" in f:
-                sc = f["system_configuration"]
-                if "generator_names" in sc:
-                    out["generator_names"] = list(sc["generator_names"].asstr()[:])
-                if "battery_names" in sc:
-                    out["battery_names"] = list(sc["battery_names"].asstr()[:])
+                summary: dict[str, Any] = {}
+                investments: dict[str, float] = {}
+                for attr, value in grp.attrs.items():
+                    if attr.startswith("investment_"):
+                        for pattern, kind in inv_patterns:
+                            m = pattern.match(attr)
+                            if m:
+                                idx = int(m.group(1))
+                                name = names_by_kind[kind].get(idx, f"{kind}_{idx}")
+                                investments[name] = investments.get(name, 0.0) + float(value)
+                    elif not attr.startswith("retirement_"):
+                        summary[attr] = value.item() if hasattr(value, "item") else value
+                out["summary"][yr] = summary
+                if investments:
+                    out["investments"][yr] = investments
 
-        out["years"].sort()
-        n_years = len(out["years"])
-        n_gen = sum(len(v) for v in out["generation"].values())
-        print(f"Loaded {path.name}: {n_years} years, "
+            # Per-year scalars of summary_results (one row per year)
+            sr = f.get("summary_results")
+            if sr is not None and "year" in sr:
+                sr_years = [int(y) for y in sr["year"][()]]
+                for col, ds in sr.items():
+                    if col == "year":
+                        continue
+                    values = ds[()]
+                    for i, yr in enumerate(sr_years):
+                        if yr in out["summary"] and i < len(values):
+                            out["summary"][yr][col] = values[i].item()
+
+        for key, rows_by_year, names in (
+            ("generation", gen_rows, out["generator_names"]),
+            ("storage", soc_rows, out["battery_names"]),
+        ):
+            for yr, rows in rows_by_year.items():
+                if not rows:
+                    continue
+                n_steps = max((len(r) for r in rows.values()), default=0)
+                out[key][yr] = np.array([
+                    rows[n] if n in rows else np.zeros(n_steps) for n in names
+                ])
+
+        print(f"Loaded {path.name}: {len(out['years'])} years, "
               f"{len(out['generator_names'])} generators, "
               f"{len(out['battery_names'])} batteries")
         return out
@@ -793,7 +856,7 @@ class ESFEXAPI:
         config: Any,
         output_dir: Union[str, Path] = "results",
         years: int | None = None,
-        start_year: int = 2025,
+        start_year: int | None = None,
     ):
         """Run a full ESFEX simulation (master + operational dispatch).
 
@@ -805,13 +868,20 @@ class ESFEXAPI:
             Directory for output HDF5 files.
         years : int, optional
             Number of years to simulate (default: all from config).
-        start_year : int
-            First simulation year.
+        start_year : int, optional
+            Label of the first simulated year (default: the year of
+            ``date_start``).
 
         Returns
         -------
         list[YearResults]
             One result object per simulated year.
+
+        Raises
+        ------
+        esfex.runner.RunAbortedError
+            The master problem (``development`` mode) found no plan; nothing
+            was dispatched.
 
         Example
         -------
@@ -837,85 +907,135 @@ class ESFEXAPI:
     # ── Individual solvers ────────────────────────────────────
 
     @staticmethod
-    def solve_master(config: Any, solver: str = "highs") -> dict[str, Any]:
+    def _run_config(config: Any, solver: str | None, **updates):
+        """(config, config_path) with *updates* and the solver applied."""
+        from esfex.config.loader import load_config
+
+        config_path = None
+        if isinstance(config, (str, Path)):
+            config_path = Path(config)
+            config = load_config(config_path)
+        if solver is not None:
+            updates["solver"] = type(config.solver)(
+                **{**config.solver.model_dump(), "name": solver})
+        if updates:
+            config = config.model_copy(update=updates)
+        return config, config_path
+
+    @staticmethod
+    def solve_master(
+        config: Any,
+        solver: str | None = None,
+        years: int | None = None,
+        start_year: int | None = None,
+        output_dir: Union[str, Path] = "results",
+    ) -> dict[str, Any]:
         """Solve only the master (capacity expansion) problem.
+
+        Prepares demand, availability and units exactly like ``esfex.run()``
+        and stops after the master problem (the config is run in
+        ``development`` mode whatever its ``simulation_mode``).
 
         Parameters
         ----------
         config : ESFEXConfig or str or Path
-            Configuration.
-        solver : str
-            Solver name (default: "highs").
+            Configuration object or path to YAML file.
+        solver : str, optional
+            Solver name; default: the config's ``solver.name``.
+        years : int, optional
+            Number of years to plan (default: 25, as ``esfex.run()``).
+        start_year : int, optional
+            First planning year (default: the year of ``date_start``).
+        output_dir : str or Path
+            Directory for the run log (and an HDF5 file holding only the
+            system configuration).
 
         Returns
         -------
         dict
-            Keys: ``investments``, ``retirements``, ``re_targets``,
-            ``objective``, ``solve_time``.
+            ``investments`` and ``retirements`` ({year: {key: value}}, keys
+            as in the HDF5 ``investment_*`` / ``retirement_*`` attributes),
+            ``cumulative_capacities`` ({year: {...}}) and ``re_targets``
+            ({year: fraction}).
 
         Example
         -------
-        >>> sol = esfex.solve_master("config.yaml")
-        >>> print(sol["investments"])
+        >>> sol = esfex.solve_master("config.yaml", years=5)
+        >>> print(sol["investments"][2025])
         """
-        from esfex.bridge.adapters import MasterProblemAdapter
-        from esfex.config.loader import load_config
+        from esfex.runner import Orchestrator
 
-        if isinstance(config, (str, Path)):
-            config = load_config(Path(config))
+        config, config_path = ESFEXAPI._run_config(
+            config, solver, simulation_mode="development")
+        from esfex.runner import RunAbortedError
 
-        adapter = MasterProblemAdapter(config, solver_name=solver)
-        adapter.build_model()
-        status = adapter.solve()
-
-        return {
-            "status": status,
-            "objective": adapter.get_objective_value(),
-            "investments": adapter.get_investment_decisions(),
-            "retirements": adapter.get_retirement_decisions(),
-            "re_targets": adapter.get_re_targets(),
-            "solution": adapter.solution,
-        }
+        orch = Orchestrator(config, output_dir=Path(output_dir), config_path=config_path)
+        try:
+            orch.run(years=years, start_year=start_year, master_only=True)
+        except RunAbortedError as e:
+            raise RuntimeError(
+                f"Master problem failed; see the log in {Path(output_dir) / 'logs'}") from e
+        return orch.master_solution
 
     @staticmethod
     def solve_dispatch(
         config: Any,
-        solver: str = "highs",
-    ) -> dict[str, Any]:
-        """Solve a single operational dispatch problem.
+        solver: str | None = None,
+        year: int | None = None,
+        output_dir: Union[str, Path] = "results",
+    ):
+        """Solve the operational dispatch of one year with the existing units.
+
+        No master problem: the units in the config are dispatched as they
+        are (investment candidates are not built). A ``development`` config
+        is dispatched as ``economic_dispatch``; ``unit_commitment`` and
+        ``economic_dispatch`` configs keep their mode.
 
         Parameters
         ----------
-        config : ESFEXConfig or SystemConfig or str or Path
-            Configuration.
-        solver : str
-            Solver name.
+        config : ESFEXConfig or str or Path
+            Configuration object or path to YAML file.
+        solver : str, optional
+            Solver name; default: the config's ``solver.name``.
+        year : int, optional
+            Data year to dispatch (default: the year of ``date_start``).
+            Year ``Y`` is the ``(Y - year of date_start)``-th 8760-h block
+            of the demand and profile files (a file with fewer years repeats
+            its first year, as in a full run); the result is labelled ``Y``
+            and outage windows count from 1 January of the year of
+            ``date_start``, as in a full run.
+        output_dir : str or Path
+            Directory for the HDF5 results file and the run log.
 
         Returns
         -------
-        dict
-            Solution values: gen_output, prices, curtailment, etc.
+        YearResults
+            ``objective``, ``gen_output``, ``prices``, ``re_penetration``, ...
 
         Example
         -------
-        >>> sol = esfex.solve_dispatch("config.yaml")
-        >>> print(sol.keys())
+        >>> res = esfex.solve_dispatch("config.yaml")
+        >>> print(res.objective, res.gen_output.shape)
         """
-        from esfex.bridge.adapters import PowerSystemAdapter
-        from esfex.config.loader import load_config
+        from esfex.runner import Orchestrator
+        from esfex.utils.temporal import parse_date_start
 
-        if isinstance(config, (str, Path)):
-            config = load_config(Path(config))
-
-        adapter = PowerSystemAdapter(config, solver_name=solver)
-        adapter.build_model()
-        status = adapter.solve()
-
-        return {
-            "status": status,
-            "objective": adapter.get_objective_value(),
-            **adapter.get_solution_values(),
-        }
+        config, config_path = ESFEXAPI._run_config(config, solver)
+        if config.simulation_mode == "development":
+            config = config.model_copy(update={"simulation_mode": "economic_dispatch"})
+        first_year = parse_date_start(config.date_start).year
+        year = first_year if year is None else int(year)
+        if year < first_year:
+            raise ValueError(
+                f"year {year} is before the data's first year {first_year} (date_start)")
+        orch = Orchestrator(config, output_dir=Path(output_dir), config_path=config_path)
+        # The horizon starts at the data's first year, so year Y keeps its
+        # own data block and outage base year; only Y is dispatched.
+        results = orch.run(years=year - first_year + 1, dispatch_years=[year])
+        if not results:
+            raise RuntimeError(
+                f"Dispatch failed; see the log in {Path(output_dir) / 'logs'}")
+        return results[0]
 
     # ── Sensitivity ───────────────────────────────────────────
 
@@ -925,6 +1045,7 @@ class ESFEXAPI:
         parameters: list[dict[str, Any]] | None = None,
         n_samples: int = 64,
         output_dir: Union[str, Path] = "sensitivity_output",
+        years: int | None = None,
     ):
         """Run Sobol global sensitivity analysis.
 
@@ -933,12 +1054,16 @@ class ESFEXAPI:
         config_path : str or Path
             Path to YAML config file.
         parameters : list of dict, optional
-            Each dict: ``{"name": str, "lower": float, "upper": float}``.
-            If None, uses default parameter set.
+            Each dict: ``{"name": str, "lower": float, "upper": float}``,
+            where ``name`` is a config parameter key such as ``"fuel_cost"``
+            (see ``esfex.sensitivity.engine.CONFIG_PARAMETERS``).
+            If None, uses all predefined config parameters.
         n_samples : int
             Base sample count for Saltelli sampling.
         output_dir : str or Path
             Working directory for intermediate files.
+        years : int, optional
+            Years simulated per run (default: the ``esfex run`` default, 25).
 
         Returns
         -------
@@ -952,23 +1077,34 @@ class ESFEXAPI:
         >>> for kpi in result.kpi_names:
         ...     print(f"{kpi}: most sensitive to {result.parameters[result.ST[kpi].argmax()]}")
         """
-        from esfex.sensitivity.engine import SensitivityEngine, SensitivityParameter
+        from esfex.sensitivity.engine import (
+            CONFIG_PARAMETERS,
+            SensitivityEngine,
+            SensitivityParameter,
+            get_config_parameters,
+        )
 
         config_path = str(Path(config_path))
         output_dir = str(Path(output_dir))
 
         if parameters is None:
-            engine = SensitivityEngine(mode="config", parameters=[], n_base_samples=n_samples)
+            params = get_config_parameters()
         else:
-            params = [
-                SensitivityParameter(
-                    name=p["name"],
-                    lower_bound=p.get("lower", 0.5),
-                    upper_bound=p.get("upper", 1.5),
-                )
-                for p in parameters
-            ]
-            engine = SensitivityEngine(mode="config", parameters=params, n_base_samples=n_samples)
+            known = {key: (display, bounds) for key, display, bounds in CONFIG_PARAMETERS}
+            params = []
+            for p in parameters:
+                key = p["name"]
+                if key not in known:
+                    raise ValueError(
+                        f"Unknown sensitivity parameter {key!r}; use one of {sorted(known)}")
+                display, (lo, hi) = known[key]
+                params.append(SensitivityParameter(
+                    name=display, key=key,
+                    lower_bound=p.get("lower", lo), upper_bound=p.get("upper", hi),
+                    category="config",
+                ))
+        engine = SensitivityEngine(mode="config", parameters=params,
+                                   n_base_samples=n_samples, years=years)
 
         def _progress(current, total, msg):
             print(f"  [{current}/{total}] {msg}")
@@ -997,8 +1133,9 @@ class ESFEXAPI:
 
 ── Simulation ─────────────────────────────────────────────────
   esfex.run(config, output_dir)  → Full simulation → YearResults
-  esfex.solve_master(config)     → Capacity expansion only
-  esfex.solve_dispatch(config)   → Operational dispatch only
+  esfex.solve_master(config, years=5)  → Capacity expansion only → dict
+  esfex.solve_dispatch(config, year=2025)
+                                  → One year's dispatch, existing units
 
 ── Analysis ───────────────────────────────────────────────────
   esfex.sensitivity(config_path, params, n_samples)
@@ -1014,7 +1151,7 @@ class ESFEXAPI:
   esfex.workflows.hazard_screening(coords)        → Multi-hazard screen
   esfex.workflows.risk_assessment(maps, comps)    → Composite risk
   esfex.workflows.ev_profiles(...)                → EV demand (MW/h)
-  esfex.workflows.estimate_demand(...)            → ML demand estimate
+  esfex.workflows.estimate_demand(...)            → Site demand profile
   esfex.workflows.climate_demand_adjustment(...)  → HDD/CDD scaling
   esfex.workflows.otec_capacity_factors(tw, tc)   → OTEC daily CFs
   esfex.workflows.tsam_cluster(demand, n)         → Representative days

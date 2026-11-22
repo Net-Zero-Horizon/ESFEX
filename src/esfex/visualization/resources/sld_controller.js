@@ -85,8 +85,19 @@ function initSld() {
         .on('zoom', function(event) {
             rootGroup.attr('transform', event.transform);
             _updateMinimapViewport();
-        });
+            _scheduleViewUpdate(false);
+        })
+        .on('end', function() { _scheduleViewUpdate(true); });
     svg.call(zoomBehavior);
+    // Double-click opens the substation under the pointer (zooms elsewhere).
+    svg.on('dblclick.zoom', null).on('dblclick', _onDoubleClick);
+    document.addEventListener('keydown', function(event) {
+        if (_site && (event.key === 'Escape' || event.key === 'Backspace')) {
+            event.preventDefault();
+            closeSite();
+        }
+    });
+    document.getElementById('sld-bc-system').addEventListener('click', closeSite);
 
     svg.on('click', function(event) {
         if (event.target === svg.node() || event.target.tagName === 'svg') {
@@ -107,7 +118,7 @@ function initSld() {
             var ch = svg.node().clientHeight;
             if (!cw || !ch || cw < 10 || ch < 10) return;  // container not visible yet
             var sc = Math.min(cw / diagramBounds.w, ch / diagramBounds.h);
-            zoomBehavior.scaleExtent([Math.max(0.05, sc), 5]);
+            zoomBehavior.scaleExtent([Math.max(0.001, sc), 5]);
             // Reposition legend to new upper-right corner
             if (currentData) _drawLegend(currentData);
             // Reposition the navigation minimap to the new bottom-left corner
@@ -155,7 +166,7 @@ function layoutAndRender(jsonStr) {
             // step entirely. This is the PowerFactory-style grid layout
             // which is O(n) and finishes before the spinner even paints.
             currentLayouted = elkGraph;
-            render(data, elkGraph);
+            _renderActive();            // stays in an open substation if it still exists
             _showLoading(false);
             _ensureFitView(function() {
                 _setDiagramVisible(true);
@@ -165,7 +176,7 @@ function layoutAndRender(jsonStr) {
         }
         elk.layout(elkGraph).then(function(layouted) {
             currentLayouted = layouted;
-            render(data, layouted);
+            _renderActive();
             _showLoading(false);
             // Wait for valid container dimensions, apply fitView, then reveal
             _ensureFitView(function() {
@@ -214,6 +225,11 @@ function _ensureFitView(callback, attempt) {
 // ══════════════════════════════════════════════════════════════════
 
 function render(data, layouted) {
+    // Draw and measure with every element shown; the view state (level of
+    // detail, culling, name overlay) is re-applied at the end.
+    _resetViewState();
+    _frames = [];
+    _cullLayers = {};
     rootGroup.selectAll('*').remove();
     elementRegistry = {};
     busLayout = {};
@@ -259,6 +275,9 @@ function render(data, layouted) {
                 color: props.color || T.edgeLine,
                 voltageKv: props.voltageKv || 0,
                 label: props.label || bid,
+                elementId: props.elementId || bid,
+                junction: !!props.junction,
+                equipCenter: props.equipCenter,
                 parentNode: props.parentNode,
                 equips: equips,
                 orientation: pyOrient,
@@ -280,10 +299,23 @@ function render(data, layouted) {
         _fixEdgeEndpoints(layouted, busH);
     }
 
+    _frameEdges = layouted.edges || [];
+
+    // ── Open substation: lines to other substations end in short stubs ──
+    if (data.siteView && layouted.edges) {
+        _cutStubs(layouted.edges, (data.nodeGroups || [])[0], busH, stubLen, eqSize);
+    }
+
     // ── Draw node group backgrounds ──
     var nodeGroups = data.nodeGroups || [];
     nodeGroups.forEach(function(ng) {
         _drawNodeGroup(gGroups, ng, busH, stubLen, eqSize, eqSpace);
+    });
+
+    // ── Bars and their labels are obstacles before any edge is drawn, so the
+    //    transformer windings and edge labels placed below keep off them. ──
+    Object.keys(busLayout).forEach(function(bid) {
+        _addBusObstacle(busLayout[bid], busH);
     });
 
     // ── Draw inter-bus edges ──
@@ -313,6 +345,11 @@ function render(data, layouted) {
 
     // ── Navigation minimap (bottom-left, fixed) for large systems ──
     _drawMinimap();
+
+    // ── Level of detail, culling index, substation names ──
+    _frames.sort(function(a, b) { return b.prio - a.prio; });
+    _buildCullIndex();
+    _scheduleViewUpdate(true);
 }
 
 
@@ -528,6 +565,13 @@ function _fixEdgeEndpoints(layouted, busH) {
     });
 }
 
+/** X of the first equipment stub below a horizontal bar: the row is
+ *  centred on the bar, or on ``equipCenter`` when the layout set one. */
+function _equipStartX(bl, rowW, eqSpace) {
+    var c = (bl.equipCenter != null) ? bl.equipCenter : bl.barLen / 2;
+    return bl.x + c - rowW / 2 + eqSpace / 2;
+}
+
 /** Get equipment stub positions along the bar axis for a bus. */
 function _getEquipStubPositions(bl, isVert) {
     var equips = bl.equips || [];
@@ -546,7 +590,7 @@ function _getEquipStubPositions(bl, isVert) {
         }
     } else {
         var rowW = nEq * eqSpace;
-        var startX = bl.x + (barLen - rowW) / 2 + eqSpace / 2;
+        var startX = _equipStartX(bl, rowW, eqSpace);
         for (var i = 0; i < nEq; i++) {
             positions.push(startX + i * eqSpace);
         }
@@ -670,10 +714,11 @@ function _buildOrthogonalRoute(start, end, laneY) {
 // Drawing: Node groups (substation backgrounds)
 // ══════════════════════════════════════════════════════════════════
 
-function _drawNodeGroup(layer, ng, busH, stubLen, eqSize, eqSpace) {
-    var busIds = ng.busIds || [];
-    if (busIds.length === 0) return;
+/** Frame of a substation group in diagram space, { x, y, w, h }, or null. */
+var _frameEdges = null;   // the edges being drawn (set by render)
 
+function _frameRect(ng, busH, stubLen, eqSize) {
+    var busIds = ng.busIds || [];
     var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     busIds.forEach(function(bid) {
         var bl = busLayout[bid];
@@ -698,13 +743,36 @@ function _drawNodeGroup(layer, ng, busH, stubLen, eqSize, eqSpace) {
             maxY = Math.max(maxY, bl.y + eqExtentY);
         }
     });
-    if (minX === Infinity) return;
+    if (minX === Infinity) return null;
+
+    // Routes inside the substation (lines between its bars, transformers
+    // taken past a bar in between) stay inside the frame, with room for a
+    // routed transformer's windings and rating, as the Python layout
+    // reserved for the block.
+    var inside = {};
+    busIds.forEach(function(b) { inside[b] = true; });
+    (_frameEdges || []).forEach(function(e) {
+        if (!inside[e.sources[0]] || !inside[e.targets[0]]) return;
+        var p = e.properties || {};
+        var px = (p.edgeType === 'transformer' && !p.transformerVertical) ? 50 : 10;
+        (e.sections || []).forEach(function(sec) {
+            [sec.startPoint, sec.endPoint].concat(sec.bendPoints || []).forEach(function(q) {
+                minX = Math.min(minX, q.x - px); maxX = Math.max(maxX, q.x + px);
+                minY = Math.min(minY, q.y - 10); maxY = Math.max(maxY, q.y + 10);
+            });
+        });
+    });
 
     var pad = 30, titleH = 28;
-    var gx = minX - pad;
-    var gy = minY - pad - titleH;
-    var gw = maxX - minX + 2 * pad;
-    var gh = maxY - minY + 2 * pad + titleH;
+    return { x: minX - pad, y: minY - pad - titleH,
+             w: maxX - minX + 2 * pad, h: maxY - minY + 2 * pad + titleH };
+}
+
+function _drawNodeGroup(layer, ng, busH, stubLen, eqSize, eqSpace) {
+    var busIds = ng.busIds || [];
+    var fr = _frameRect(ng, busH, stubLen, eqSize);
+    if (!fr) return;
+    var gx = fr.x, gy = fr.y, gw = fr.w, gh = fr.h;
 
     // Group outline (no fill, no shadow)
     layer.append('rect')
@@ -716,6 +784,19 @@ function _drawNodeGroup(layer, ng, busH, stubLen, eqSize, eqSpace) {
         .attr('stroke', T.groupBorder)
         .attr('stroke-width', 1.2)
         .attr('stroke-dasharray', '6,3');
+
+    // Overview name (drawn at a fixed screen size while titles are hidden).
+    var maxKv = 0;
+    busIds.forEach(function(bid) {
+        var bl = busLayout[bid];
+        if (bl && bl.voltageKv > maxKv) maxKv = bl.voltageKv;
+    });
+    // Names that are only an imported identifier ("Substation way/424481948")
+    // yield to real names.
+    var idOnly = /\d{5,}/.test(ng.name || '');
+    _frames.push({ name: ng.name || '', key: _groupKey(ng), x: gx, y: gy, w: gw, h: gh,
+                   prio: (idOnly ? 0 : 1e12) + maxKv * 1e6 + busIds.length * 1e3
+                         + Math.min(999, gw * gh / 1e4) });
 
     // Title label
     var titleText = ng.name;
@@ -741,9 +822,6 @@ function _drawBus(gBuses, gStubs, gEquip, bid, busH, stubLen, eqSize, eqSpace) {
     var nEq = equips.length;
     var isVert = bl.orientation === 90;
     var barLen = bl.barLen;
-
-    // Register bus bar as obstacle for label collision avoidance
-    _addBusObstacle(bl, busH);
 
     // ── Bus bar group ──
     var busG = gBuses.append('g')
@@ -894,6 +972,8 @@ function _drawBus(gBuses, gStubs, gEquip, bid, busH, stubLen, eqSize, eqSpace) {
             .attr('fill', 'transparent');
 
         if (labelsVisible) {
+            // Both labels carry a halo of the background colour, so a line
+            // reaching the bar from above breaks under the text.
             // Voltage label — ABOVE bus bar, tight to bar
             if (bl.voltageKv) {
                 busG.append('text').attr('class', 'data-label')
@@ -902,22 +982,29 @@ function _drawBus(gBuses, gStubs, gEquip, bid, busH, stubLen, eqSize, eqSpace) {
                     .attr('font-family', 'Segoe UI, Roboto, sans-serif')
                     .attr('font-size', '10px').attr('font-weight', '700')
                     .attr('fill', bl.color)
+                    .attr('paint-order', 'stroke').attr('stroke', T.bg)
+                    .attr('stroke-width', 3).attr('stroke-linejoin', 'round')
                     .text(bl.voltageKv + ' kV');
             }
-            // Bus name — ABOVE, right-aligned
-            busG.append('text').attr('class', 'data-label')
+            // Bus name — ABOVE, right-aligned. A line junction's bar is
+            // too short for both labels: its name stays in the tooltip.
+            // A name longer than the room beside the voltage is shortened.
+            var name = bl.junction ? '' : _fitBusName(bl);
+            if (name) busG.append('text').attr('class', 'data-label')
                 .attr('x', barLen - 4).attr('y', -5)
                 .attr('text-anchor', 'end').attr('dominant-baseline', 'auto')
                 .attr('font-family', 'Segoe UI, Roboto, sans-serif')
                 .attr('font-size', '9px')
-                .attr('fill', T.labelText).attr('opacity', 0.75)
-                .text(bl.label);
+                .attr('fill', T.labelText).attr('fill-opacity', 0.75)
+                .attr('paint-order', 'stroke').attr('stroke', T.bg)
+                .attr('stroke-width', 3).attr('stroke-linejoin', 'round')
+                .text(name);
         }
 
         // ── Equipment row BELOW bus ──
         if (nEq > 0) {
             var rowW = nEq * eqSpace;
-            var startX = bl.x + (barLen - rowW) / 2 + eqSpace / 2;
+            var startX = _equipStartX(bl, rowW, eqSpace);
             var stubTop = bl.y + busH;
             var eqCenterY = stubTop + stubLen + eqSize / 2;
 
@@ -969,12 +1056,12 @@ function _drawBus(gBuses, gStubs, gEquip, bid, busH, stubLen, eqSize, eqSpace) {
     // ── Common: interaction ──
     busG.on('click', function(event) {
         event.stopPropagation();
-        _selectElement('bus', bid, busG);
+        _selectElement('bus', bl.elementId, busG);
     }).on('mouseenter', function(event) {
         _showTooltip(event, bl.label, bl.voltageKv ? bl.voltageKv + ' kV' : '');
     }).on('mouseleave', _hideTooltip);
 
-    elementRegistry['bus:' + bid] = { group: busG, props: bl };
+    elementRegistry['bus:' + bl.elementId] = { group: busG, props: bl };
 }
 
 /**
@@ -1072,12 +1159,13 @@ function _drawPendingLabel(e) {
         labelY = placed.y;
     }
 
-    e.g.append('rect')
+    var lg = e.g.append('g').attr('class', 'lod-label');
+    lg.append('rect')
         .attr('x', labelX - labelW / 2).attr('y', labelY - 9)
         .attr('width', labelW).attr('height', labelH).attr('rx', 4)
         .attr('fill', T.edgeLabelBg).attr('stroke', e.color)
         .attr('stroke-width', 0.8).attr('opacity', inline ? 1 : 0.95);
-    e.g.append('text')
+    lg.append('text')
         .attr('x', labelX).attr('y', labelY + 1)
         .attr('text-anchor', 'middle').attr('dominant-baseline', 'central')
         .attr('font-family', 'Segoe UI, Roboto, sans-serif')
@@ -1106,6 +1194,50 @@ function _longestHSeg(sections) {
         }
     }
     return best;
+}
+
+/**
+ * Spot for an inline symbol of half-size (hw, hh), measured along the line,
+ * on a routed polyline. Inner segments only (the end stubs run into bars),
+ * vertical ones first, longest first; on each, the midpoint and then
+ * positions sliding along the segment, until one clears every obstacle
+ * placed so far (parallel circuits would otherwise stack their symbols on
+ * the same spot). Returns {x, y, vertical} or null.
+ */
+function _placeOnRoute(sections, hw, hh, ignoreOwner) {
+    var pts = [];
+    sections.forEach(function(sec) {
+        pts.push(sec.startPoint);
+        if (sec.bendPoints) sec.bendPoints.forEach(function(bp) { pts.push(bp); });
+        pts.push(sec.endPoint);
+    });
+    var segs = [];
+    for (var i = 2; i < pts.length - 1; i++) {
+        var a = pts[i - 1], b = pts[i];
+        var vertical = Math.abs(a.x - b.x) < 0.5;
+        var len = vertical ? Math.abs(a.y - b.y) : Math.abs(a.x - b.x);
+        if (len >= 2 * hh + 8) segs.push({ a: a, b: b, vertical: vertical, len: len });
+    }
+    segs.sort(function(p, q) {
+        if (p.vertical !== q.vertical) return p.vertical ? -1 : 1;
+        return q.len - p.len;
+    });
+    for (var k = 0; k < segs.length; k++) {
+        var sg = segs[k];
+        var mx = (sg.a.x + sg.b.x) / 2, my = (sg.a.y + sg.b.y) / 2;
+        var room = sg.len / 2 - hh - 4;
+        var offs = [0];
+        for (var d = 2 * hh + 6; d <= room; d += 2 * hh + 6) { offs.push(d); offs.push(-d); }
+        for (var j = 0; j < offs.length; j++) {
+            var x = sg.vertical ? mx : mx + offs[j];
+            var y = sg.vertical ? my + offs[j] : my;
+            var bx = sg.vertical ? hw : hh, by = sg.vertical ? hh : hw;
+            if (!_overlapsAny(x - bx, y - by, x + bx, y + by, 2, ignoreOwner)) {
+                return { x: x, y: y, vertical: sg.vertical };
+            }
+        }
+    }
+    return null;
 }
 
 /**
@@ -1193,7 +1325,9 @@ function _drawEdge(layer, edge, busH) {
     // Verify connectivity
     var srcId = (edge.sources && edge.sources[0]) || '';
     var tgtId = (edge.targets && edge.targets[0]) || '';
-    if (!busLayout[srcId] || !busLayout[tgtId]) return;
+    var stub = props.stubEnd ? props : null;   // one end outside the open substation
+    if (stub ? !busLayout[stub.stubEnd === 'target' ? srcId : tgtId]
+             : (!busLayout[srcId] || !busLayout[tgtId])) return;
 
     var edgeOwner = edge.id || (srcId + '->' + tgtId);
     // Register this line's path as an obstacle (tagged with its own id) so
@@ -1215,23 +1349,20 @@ function _drawEdge(layer, edge, busH) {
         .attr('stroke', 'transparent')
         .attr('stroke-width', 14);
 
-    // Connection dots at bus bars
+    // Connection dots at bus bars (a stub has a bar at one end only)
     var sec0 = sections[0];
     var secLast = sections[sections.length - 1];
-    g.append('circle')
-        .attr('cx', sec0.startPoint.x).attr('cy', sec0.startPoint.y)
-        .attr('r', 5).attr('fill', color)
-        .attr('stroke', _darken(color, 0.25)).attr('stroke-width', 1);
-    g.append('circle')
-        .attr('cx', secLast.endPoint.x).attr('cy', secLast.endPoint.y)
-        .attr('r', 5).attr('fill', color)
-        .attr('stroke', _darken(color, 0.25)).attr('stroke-width', 1);
-
-    // Register connection dots as obstacles (owned by this edge)
-    _addObstacle(sec0.startPoint.x - 6, sec0.startPoint.y - 6,
-                 sec0.startPoint.x + 6, sec0.startPoint.y + 6, edgeOwner);
-    _addObstacle(secLast.endPoint.x - 6, secLast.endPoint.y - 6,
-                 secLast.endPoint.x + 6, secLast.endPoint.y + 6, edgeOwner);
+    var dots = [];
+    if (!stub || stub.stubEnd === 'target') dots.push(sec0.startPoint);
+    if (!stub || stub.stubEnd === 'source') dots.push(secLast.endPoint);
+    dots.forEach(function(p) {
+        g.append('circle')
+            .attr('cx', p.x).attr('cy', p.y)
+            .attr('r', 5).attr('fill', color)
+            .attr('stroke', _darken(color, 0.25)).attr('stroke-width', 1);
+        // Register connection dots as obstacles (owned by this edge)
+        _addObstacle(p.x - 6, p.y - 6, p.x + 6, p.y + 6, edgeOwner);
+    });
 
     // Edge path. Vertical transformers draw their own stubs around the
     // symbol (below) so no line crosses over the windings.
@@ -1252,8 +1383,10 @@ function _drawEdge(layer, edge, busH) {
             .attr('stroke-linejoin', 'round');
     }
 
-    // Midpoint for symbols and labels
+    // Midpoint for symbols and labels. The symbol is an obstacle of its own,
+    // so the element's label (which ignores its own line) keeps off it.
     var mid = _edgeMidpoint(sections);
+    var symOwner = edgeOwner + '#symbol';
 
     // Transformer: two coupled windings sitting BETWEEN the two bars, always
     // vertical, with short stubs from each bar to a winding. The Python side
@@ -1280,23 +1413,32 @@ function _drawEdge(layer, edge, busH) {
             .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
         g.append('circle').attr('cx', txx).attr('cy', cBot).attr('r', r)
             .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
-        _addObstacle(txx - r - 2, cTop - r - 2, txx + r + 2, cBot + r + 2, edgeOwner);
+        _addObstacle(txx - r - 2, cTop - r - 2, txx + r + 2, cBot + r + 2, symOwner);
         mid = { x: txx, y: tmid };   // label sits beside the symbol
     } else if (edgeType === 'transformer') {
-        // Non-adjacent transformer routed in a side channel: place the two
-        // coupled windings on the channel's vertical run (the polyline is
-        // already drawn) so the symbol sits on the line, never on a bar.
+        // Transformer routed along channels (between two blocks, or around
+        // other bars): the two coupled windings sit on the polyline, along
+        // its direction, on a free spot of an inner segment.
         var r2 = 11, off2 = 8;
-        g.append('circle').attr('cx', mid.x).attr('cy', mid.y - off2).attr('r', r2)
+        var spot = stub ? stub.stubSymbol
+                        : _placeOnRoute(sections, r2 + 2, off2 + r2 + 2, edgeOwner);
+        var vert = spot ? spot.vertical : true;
+        if (spot) mid = { x: spot.x, y: spot.y };
+        var ox = vert ? 0 : off2, oy = vert ? off2 : 0;
+        g.append('circle').attr('cx', mid.x - ox).attr('cy', mid.y - oy).attr('r', r2)
             .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
-        g.append('circle').attr('cx', mid.x).attr('cy', mid.y + off2).attr('r', r2)
+        g.append('circle').attr('cx', mid.x + ox).attr('cy', mid.y + oy).attr('r', r2)
             .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2.5);
-        _addObstacle(mid.x - r2 - 2, mid.y - off2 - r2 - 2, mid.x + r2 + 2, mid.y + off2 + r2 + 2, edgeOwner);
+        var hx = r2 + 2 + ox, hy = r2 + 2 + oy;
+        _addObstacle(mid.x - hx, mid.y - hy, mid.x + hx, mid.y + hy, symOwner);
     }
 
-    // Converter IEC symbol (square with ~/= or ~/Hz)
+    // Converter IEC symbol (square with ~/= or ~/Hz), on a free spot of an
+    // inner segment (the route's midpoint can fall on a bar).
     if (edgeType === 'converter') {
         var cs = 20;
+        var cspot = stub ? null : _placeOnRoute(sections, cs + 2, cs + 2, edgeOwner);
+        if (cspot) mid = { x: cspot.x, y: cspot.y };
         g.append('rect').attr('x', mid.x - cs).attr('y', mid.y - cs)
             .attr('width', cs * 2).attr('height', cs * 2).attr('rx', 3)
             .attr('fill', T.bg).attr('stroke', color).attr('stroke-width', 2);
@@ -1313,13 +1455,17 @@ function _drawEdge(layer, edge, busH) {
             .attr('font-size', isAcdc ? '12px' : '10px').attr('font-weight', '700')
             .attr('fill', color).text(isAcdc ? '=' : 'Hz');
         // Register converter symbol as obstacle
-        _addObstacle(mid.x - cs - 2, mid.y - cs - 2, mid.x + cs + 2, mid.y + cs + 2, edgeOwner);
+        _addObstacle(mid.x - cs - 2, mid.y - cs - 2, mid.x + cs + 2, mid.y + cs + 2, symOwner);
     }
 
     // Defer the label to the final pass (after every bar/equipment/edge is a
     // registered obstacle) so it can avoid ALL elements while still resting on
     // its own line.
-    if (labelsVisible && props.label) {
+    if (stub) _drawStubEnd(g, stub, color);
+
+    // A stub's own label would crowd the neighbouring stubs: it shows the
+    // far substation instead, and the line label stays in the tooltip.
+    if (labelsVisible && props.label && !stub) {
         _pendingLabels.push({
             g: g, props: props, sections: sections, mid: mid,
             edgeType: edgeType, color: color, owner: edgeOwner,
@@ -1327,19 +1473,24 @@ function _drawEdge(layer, edge, busH) {
     }
 
     // Interaction
-    var typeNames = {
-        'transmission': 'Line', 'transformer': 'Transformer',
-        'converter': (props.elementType === 'acdc_converter' ? 'AC/DC Converter' : 'Freq. Converter'),
-    };
     g.on('click', function(event) {
         event.stopPropagation();
         if (props.elementType) _selectElement(props.elementType, props.elementId, g);
     }).on('mouseenter', function(event) {
-        _showTooltip(event, (typeNames[edgeType] || 'Edge') + ' ' + (props.elementId || ''), props.label || '');
+        var sub = props.label || '';
+        if (stub) {
+            var to = _t('web.sld.tt_to_site', {name: stub.stubName});
+            sub = sub ? sub + ' \u2014 ' + to : to;
+        }
+        _showTooltip(event, _edgeTitle(edgeType, props), sub);
     }).on('mouseleave', _hideTooltip);
 
     if (props.elementType) {
         elementRegistry[props.elementType + ':' + props.elementId] = { group: g, props: props };
+        // The results overlays look lines up as 'line:<id>'.
+        if (props.elementType === 'transmission') {
+            elementRegistry['line:' + props.elementId] = elementRegistry['transmission:' + props.elementId];
+        }
     }
 }
 
@@ -1348,22 +1499,50 @@ function _drawEdge(layer, edge, busH) {
 // Legend (fixed overlay — does not zoom/pan)
 // ══════════════════════════════════════════════════════════════════
 
-/** Readable labels for equipment symbol types. */
-var _equipLabels = {
-    'gen-renewable':    'Renewable Gen.',
-    'gen-nonrenewable': 'Non-Renew. Gen.',
-    'battery':          'Battery',
-    'load':             'Load',
-    'electrolyzer':     'Electrolyzer',
-    'acdc-converter':   'AC/DC Converter',
-    'freq-converter':   'Freq. Converter',
-};
+/** Tooltip title of a line, transformer or converter: its type and id.
+ *  The type ids (edgeType / elementType) stay as they are for Python. */
+function _edgeTitle(edgeType, props) {
+    var id = props.elementId || '';
+    if (edgeType === 'transmission') return _t('web.sld.tt_line', {id: id});
+    if (edgeType === 'transformer') return _t('web.sld.tt_transformer', {id: id});
+    if (edgeType === 'converter') {
+        return props.elementType === 'acdc_converter'
+            ? _t('web.sld.tt_acdc_converter', {id: id})
+            : _t('web.sld.tt_freq_converter', {id: id});
+    }
+    return _t('web.sld.tt_edge', {id: id});
+}
 
-/** Readable labels and visual specs for edge types. */
+/** Readable label of an equipment symbol type (the legend's rows). */
+function _equipLabel(sym) {
+    switch (sym) {
+        case 'gen-renewable':    return _t('web.sld.equip_gen_renewable');
+        case 'gen-nonrenewable': return _t('web.sld.equip_gen_nonrenewable');
+        case 'battery':          return _t('web.sld.equip_battery');
+        case 'load':             return _t('web.sld.equip_load');
+        case 'electrolyzer':     return _t('web.sld.equip_electrolyzer');
+        case 'acdc-converter':   return _t('web.sld.equip_acdc_converter');
+        case 'freq-converter':   return _t('web.sld.equip_freq_converter');
+        default:                 return sym;
+    }
+}
+
+/** Readable label of an edge type (the legend's connection rows). */
+function _edgeLabel(type) {
+    switch (type) {
+        case 'transformer': return _t('web.sld.edge_transformer');
+        case 'converter':   return _t('web.sld.edge_converter');
+        case 'mismatch':    return _t('web.sld.edge_voltage_mismatch');
+        default:            return _t('web.sld.edge_transmission');
+    }
+}
+
+/** Visual specs for edge types. */
 var _edgeSpecs = {
-    'transmission': { label: 'Transmission Line', dash: 'none', sw: 2.5, sym: null },
-    'transformer':  { label: 'Transformer',       dash: 'none', sw: 2,   sym: 'trafo' },
-    'converter':    { label: 'Converter',          dash: '6,3',  sw: 2,   sym: 'conv' },
+    'transmission': { dash: 'none', sw: 2.5, sym: null },
+    'transformer':  { dash: 'none', sw: 2,   sym: 'trafo' },
+    'converter':    { dash: '6,3',  sw: 2,   sym: 'conv' },
+    'mismatch':     { dash: '6,4',  sw: 2.5, sym: null },
 };
 
 /**
@@ -1388,17 +1567,27 @@ function _drawLegend(data) {
         });
     });
 
+    // A line takes the colour of its voltage (the Voltage Levels rows), so
+    // its sample is neutral: it took the colour of the first line drawn,
+    // red when that line was a voltage mismatch. A mismatch line (red,
+    // dashed) gets its own row.
     var edgeTypes = [];
     var edgeSeen = {};
+    var mismatch = null;
     var edges = (data.elkGraph && data.elkGraph.edges) || [];
     edges.forEach(function(e) {
         var p = e.properties || {};
         var et = p.edgeType || 'transmission';
+        if (p.voltageMismatch && !mismatch) {
+            mismatch = { type: 'mismatch', color: p.color || T.edgeLine };
+        }
         if (!edgeSeen[et]) {
             edgeSeen[et] = true;
-            edgeTypes.push({ type: et, color: p.color || T.edgeLine });
+            edgeTypes.push({ type: et,
+                             color: et === 'transmission' ? T.edgeLine : (p.color || T.edgeLine) });
         }
     });
+    if (mismatch) edgeTypes.push(mismatch);
 
     var voltages = [];
     var seenKv = {};
@@ -1418,7 +1607,13 @@ function _drawLegend(data) {
     var rowH = 18;
     var padX = 10, padY = 8;
     var symColW = 32;       // width reserved for symbol/swatch column
-    var textColW = 100;     // width for label text
+    var textColW = 100;     // width for label text (wider for longer translations)
+    equipTypes.forEach(function(et) {
+        textColW = Math.max(textColW, _textWidth(_equipLabel(et.sym), 9) + 6);
+    });
+    edgeTypes.forEach(function(et) {
+        textColW = Math.max(textColW, _textWidth(_edgeLabel(et.type), 9) + 6);
+    });
     var legendW = padX + symColW + 4 + textColW + padX;
     var cw = svg.node().clientWidth || 800;
 
@@ -1457,7 +1652,7 @@ function _drawLegend(data) {
         .attr('font-family', 'Segoe UI, Roboto, sans-serif')
         .attr('font-size', '10px').attr('font-weight', '700')
         .attr('fill', T.groupTitle)
-        .text('Legend');
+        .text(_t('web.sld.legend'));
 
     var curY = titleH + padY;
 
@@ -1475,7 +1670,7 @@ function _drawLegend(data) {
 
     // ── Section: Equipment ──
     if (hasEquip) {
-        _sectionHeader('Equipment');
+        _sectionHeader(_t('web.sld.legend_equipment'));
         equipTypes.forEach(function(et) {
             var symCx = padX + symColW / 2;
             var symCy = curY + rowH / 2;
@@ -1498,7 +1693,7 @@ function _drawLegend(data) {
                 .attr('font-family', 'Segoe UI, Roboto, sans-serif')
                 .attr('font-size', '9px')
                 .attr('fill', T.labelText)
-                .text(_equipLabels[et.sym] || et.sym);
+                .text(_equipLabel(et.sym));
 
             curY += rowH;
         });
@@ -1506,7 +1701,7 @@ function _drawLegend(data) {
 
     // ── Section: Connections ──
     if (hasEdges) {
-        _sectionHeader('Connections');
+        _sectionHeader(_t('web.sld.legend_connections'));
         edgeTypes.forEach(function(et) {
             var spec = _edgeSpecs[et.type] || _edgeSpecs['transmission'];
             var lx1 = padX + 2;
@@ -1544,7 +1739,7 @@ function _drawLegend(data) {
                 .attr('font-family', 'Segoe UI, Roboto, sans-serif')
                 .attr('font-size', '9px')
                 .attr('fill', T.labelText)
-                .text(spec.label);
+                .text(_edgeLabel(et.type));
 
             curY += rowH;
         });
@@ -1552,7 +1747,7 @@ function _drawLegend(data) {
 
     // ── Section: Voltage Levels ──
     if (hasVolts) {
-        _sectionHeader('Voltage Levels');
+        _sectionHeader(_t('web.sld.legend_voltage_levels'));
         voltages.forEach(function(v) {
             var lx1 = padX + 4;
             var lx2 = padX + symColW - 4;
@@ -1726,6 +1921,8 @@ function clearSelection() {
 function highlightElement(type, id) {
     clearSelection();
     var key = type + ':' + id;
+    // Not in the open substation: show it in the whole system.
+    if (_site && !elementRegistry[key]) closeSite();
     var e = elementRegistry[key];
     if (e) {
         selectedKey = key;
@@ -1770,6 +1967,7 @@ function _updateDiagramBounds(gGrid) {
             [diagramBounds.x + diagramBounds.w + 50, diagramBounds.y + diagramBounds.h + 50],
         ]);
     svg.call(zoomBehavior);
+    svg.on('dblclick.zoom', null);   // double-click is handled by _onDoubleClick
 }
 
 /**
@@ -1789,7 +1987,7 @@ function fitView(animate) {
     var sc = Math.min(cw / db.w, ch / db.h);
 
     // Clamp zoom-out to this fit scale (diagram always fills panel)
-    zoomBehavior.scaleExtent([Math.max(0.05, sc), 5]);
+    zoomBehavior.scaleExtent([Math.max(0.001, sc), 5]);
 
     var tx = (cw - db.w * sc) / 2 - db.x * sc;
     var ty = (ch - db.h * sc) / 2 - db.y * sc;
@@ -1806,6 +2004,510 @@ function fitView(animate) {
 
 
 // ══════════════════════════════════════════════════════════════════
+// Substation drill-down
+// ══════════════════════════════════════════════════════════════════
+//
+// Double-clicking a substation frame opens it on its own: its buses,
+// equipment and internal transformers at full size, and every line to
+// another substation cut to a short straight stub that ends in the far
+// substation's name ("→ Name", click to open that one). The breadcrumb
+// (top left) or Escape goes back to the whole system, at the zoom it
+// was left at. Element ids are unchanged, so selection and the results
+// overlays work the same in both views.
+
+var STUB_OUT = 40;              // stub length outside the frame
+var STUB_OUT_XFMR = 80;         // room for a transformer symbol on the stub
+var _site = null;               // { key, name } of the open substation
+var _systemView = null;         // system-view zoom to restore on the way back
+var _ctgJson = null;            // last contingency overlay, redrawn on view change
+
+function _groupKey(ng) {
+    return ng.siteId != null ? 'site:' + ng.siteId : 'node:' + ng.nodeId;
+}
+
+function _sectionPoints(sections) {
+    var pts = [];
+    sections.forEach(function(sec) {
+        pts.push(sec.startPoint);
+        if (sec.bendPoints) sec.bendPoints.forEach(function(bp) { pts.push(bp); });
+        pts.push(sec.endPoint);
+    });
+    return pts;
+}
+
+/**
+ * Data for one substation: its buses and internal edges, and its lines to
+ * other substations marked as stubs with the far substation's name. A far
+ * end on an unframed junction (a tap point) is followed through it to the
+ * nearest substations behind it; the stub names up to two of them and
+ * links to the first.
+ */
+function _siteData(key) {
+    if (!currentData || !currentLayouted) return null;
+    var groups = currentData.nodeGroups || [];
+    var ng = null, groupOf = {};
+    groups.forEach(function(g) {
+        if (_groupKey(g) === key) ng = g;
+        (g.busIds || []).forEach(function(b) { groupOf[b] = g; });
+    });
+    if (!ng) return null;
+    var inside = {};
+    ng.busIds.forEach(function(b) { inside[b] = true; });
+    var label = {}, adj = {};
+    (currentLayouted.children || []).forEach(function(c) {
+        label[c.id] = (c.properties && c.properties.label) || c.id;
+    });
+    var allEdges = currentLayouted.edges || [];
+    allEdges.forEach(function(e) {
+        var s = e.sources[0], t = e.targets[0];
+        (adj[s] = adj[s] || []).push(t);
+        (adj[t] = adj[t] || []).push(s);
+    });
+    function farEnd(bid) {
+        if (groupOf[bid]) return { name: groupOf[bid].name, key: _groupKey(groupOf[bid]) };
+        // Unframed junction (a tap point): the nearest substations behind it.
+        var seen = {}, level = [bid], found = [];
+        seen[bid] = true;
+        while (level.length && !found.length) {
+            var next = [];
+            level.forEach(function(b) {
+                (adj[b] || []).forEach(function(n) {
+                    if (seen[n] || inside[n]) return;
+                    seen[n] = true;
+                    if (!groupOf[n]) next.push(n);
+                    else if (found.indexOf(groupOf[n]) < 0) found.push(groupOf[n]);
+                });
+            });
+            level = next;
+        }
+        if (!found.length) return { name: label[bid] || bid, key: null };
+        found.sort(function(a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
+        var name = found.slice(0, 2).map(function(g) { return g.name; }).join(' / ');
+        if (found.length > 2) name += ' +' + (found.length - 2);
+        return { name: name, key: _groupKey(found[0]) };
+    }
+    var edges = [];
+    allEdges.forEach(function(e) {
+        var si = !!inside[e.sources[0]], ti = !!inside[e.targets[0]];
+        if (si && ti) { edges.push(e); return; }
+        if (!si && !ti) return;
+        var far = farEnd(si ? e.targets[0] : e.sources[0]);
+        var c = {};
+        for (var k in e) c[k] = e[k];
+        c.fullSections = e.sections || [];
+        c.properties = {};
+        for (var p in (e.properties || {})) c.properties[p] = e.properties[p];
+        c.properties.stubEnd = si ? 'target' : 'source';
+        c.properties.stubName = far.name;
+        c.properties.stubSite = far.key;
+        edges.push(c);
+    });
+    var elkGraph = {};
+    for (var k2 in currentLayouted) elkGraph[k2] = currentLayouted[k2];
+    elkGraph.children = (currentLayouted.children || []).filter(function(c) { return inside[c.id]; });
+    elkGraph.edges = edges;
+    var data = {};
+    for (var k3 in currentData) data[k3] = currentData[k3];
+    data.elkGraph = elkGraph;
+    data.nodeGroups = [ng];
+    data.siteView = true;
+    return { data: data, layouted: elkGraph, ng: ng };
+}
+
+/** Direction a stub leaves its bar: away from the bar face it starts on. */
+function _stubDir(bl, a, seq, busH) {
+    if (bl) {
+        if (bl.orientation === 90) {
+            var cx = bl.x + busH / 2;
+            if (Math.abs(a.x - cx) > 0.5) return { x: a.x > cx ? 1 : -1, y: 0 };
+        } else {
+            var cy = bl.y + busH / 2;
+            if (Math.abs(a.y - cy) > 0.5) return { x: 0, y: a.y > cy ? 1 : -1 };
+        }
+    }
+    for (var i = 1; i < seq.length; i++) {
+        var dx = seq[i].x - a.x, dy = seq[i].y - a.y;
+        if (Math.abs(dx) + Math.abs(dy) > 0.5) {
+            return Math.abs(dx) >= Math.abs(dy) ? { x: Math.sign(dx), y: 0 }
+                                                : { x: 0, y: Math.sign(dy) };
+        }
+    }
+    return { x: 0, y: -1 };
+}
+
+/**
+ * Replace each stub edge's route by a straight run from its terminal, out
+ * of the bar face it leaves, to STUB_OUT beyond the substation frame. The
+ * terminals of one face are spread along the bar, so the stubs run side by
+ * side and never cross. Where two stubs are too close for their names to
+ * sit side by side, the second one runs on past the first name. The edge
+ * keeps its source → target direction.
+ */
+function _cutStubs(edges, ng, busH, stubLen, eqSize) {
+    var fr = ng ? _frameRect(ng, busH, stubLen, eqSize) : null;
+    if (!fr) return;
+    var sides = {};                 // frame side -> stubs leaving through it
+    edges.forEach(function(e) {
+        var p = e.properties || {};
+        if (!p.stubEnd || !e.fullSections || !e.fullSections.length) return;
+        var pts = _sectionPoints(e.fullSections);
+        var inSrc = p.stubEnd === 'target';
+        var seq = inSrc ? pts : pts.slice().reverse();
+        var a = seq[0];
+        var d = _stubDir(busLayout[inSrc ? e.sources[0] : e.targets[0]], a, seq, busH);
+        var dist = d.x > 0 ? fr.x + fr.w - a.x : d.x < 0 ? a.x - fr.x
+                 : d.y > 0 ? fr.y + fr.h - a.y : a.y - fr.y;
+        dist = Math.max(dist, 10);
+        var isX = p.edgeType === 'transformer';
+        var side = d.x + ',' + d.y;
+        (sides[side] = sides[side] || []).push({
+            e: e, a: a, d: d, inSrc: inSrc, isX: isX, dist: dist,
+            reach: isX ? STUB_OUT_XFMR : STUB_OUT,      // beyond the frame
+            pos: d.x ? a.y : a.x,                       // position along the side
+            text: (p.stubName || '').length * 6 + 16,   // name length, with arrow
+        });
+    });
+    Object.keys(sides).forEach(function(side) {
+        var list = sides[side].sort(function(u, v) { return u.pos - v.pos; });
+        list.forEach(function(st, i) {
+            var prev = list[i - 1];
+            if (prev && st.pos - prev.pos < 13 && st.reach < prev.reach + prev.text &&
+                prev.reach < st.reach + st.text) {
+                st.reach = prev.reach + prev.text + 6;
+            }
+            var a = st.a, d = st.d, p = st.e.properties;
+            var len = st.dist + st.reach;
+            var tip = { x: a.x + d.x * len, y: a.y + d.y * len };
+            st.e.sections = [st.inSrc ? { startPoint: a, endPoint: tip }
+                                      : { startPoint: tip, endPoint: a }];
+            p.stubTip = tip;
+            p.stubDir = d;
+            var m = st.dist + STUB_OUT_XFMR / 2;
+            p.stubSymbol = st.isX ? { x: a.x + d.x * m, y: a.y + d.y * m, vertical: d.y !== 0 } : null;
+        });
+    });
+}
+
+/** Far substation's name at the end of a stub; a link when it can be opened. */
+function _drawStubEnd(g, stub, color) {
+    var tip = stub.stubTip, d = stub.stubDir;
+    if (!tip || !d) return;
+    var x = tip.x + d.x * 4, y = tip.y + d.y * 4;
+    var out = d.x > 0 || d.y < 0;            // text reads away from the bar
+    var txt = out ? '→ ' + stub.stubName : stub.stubName + ' ←';
+    var t = g.append('text')
+        .attr('class', 'stub-end' + (stub.stubSite ? ' stub-link' : ''))
+        .attr('x', x).attr('y', y)
+        .attr('text-anchor', out ? 'start' : 'end')
+        .attr('dominant-baseline', 'central')
+        .attr('font-family', 'Segoe UI, Roboto, sans-serif')
+        .attr('font-size', '10px').attr('font-weight', '600')
+        .attr('fill', T.groupTitle)
+        .text(txt);
+    var len = txt.length * 6 + 4;
+    if (d.y !== 0) {
+        t.attr('transform', 'rotate(-90,' + x + ',' + y + ')');
+        _addObstacle(x - 7, d.y < 0 ? y - len : y, x + 7, d.y < 0 ? y : y + len);
+    } else {
+        _addObstacle(d.x > 0 ? x : x - len, y - 7, d.x > 0 ? x + len : x, y + 7);
+    }
+    if (stub.stubSite) {
+        t.on('click', function(event) {
+            event.stopPropagation();
+            openSite(stub.stubSite);
+        });
+    }
+}
+
+/** Render the open substation, or the whole system. */
+function _renderActive() {
+    if (_site) {
+        var sd = _siteData(_site.key);
+        if (sd) {
+            _site.name = sd.ng.name;
+            render(sd.data, sd.layouted);
+            _updateBreadcrumb();
+            return;
+        }
+        _site = null;            // gone after a rebuild
+        _systemView = null;
+    }
+    render(currentData, currentLayouted);
+    _updateBreadcrumb();
+}
+
+/** Redraw the results overlays on the elements of the current view. */
+function _redrawOverlays() {
+    if (currentOpsData) _drawOperationalData(currentOpsData);
+    if (_ctgJson) updateContingencyData(_ctgJson);
+}
+
+/** Open one substation by its group key. Returns false if there is none. */
+function openSite(key) {
+    var sd = _siteData(key);
+    if (!sd) return false;
+    if (!_site) _systemView = d3.zoomTransform(svg.node());
+    _site = { key: key, name: sd.ng.name };
+    clearSelection();
+    _hideTooltip();
+    render(sd.data, sd.layouted);
+    _updateBreadcrumb();
+    fitView(false);
+    _redrawOverlays();
+    return true;
+}
+
+/** Back to the whole system, at the zoom it was left at. */
+function closeSite() {
+    if (!_site) return;
+    _site = null;
+    clearSelection();
+    _hideTooltip();
+    render(currentData, currentLayouted);
+    _updateBreadcrumb();
+    fitView(false);              // sets the zoom limits for the system
+    if (_systemView) svg.call(zoomBehavior.transform, _systemView);
+    _systemView = null;
+    _redrawOverlays();
+}
+
+function _updateBreadcrumb() {
+    var bc = document.getElementById('sld-breadcrumb');
+    if (!bc) return;
+    bc.style.display = _site ? 'flex' : 'none';
+    if (_site) document.getElementById('sld-bc-site').textContent = _site.name;
+}
+
+/** Substation frame under a diagram point (the smallest, if nested). */
+function _frameAt(x, y) {
+    var hit = null;
+    _frames.forEach(function(f) {
+        if (f.key && x >= f.x && x <= f.x + f.w && y >= f.y && y <= f.y + f.h &&
+            (!hit || f.w * f.h < hit.w * hit.h)) hit = f;
+    });
+    return hit;
+}
+
+function _onDoubleClick(event) {
+    if (event.target.closest && event.target.closest('.sld-minimap, .sld-legend')) return;
+    var pt = d3.pointer(event, svg.node());
+    if (!_site) {
+        var f = _frameAt.apply(null, d3.zoomTransform(svg.node()).invert(pt));
+        if (f && openSite(f.key)) return;
+    }
+    svg.transition().duration(250).call(zoomBehavior.scaleBy, 2, pt);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+// Level of detail, viewport culling and overview names
+// ══════════════════════════════════════════════════════════════════
+//
+// A large system has tens of thousands of SVG elements: drawing them all
+// at every zoom makes the overview an unreadable smear and panning slow.
+//   * Level of detail — a class on the <svg> (CSS rules in sld.html):
+//       lod-far  (scale < LOD_FAR):  frames, bars and lines only;
+//       lod-mid  (scale < LOD_NEAR): plus equipment symbols, no text;
+//       none:                        everything.
+//   * Substation names — while the diagram's own text is hidden, the
+//     frame names are drawn at a fixed screen size, most important first
+//     (highest voltage, then size), skipping any that would overlap.
+//   * Culling — elements well outside the viewport get display:none, so
+//     the browser neither styles nor paints them.
+
+var LOD_FAR = 0.12;
+var LOD_NEAR = 0.55;
+var CULL_MARGIN = 0.6;          // of the viewport size, on each side
+var _CULL_LAYERS = ['layer-groups', 'layer-edges', 'layer-buses', 'layer-stubs',
+                    'layer-equip', 'layer-ops', 'layer-contingency'];
+var _lodLevel = '';
+var _cullLayers = {};           // layer class -> [{ el, x0, y0, x1, y1, hidden }]
+var _cullRegion = null;         // diagram-space box the current culling covers
+var _frames = [];               // substation frames: { name, x, y, w, h, prio }
+var _namesAt = null;            // transform the name overlay was laid out for
+var _viewFrame = null;
+var _viewFinal = false;
+
+function _lodFor(k) {
+    // An open substation is small and can't be zoomed out past its fit:
+    // always at full detail, even when it only fits at a small scale.
+    if (_site) return '';
+    return k < LOD_FAR ? 'lod-far' : (k < LOD_NEAR ? 'lod-mid' : '');
+}
+
+/** Everything shown, no overlay — for drawing, measuring and export. */
+function _resetViewState() {
+    if (!svg) return;
+    svg.classed('lod-far', false).classed('lod-mid', false);
+    _lodLevel = '';
+    Object.keys(_cullLayers).forEach(function(name) {
+        _cullLayers[name].forEach(function(it) {
+            if (it.hidden) { it.el.style.display = ''; it.hidden = false; }
+        });
+    });
+    _cullRegion = null;
+    svg.selectAll('.sld-names').remove();
+    _namesAt = null;
+}
+
+function _scheduleViewUpdate(final) {
+    if (final) _viewFinal = true;
+    if (_viewFrame !== null) return;
+    _viewFrame = requestAnimationFrame(function() {
+        _viewFrame = null;
+        var fin = _viewFinal;
+        _viewFinal = false;
+        _updateView(fin);
+    });
+}
+
+function _updateView(final) {
+    if (!svg || !diagramBounds) return;
+    var t = d3.zoomTransform(svg.node());
+    if (!t.k) return;
+    var lod = _lodFor(t.k);
+    if (lod !== _lodLevel) {
+        svg.classed('lod-far', lod === 'lod-far').classed('lod-mid', lod === 'lod-mid');
+        _lodLevel = lod;
+    }
+    _updateCulling(t, final);
+    _updateNames(t, final);
+}
+
+function _bboxIn(el) {
+    var b;
+    try { b = el.getBBox(); } catch (e) { return null; }
+    if (!b || (b.width === 0 && b.height === 0)) return null;
+    var x0 = b.x, y0 = b.y, x1 = b.x + b.width, y1 = b.y + b.height;
+    var tl = el.transform && el.transform.baseVal;
+    if (tl && tl.numberOfItems) {
+        var m = tl.consolidate().matrix;
+        var xs = [m.a * x0 + m.c * y0 + m.e, m.a * x1 + m.c * y0 + m.e,
+                  m.a * x0 + m.c * y1 + m.e, m.a * x1 + m.c * y1 + m.e];
+        var ys = [m.b * x0 + m.d * y0 + m.f, m.b * x1 + m.d * y0 + m.f,
+                  m.b * x0 + m.d * y1 + m.f, m.b * x1 + m.d * y1 + m.f];
+        x0 = Math.min.apply(null, xs); x1 = Math.max.apply(null, xs);
+        y0 = Math.min.apply(null, ys); y1 = Math.max.apply(null, ys);
+    }
+    return { x0: x0, y0: y0, x1: x1, y1: y1 };
+}
+
+/** Bounding boxes of a layer's top-level elements (measured fully shown). */
+function _indexCullLayer(name) {
+    if (!rootGroup) return;
+    var old = _cullLayers[name] || [];
+    old.forEach(function(it) { if (it.hidden) it.el.style.display = ''; });
+    var lodWas = _lodLevel;
+    if (lodWas) svg.classed(lodWas, false);     // CSS-hidden elements measure as empty
+    var items = [];
+    rootGroup.selectAll('.' + name).each(function() {
+        var kids = this.children;
+        for (var i = 0; i < kids.length; i++) {
+            var b = _bboxIn(kids[i]);
+            if (b) { b.el = kids[i]; b.hidden = false; items.push(b); }
+        }
+    });
+    if (lodWas) svg.classed(lodWas, true);
+    _cullLayers[name] = items;
+    _cullRegion = null;                          // force a re-cull
+}
+
+function _buildCullIndex() {
+    _cullLayers = {};
+    _CULL_LAYERS.forEach(_indexCullLayer);
+}
+
+function _updateCulling(t, final) {
+    var cw = svg.node().clientWidth, ch = svg.node().clientHeight;
+    if (!cw || !ch) return;
+    var vx0 = -t.x / t.k, vy0 = -t.y / t.k;
+    var vw = cw / t.k, vh = ch / t.k;
+    // Still inside the region culled last time (with half the margin to
+    // spare) and at a similar scale: nothing to do.
+    var r = _cullRegion;
+    if (r && !final && Math.abs(r.k - t.k) / r.k < 0.25
+            && vx0 >= r.x0 + r.mx / 2 && vy0 >= r.y0 + r.my / 2
+            && vx0 + vw <= r.x1 - r.mx / 2 && vy0 + vh <= r.y1 - r.my / 2) {
+        return;
+    }
+    var mx = vw * CULL_MARGIN, my = vh * CULL_MARGIN;
+    var x0 = vx0 - mx, y0 = vy0 - my, x1 = vx0 + vw + mx, y1 = vy0 + vh + my;
+    _cullRegion = { x0: x0, y0: y0, x1: x1, y1: y1, mx: mx, my: my, k: t.k };
+    Object.keys(_cullLayers).forEach(function(name) {
+        var items = _cullLayers[name];
+        for (var i = 0; i < items.length; i++) {
+            var it = items[i];
+            var out = it.x1 < x0 || it.x0 > x1 || it.y1 < y0 || it.y0 > y1;
+            if (out !== it.hidden) {
+                it.el.style.display = out ? 'none' : '';
+                it.hidden = out;
+            }
+        }
+    });
+}
+
+/** Substation names at a fixed screen size while the diagram text is hidden. */
+function _updateNames(t, final) {
+    var g = svg.select('.sld-names');
+    if (t.k >= LOD_NEAR || !_frames.length || _site) {
+        g.remove();
+        _namesAt = null;
+        return;
+    }
+    if (g.empty()) {
+        var before = svg.select('.sld-legend').node() ? '.sld-legend'
+                   : (svg.select('.sld-minimap').node() ? '.sld-minimap' : null);
+        g = before ? svg.insert('g', before) : svg.append('g');
+        g.attr('class', 'sld-names').attr('pointer-events', 'none');
+    }
+    // Panning at the same scale: move the laid-out names along; lay them
+    // out again once the gesture ends (new frames may have come in view).
+    if (_namesAt && _namesAt.k === t.k && !final) {
+        g.attr('transform', 'translate(' + (t.x - _namesAt.x) + ',' + (t.y - _namesAt.y) + ')');
+        return;
+    }
+    _namesAt = { k: t.k, x: t.x, y: t.y };
+    g.attr('transform', null);
+    var cw = svg.node().clientWidth, ch = svg.node().clientHeight;
+    var fs = 11, lh = 14, placed = [], out = [];
+    for (var i = 0; i < _frames.length; i++) {
+        var f = _frames[i];
+        if (!f.name) continue;
+        var sx = f.x * t.k + t.x, sy = f.y * t.k + t.y;
+        var sw = f.w * t.k, sh = f.h * t.k;
+        if (sx > cw || sy > ch || sx + sw < 0 || sy + sh < 0) continue;
+        var tw = f.name.length * fs * 0.58 + 4;
+        // Inside the frame's top-left corner when it is big enough on
+        // screen, else just above it.
+        var inside = sw > tw + 8 && sh > lh * 2;
+        var x = sx + (inside ? 6 : 0), y = inside ? sy + lh : sy - 3;
+        var bx0 = x - 6, by0 = y - lh, bx1 = x + tw + 6, by1 = y + 6;
+        if (bx1 < 0 || bx0 > cw || by1 < 0 || by0 > ch) continue;
+        var clash = false;
+        for (var j = 0; j < placed.length; j++) {
+            var p = placed[j];
+            if (bx0 < p[2] && p[0] < bx1 && by0 < p[3] && p[1] < by1) { clash = true; break; }
+        }
+        if (clash) continue;
+        placed.push([bx0, by0, bx1, by1]);
+        out.push({ key: f.name + '|' + i, x: x, y: y, name: f.name });
+    }
+    g.selectAll('text').data(out, function(d) { return d.key; })
+        .join(function(enter) {
+            return enter.append('text')
+                .attr('font-family', 'Segoe UI, Roboto, sans-serif')
+                .attr('font-size', fs + 'px').attr('font-weight', '700')
+                .attr('fill', T.groupTitle)
+                .attr('stroke', T.bg).attr('stroke-width', 3)
+                .attr('stroke-linejoin', 'round').attr('paint-order', 'stroke')
+                .text(function(d) { return d.name; });
+        })
+        .attr('x', function(d) { return d.x; })
+        .attr('y', function(d) { return d.y; });
+}
+
+
+// ══════════════════════════════════════════════════════════════════
 // Navigation minimap — fixed overview (bottom-left) so the user does not
 // get lost when zoomed into a large system. Shows a scaled-down diagram
 // (busbars + lines) with a draggable viewport rectangle.
@@ -1818,7 +2520,7 @@ function _drawMinimap() {
     _minimapBox = null;
     if (!diagramBounds || !rootGroup) return;
     // Only worth showing for systems big enough to get lost in.
-    if (Object.keys(busLayout).length < 12) return;
+    if (_site || Object.keys(busLayout).length < 12) return;
 
     var db = diagramBounds;
     if (db.w <= 0 || db.h <= 0) return;
@@ -1830,8 +2532,8 @@ function _drawMinimap() {
     // viewport (and overlaps the SLD): the height is a fraction of the window
     // height, capped to keep a consistent size on large screens; the width
     // varies with the diagram aspect, also a capped fraction of the window.
-    var FIXED_H = Math.max(60, Math.min(140, ch * 0.16));
-    var maxW = Math.min(720, cw * 0.55);
+    var FIXED_H = Math.max(50, Math.min(110, ch * 0.13));
+    var maxW = Math.min(260, cw * 0.28);
     var ms = Math.min(maxW / db.w, FIXED_H / db.h);
     var contentW = db.w * ms, contentH = db.h * ms;
     var mmW = contentW;                   // panel width varies with the diagram
@@ -1863,6 +2565,9 @@ function _drawMinimap() {
     // vertically inside the fixed-height panel.
     var content = mm.append('g')
         .attr('transform', 'translate(0,' + contentYoff + ')');
+    // One path per colour (lines, then bars): a large system has thousands
+    // of lines, and the minimap only needs their shape.
+    var edgeD = {}, barD = {};
     var edges = (currentLayouted && currentLayouted.edges) || [];
     edges.forEach(function(e) {
         var col = (e.properties && e.properties.color) || T.edgeLine;
@@ -1875,8 +2580,7 @@ function _drawMinimap() {
                 d += (i ? 'L' : 'M') + ((p.x - db.x) * ms).toFixed(1) + ',' +
                      ((p.y - db.y) * ms).toFixed(1);
             });
-            content.append('path').attr('d', d).attr('fill', 'none')
-                .attr('stroke', col).attr('stroke-width', 0.5).attr('opacity', 0.45);
+            edgeD[col] = (edgeD[col] || '') + d;
         });
     });
     Object.keys(busLayout).forEach(function(bid) {
@@ -1885,8 +2589,16 @@ function _drawMinimap() {
         var x = (bl.x - db.x) * ms, y = (bl.y - db.y) * ms;
         var w = isVert ? 1.5 : Math.max(1, bl.barLen * ms);
         var h = isVert ? Math.max(1, bl.barLen * ms) : 1.5;
-        content.append('rect').attr('x', x).attr('y', y)
-            .attr('width', w).attr('height', h).attr('fill', bl.color || '#333');
+        var col = bl.color || '#333';
+        barD[col] = (barD[col] || '') + 'M' + x.toFixed(1) + ',' + y.toFixed(1) +
+            'h' + w.toFixed(1) + 'v' + h.toFixed(1) + 'h' + (-w).toFixed(1) + 'Z';
+    });
+    Object.keys(edgeD).forEach(function(col) {
+        content.append('path').attr('d', edgeD[col]).attr('fill', 'none')
+            .attr('stroke', col).attr('stroke-width', 0.5).attr('opacity', 0.45);
+    });
+    Object.keys(barD).forEach(function(col) {
+        content.append('path').attr('d', barD[col]).attr('fill', col);
     });
 
     // Viewport rectangle (updated on every zoom/pan).
@@ -1943,10 +2655,17 @@ function _updateMinimapViewport() {
 
 function toggleLabels(show) {
     labelsVisible = show;
-    if (currentData && currentLayouted) {
-        render(currentData, currentLayouted);
-        fitView(false);  // Reapply current zoom after re-render
-    }
+    _rerenderKeepingView();
+}
+
+/** Redraw the current view (system or substation) at the same zoom. */
+function _rerenderKeepingView() {
+    if (!currentData || !currentLayouted) return;
+    var t = d3.zoomTransform(svg.node());
+    _renderActive();
+    fitView(false);              // zoom limits for the redrawn diagram
+    svg.call(zoomBehavior.transform, t);
+    _redrawOverlays();
 }
 
 function updateTheme(json) {
@@ -1954,12 +2673,33 @@ function updateTheme(json) {
         var c = JSON.parse(json);
         for (var k in c) if (T.hasOwnProperty(k)) T[k] = c[k];
         document.body.style.background = T.bg;
-        if (currentData && currentLayouted) {
-            render(currentData, currentLayouted);
-            fitView(false);
-        }
+        _rerenderKeepingView();
     } catch(e) {}
 }
+
+/** Language changed (web_i18n): the diagram's own text is data (names,
+ *  ratings), except the equipment labels that carry a ``labelKey``; those,
+ *  the legend and the results overlays are redrawn in the new language.
+ *  Static HTML is refilled by _applyI18n. The N-1 badge text comes from
+ *  Python, which re-runs the selected contingency. */
+window.onEsfexLanguageChanged = function() {
+    if (!svg || !currentData || !currentLayouted) return;
+    // Equipment whose label is a translated text (loads) carries its key.
+    var relabeled = false;
+    var be = currentData.busEquipment || {};
+    Object.keys(be).forEach(function(bid) {
+        (be[bid] || []).forEach(function(eq) {
+            if (eq.labelKey) {
+                eq.label = _t(eq.labelKey, eq.labelParams);
+                relabeled = true;
+            }
+        });
+    });
+    if (relabeled) _rerenderKeepingView();
+    var sd = _site ? _siteData(_site.key) : null;
+    _drawLegend(sd ? sd.data : currentData);
+    _redrawOverlays();
+};
 
 
 // ══════════════════════════════════════════════════════════════════
@@ -2016,7 +2756,8 @@ function _addEdgeObstacles(sections, owner) {
     });
 }
 
-/** Register a bus bar (both orientations) as obstacle. */
+/** Register a bus bar (both orientations) as obstacle, with the voltage
+ *  and name labels above a horizontal bar. */
 function _addBusObstacle(bl, busH) {
     var isVert = bl.orientation === 90;
     var barLen = bl.barLen;
@@ -2024,7 +2765,38 @@ function _addBusObstacle(bl, busH) {
         _addObstacle(bl.x - 2, bl.y - 2, bl.x + busH + 2, bl.y + barLen + 2);
     } else {
         _addObstacle(bl.x - 2, bl.y - 2, bl.x + barLen + 2, bl.y + busH + 2);
+        if (!labelsVisible) return;
+        if (bl.voltageKv) {
+            _addObstacle(bl.x + 4, bl.y - 16,
+                         bl.x + 4 + _textWidth(bl.voltageKv + ' kV', 10, true), bl.y - 3);
+        }
+        var name = bl.junction ? '' : _fitBusName(bl);
+        if (name) {
+            _addObstacle(bl.x + barLen - 4 - _textWidth(name, 9), bl.y - 15,
+                         bl.x + barLen - 4, bl.y - 3);
+        }
     }
+}
+
+/** Rough on-screen width of a label (wide glyphs for CJK). Text hidden by
+ *  the level of detail has no measurable length, so this is estimated. */
+function _textWidth(str, px, bold) {
+    var w = 0;
+    for (var i = 0; i < str.length; i++) {
+        var c = str.charCodeAt(i);
+        w += c >= 0x2E80 ? 1.0 : (c === 32 ? 0.3 : 0.56);
+    }
+    return w * px * (bold ? 1.08 : 1);
+}
+
+/** The bus name shortened with an ellipsis to fit beside its voltage label
+ *  above the bar (the full name stays in the tooltip). */
+function _fitBusName(bl) {
+    var name = String(bl.label || '');
+    var room = bl.barLen - 8 - (bl.voltageKv ? _textWidth(bl.voltageKv + ' kV', 10, true) + 10 : 0);
+    if (_textWidth(name, 9) <= room) return name;
+    while (name.length > 1 && _textWidth(name + '\u2026', 9) > room) name = name.slice(0, -1);
+    return name.length > 1 ? name.replace(/\s+$/, '') + '\u2026' : '';
 }
 
 /** Check whether a rectangle overlaps ANY registered obstacle (spatial grid).
@@ -2201,7 +2973,10 @@ function updateOperationalData(jsonStr) {
         console.error('SLD ops: bad JSON', e); return;
     }
     currentOpsData = ops;
+    _drawOperationalData(ops);
+}
 
+function _drawOperationalData(ops) {
     // Remove previous overlay
     rootGroup.selectAll('.layer-ops').remove();
     svg.selectAll('.ops-info-bar').remove();
@@ -2236,11 +3011,15 @@ function updateOperationalData(jsonStr) {
 
     // ── System info bar (fixed, outside rootGroup) ──
     _drawSystemInfoBar(ops);
+
+    _indexCullLayer('layer-ops');
+    _scheduleViewUpdate(true);
 }
 
 /** Remove operational overlay. */
 function clearOperationalData() {
     currentOpsData = null;
+    _ctgJson = null;
     if (rootGroup) {
         rootGroup.selectAll('.layer-ops').remove();
         rootGroup.selectAll('.layer-contingency').remove();
@@ -2302,7 +3081,7 @@ function _drawEquipmentOverlay(gOps, ops) {
                     .attr('text-anchor', 'middle').attr('dominant-baseline', 'central')
                     .attr('font-family', 'Segoe UI, Roboto, sans-serif')
                     .attr('font-size', '8px').attr('font-weight', '700')
-                    .attr('fill', '#2C3E50').text('OFF');
+                    .attr('fill', '#2C3E50').text(_t('web.sld.gen_off'));
                 barData = null;  // Don't draw utilization bar for offline generators
             } else if (g.is_startup) {
                 // Startup: green upward arrow
@@ -2321,14 +3100,14 @@ function _drawEquipmentOverlay(gOps, ops) {
             var b = bats[eId];
             var net = b.discharge_mw - b.charge_mw;
             var socRatio = b.capacity_mwh > 0 ? b.soc_mwh / b.capacity_mwh : 0;
-            var lbl = net > 0.1 ? '+' + _fmtMW(net) : net < -0.1 ? _fmtMW(net) : 'Idle';
+            var lbl = net > 0.1 ? '+' + _fmtMW(net) : net < -0.1 ? _fmtMW(net) : _t('web.sld.battery_idle');
             barData = { ratio: socRatio, label: lbl + ' (' + (socRatio * 100).toFixed(0) + '%)', color: _utilColor(1 - socRatio) };
         } else if (eType === 'load' && loads[eId]) {
             var l = loads[eId];
             barData = { ratio: 1, label: _fmtMW(l.demand_mw), color: '#E67E22' };
             if (l.shed_mw > 0.1) {
                 barData.color = '#E74C3C';
-                barData.label += ' (shed: ' + _fmtMW(l.shed_mw) + ')';
+                barData.label = _t('web.sld.load_with_shed', {demand: _fmtMW(l.demand_mw), shed: _fmtMW(l.shed_mw)});
             }
         }
 
@@ -2514,7 +3293,7 @@ function _drawReserveBadges(gOps, ops) {
 
         var hasLoss = (nd.reserve_static_loss_mw || 0) > 0.1 || (nd.reserve_dynamic_loss_mw || 0) > 0.1;
         var bgColor = hasLoss ? '#E74C3C' : '#27AE60';
-        var label = 'R: ' + resStatic.toFixed(0) + '/' + resDynamic.toFixed(0) + ' MW';
+        var label = _t('web.sld.reserve_badge', {static: resStatic.toFixed(0), dynamic: resDynamic.toFixed(0)});
         var tw = label.length * 5 + 10;
 
         gOps.append('rect')
@@ -2629,10 +3408,10 @@ function _drawFrequencyGauge(gOps, ops) {
         .attr('font-family', 'Segoe UI, Roboto, sans-serif')
         .attr('font-size', '10px').attr('font-weight', '700')
         .attr('fill', T.groupTitle)
-        .text('Frequency (' + fNom.toFixed(0) + ' Hz)');
+        .text(_t('web.sld.freq_title', {f: fNom.toFixed(0)}));
 
     // ── Status indicator on title row ──
-    var statusLabel = freq.is_stable ? 'STABLE' : 'UNSTABLE';
+    var statusLabel = freq.is_stable ? _t('web.sld.freq_stable') : _t('web.sld.freq_unstable');
     fg.append('text')
         .attr('x', gw - padX).attr('y', titleH - 4)
         .attr('text-anchor', 'end')
@@ -2697,7 +3476,7 @@ function _drawFrequencyGauge(gOps, ops) {
         .attr('font-family', 'Segoe UI, Roboto, sans-serif')
         .attr('font-size', '8px').attr('font-weight', '600')
         .attr('fill', nadirColor)
-        .text('Nadir: ' + freq.nadir_hz.toFixed(2) + ' Hz');
+        .text(_t('web.sld.nadir', {hz: freq.nadir_hz.toFixed(2)}));
 
     // ── Metric rows (below bar section) ──
     var curY = titleH + barSectionH + padY;
@@ -2724,7 +3503,7 @@ function _drawFrequencyGauge(gOps, ops) {
         .attr('dominant-baseline', 'central')
         .attr('font-family', 'Segoe UI, Roboto, sans-serif')
         .attr('font-size', '9px').attr('fill', T.labelText)
-        .text('Inertia H');
+        .text(_t('web.sld.inertia_h'));
     fg.append('text')
         .attr('x', gw - padX).attr('y', curY + rowH / 2 + 1)
         .attr('text-anchor', 'end').attr('dominant-baseline', 'central')
@@ -2740,7 +3519,7 @@ function _drawFrequencyGauge(gOps, ops) {
         .attr('dominant-baseline', 'central')
         .attr('font-family', 'Segoe UI, Roboto, sans-serif')
         .attr('font-size', '9px').attr('fill', T.labelText)
-        .text('\u0394P loss');
+        .text(_t('web.sld.delta_p_loss'));
     fg.append('text')
         .attr('x', gw - padX).attr('y', curY + rowH / 2 + 1)
         .attr('text-anchor', 'end').attr('dominant-baseline', 'central')
@@ -2759,12 +3538,14 @@ function updateContingencyData(jsonStr) {
     try { ctg = JSON.parse(jsonStr); } catch(e) {
         console.error('SLD contingency: bad JSON', e); return;
     }
+    _ctgJson = jsonStr;
 
     // Remove previous contingency overlay
     rootGroup.selectAll('.layer-contingency').remove();
     svg.selectAll('.contingency-badge').remove();
 
     var gCtg = rootGroup.append('g').attr('class', 'layer-contingency');
+    setTimeout(function() { _indexCullLayer('layer-contingency'); _scheduleViewUpdate(true); }, 0);
 
     // ── Mark the tripped element ──
     var tripKey = null;
@@ -2818,7 +3599,7 @@ function updateContingencyData(jsonStr) {
         if (pathNode && pathNode.getTotalLength) {
             var totalLen = pathNode.getTotalLength();
             var lblPt = pathNode.getPointAtLength(totalLen * 0.6);
-            var olLabel = 'OVERLOAD +' + ol.overload_pct.toFixed(0) + '%';
+            var olLabel = _t('web.sld.overload_badge', {pct: ol.overload_pct.toFixed(0)});
             var tw = olLabel.length * 5.5 + 10;
 
             gCtg.append('rect')
@@ -2853,7 +3634,7 @@ function updateContingencyData(jsonStr) {
 
         var px = bl.x + bl.barLen / 2;
         var py = bl.y + 24;
-        var label = 'Shed: ' + _fmtMW(shedMW);
+        var label = _t('web.sld.shed_badge', {power: _fmtMW(shedMW)});
         var tw = label.length * 5.5 + 10;
 
         gCtg.append('rect')
@@ -2915,39 +3696,43 @@ function updateContingencyData(jsonStr) {
         var worstOL = overloaded.reduce(function(a, b) {
             return (a.overload_pct || 0) > (b.overload_pct || 0) ? a : b;
         });
-        detailLines.push('Overloads: ' + overloaded.length + ' line(s), worst +'
-            + (worstOL.overload_pct || 0).toFixed(0) + '%'
-            + (worstOL.line_id ? ' (' + worstOL.line_id + ')' : ''));
+        var olArgs = {n: overloaded.length, pct: (worstOL.overload_pct || 0).toFixed(0),
+                      line: worstOL.line_id};
+        detailLines.push(worstOL.line_id ? _t('web.sld.ctg_overloads_line', olArgs)
+                                         : _t('web.sld.ctg_overloads', olArgs));
     }
     if (totalShed > 0.1) {
-        detailLines.push('Load shedding: ' + totalShed.toFixed(1) + ' MW');
+        detailLines.push(_t('web.sld.ctg_load_shedding', {mw: totalShed.toFixed(1)}));
     }
     if (voltViol.length > 0) {
         var worstV = voltViol.reduce(function(a, b) {
             return Math.abs(a.vm_pu - 1.0) > Math.abs(b.vm_pu - 1.0) ? a : b;
         });
-        detailLines.push('V violations: ' + voltViol.length + ' bus(es), worst '
-            + worstV.vm_pu.toFixed(3) + ' pu (' + worstV.bus_id + ')');
+        detailLines.push(_t('web.sld.ctg_voltage_violations',
+            {n: voltViol.length, pu: worstV.vm_pu.toFixed(3), bus: worstV.bus_id}));
     }
     // Integrated N-1 assessment fields (frequency, severity)
     if (ctg.has_frequency_violation) {
-        var freqLine = 'Frequency: ROCOF=' + (ctg.rocof_hz_per_s || 0).toFixed(2) + ' Hz/s'
-            + ', Nadir=' + (ctg.nadir_hz || 0).toFixed(2) + ' Hz';
-        detailLines.push(freqLine);
+        detailLines.push(_t('web.sld.ctg_frequency', {rocof: (ctg.rocof_hz_per_s || 0).toFixed(2),
+                                                      nadir: (ctg.nadir_hz || 0).toFixed(2)}));
     }
     if (ctg.severity_score !== undefined && ctg.severity_score > 0) {
-        var bindStr = ctg.binding_constraint ? ' [' + ctg.binding_constraint + ']' : '';
-        detailLines.push('Severity: ' + ctg.severity_score.toFixed(1) + bindStr);
+        var score = ctg.severity_score.toFixed(1);
+        detailLines.push(ctg.binding_constraint
+            ? _t('web.sld.ctg_severity_binding',
+                 {score: score, constraint: _bindingLabel(ctg.binding_constraint)})
+            : _t('web.sld.ctg_severity', {score: score}));
     }
     // Use integrated is_n1_secure if present, otherwise fall back to is_secure
     var isSecure = (ctg.is_n1_secure !== undefined) ? ctg.is_n1_secure : ctg.is_secure;
     if (isSecure) {
-        detailLines.push('No overloads, no load shedding');
+        detailLines.push(_t('web.sld.ctg_secure_detail'));
     }
 
     var statusColor = isSecure ? '#27AE60' : '#E74C3C';
-    var statusText = isSecure ? 'N-1 SECURE' : 'N-1 INSECURE';
-    var bw = 340;
+    var statusText = isSecure ? _t('web.sld.n1_secure') : _t('web.sld.n1_insecure');
+    var bw = 340;            // wider when a translation needs it
+    detailLines.forEach(function(s) { bw = Math.max(bw, _textWidth(s, 9) + 24); });
     var lineH = 13;
     var bh = 32 + detailLines.length * lineH;
     var bx = (cw - bw) / 2;  // centered horizontally
@@ -2979,8 +3764,20 @@ function updateContingencyData(jsonStr) {
     }
 }
 
+/** Readable name of an N-1 binding constraint id (n1_assessment.py). */
+function _bindingLabel(id) {
+    switch (id) {
+        case 'thermal':   return _t('web.sld.binding_thermal');
+        case 'frequency': return _t('web.sld.binding_frequency');
+        case 'voltage':   return _t('web.sld.binding_voltage');
+        case 'none':      return _t('web.sld.binding_none');
+        default:          return id;
+    }
+}
+
 /** Remove contingency overlay. */
 function clearContingencyData() {
+    _ctgJson = null;
     if (rootGroup) rootGroup.selectAll('.layer-contingency').remove();
     if (svg) {
         svg.selectAll('.contingency-badge').remove();
@@ -3109,7 +3906,7 @@ function _drawLineLossLabels(gOps, ops) {
 
         var totalLen = pathNode.getTotalLength();
         var lblPt = pathNode.getPointAtLength(totalLen * 0.55);
-        var label = 'Loss: ' + pLoss.toFixed(2) + ' MW';
+        var label = _t('web.sld.line_loss', {mw: pLoss.toFixed(2)});
         var tw = label.length * 5.5 + 8;
         var color = '#E67E22';  // orange
 
@@ -3187,19 +3984,20 @@ function _drawPowerFlowStatusBadge(ops) {
     var gBadge = svg.append('g').attr('class', 'pf-status-badge');
 
     var bx = 10;
-    var by = 12;
+    var by = _site ? 48 : 12;    // below the breadcrumb of an open substation
     var bw = 200;
     var bh = 36;
 
     var statusColor = pf.converged ? '#27AE60' : '#E74C3C';
     var statusText = pf.converged
-        ? 'AC PF: Converged (' + (pf.iterations || 0) + ' iter)'
-        : 'AC PF: DIVERGED';
+        ? _t('web.sld.pf_converged', {n: pf.iterations || 0})
+        : _t('web.sld.pf_diverged');
     var detailItems = [];
-    if (pf.total_losses_mw > 0) detailItems.push('Losses: ' + pf.total_losses_mw.toFixed(2) + ' MW');
+    if (pf.total_losses_mw > 0) detailItems.push(_t('web.sld.losses', {mw: pf.total_losses_mw.toFixed(2)}));
     var nViol = (pf.voltage_violations || []).length;
-    if (nViol > 0) detailItems.push('V violations: ' + nViol);
+    if (nViol > 0) detailItems.push(_t('web.sld.v_violations', {n: nViol}));
     var detailText = detailItems.join(' | ');
+    bw = Math.max(bw, _textWidth(statusText, 10, true) + 20, _textWidth(detailText, 8) + 20);
 
     gBadge.append('rect')
         .attr('x', bx).attr('y', by)
@@ -3232,31 +4030,31 @@ function _drawSystemInfoBar(ops) {
     var ch = svg.node().clientHeight || 600;
 
     var items = [];
-    if (sys.year) items.push('Year ' + sys.year);
-    if (sys.hour !== undefined) items.push('Hour ' + sys.hour);
-    if (sys.re_penetration) items.push('RE: ' + (sys.re_penetration * 100).toFixed(1) + '%');
-    if (sys.total_demand_mw) items.push('Demand: ' + _fmtMW(sys.total_demand_mw));
-    if (sys.total_gen_mw) items.push('Gen: ' + _fmtMW(sys.total_gen_mw));
+    if (sys.year) items.push(_t('web.sld.info_year', {year: sys.year}));
+    if (sys.hour !== undefined) items.push(_t('web.sld.info_hour', {hour: sys.hour}));
+    if (sys.re_penetration) items.push(_t('web.sld.info_re', {pct: (sys.re_penetration * 100).toFixed(1)}));
+    if (sys.total_demand_mw) items.push(_t('web.sld.info_demand', {power: _fmtMW(sys.total_demand_mw)}));
+    if (sys.total_gen_mw) items.push(_t('web.sld.info_gen', {power: _fmtMW(sys.total_gen_mw)}));
     if (sys.co2_tons) items.push('CO\u2082: ' + sys.co2_tons.toFixed(1) + ' t');
 
     // AC Power flow metrics
     var pf = sys.power_flow;
     if (pf && pf.converged) {
-        if (pf.total_losses_mw > 0) items.push('Losses: ' + pf.total_losses_mw.toFixed(2) + ' MW');
+        if (pf.total_losses_mw > 0) items.push(_t('web.sld.losses', {mw: pf.total_losses_mw.toFixed(2)}));
         var nViol = (pf.voltage_violations || []).length;
-        if (nViol > 0) items.push('V viol: ' + nViol);
+        if (nViol > 0) items.push(_t('web.sld.info_v_viol', {n: nViol}));
     }
 
     // Frequency metrics (Level 3)
     var freq = sys.frequency;
     if (freq) {
         if (freq.rocof_hz_s !== undefined) items.push('ROCOF: ' + freq.rocof_hz_s.toFixed(2) + ' Hz/s');
-        if (freq.nadir_hz !== undefined) items.push('Nadir: ' + freq.nadir_hz.toFixed(2) + ' Hz');
+        if (freq.nadir_hz !== undefined) items.push(_t('web.sld.nadir', {hz: freq.nadir_hz.toFixed(2)}));
         if (freq.h_total_mws !== undefined) items.push('H: ' + freq.h_total_mws.toFixed(0) + ' MW\u00B7s');
     }
 
     var text = items.join('  |  ');
-    var barW = text.length * 7 + 40;
+    var barW = Math.max(text.length * 7, _textWidth(text, 11) * 1.15) + 40;
     var barH = 26;
     var bx = (cw - barW) / 2;
     var by = ch - barH - 8;
@@ -3278,9 +4076,12 @@ function _drawSystemInfoBar(ops) {
 /** Serialize current SVG and send to Python bridge for export. */
 function exportSvg() {
     if (!svg) return;
+    // Export the whole diagram at full detail, not the current view.
+    _resetViewState();
     var svgNode = svg.node();
     var serializer = new XMLSerializer();
     var markup = serializer.serializeToString(svgNode);
+    _scheduleViewUpdate(true);
     if (sldBridge) sldBridge.on_svg_exported(markup);
 }
 

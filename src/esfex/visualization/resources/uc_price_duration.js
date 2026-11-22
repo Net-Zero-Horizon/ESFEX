@@ -34,11 +34,11 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { _ucClearPlot(); showStatus("Bad payload: " + e.message, true); return; }
-        if (!data || data.error) { _ucClearPlot(); showStatus(data && data.error ? data.error : "No data", false); return; }
-        if (!data.sorted_prices || !data.sorted_prices.length) { _ucClearPlot(); showStatus("No prices", false); return; }
+        catch (e) { _ucClearPlot(); showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
+        if (!data || data.error) { _ucClearPlot(); showStatus(data && data.error ? data.error : _t("web.common.no_data"), false); return; }
+        if (!data.sorted_prices || !data.sorted_prices.length) { _ucClearPlot(); showStatus(_t("web.charts.uc_price_duration.no_data"), false); return; }
         try { renderDuration(data); hideStatus(); }
-        catch (e) { showStatus("Render error: " + e.message, true); console.error(e); }
+        catch (e) { showStatus(_t("web.common.render_error", { error: e.message }), true); console.error(e); }
     });
 }
 function showStatus(t, e) { const s = document.getElementById("status"); s.textContent = t; s.style.display = "block"; s.style.color = e ? "#c0392b" : "#7F8C8D"; }
@@ -52,7 +52,7 @@ function renderDuration(data) {
         type: "scatter", mode: "lines",
         name: "LMP", line: { color: "#2C3E50", width: 2 },
         fill: "tozeroy", fillcolor: "rgba(44, 62, 80, 0.08)",
-        hovertemplate: "Top %{x:.1f}% of hours: %{y:,.1f} USD/MWh<extra></extra>",
+        hovertemplate: _t("web.charts.uc_price_duration.hover_top") + "<extra></extra>",
     };
 
     const yMax = Math.max(...y) * 1.05;
@@ -73,33 +73,31 @@ function renderDuration(data) {
     ];
 
     const subTitle =
-        `Mean ${data.mean.toFixed(1)} &nbsp;|&nbsp; ` +
-        `Median ${data.median.toFixed(1)} &nbsp;|&nbsp; ` +
-        `P95 ${data.p95.toFixed(1)} USD/MWh &nbsp;|&nbsp; ` +
-        `${data.scarcity_hours} h above ${data.scarcity_threshold.toFixed(0)} (scarcity)`;
+        [_t("web.charts.uc_price_duration.stat_mean", { value: data.mean.toFixed(1) }),
+         _t("web.charts.uc_price_duration.stat_median", { value: data.median.toFixed(1) }),
+         _t("web.charts.uc_price_duration.stat_p95", { value: data.p95.toFixed(1) }),
+         _t("web.charts.uc_price_duration.stat_scarcity", { hours: data.scarcity_hours,
+                                   threshold: data.scarcity_threshold.toFixed(0) })]
+        .join(" &nbsp;|&nbsp; ");
 
     const layout = {
-        margin: { t: 110, r: 30, b: 60, l: 70 },
+        margin: { t: 80, r: 30, b: 60, l: 70 },
         showlegend: false,
         annotations: [
-            { text: `<b>Price Duration Curve — Year ${data.year}</b>`,
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.16, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 15 } },
             { text: subTitle,
               x: 0.5, xref: "paper", xanchor: "center",
               y: 1.08, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 11, color: "#5D6D7E" } },
-            { text: "<b>Peak</b>", x: 5, xref: "x", y: yMax * 0.95, yref: "y",
+            { text: "<b>" + _t("web.charts.uc_price_duration.zone_peak") + "</b>", x: 5, xref: "x", y: yMax * 0.95, yref: "y",
               showarrow: false, font: { size: 10, color: "#922B21" } },
-            { text: "<b>Mid-merit</b>", x: 35, xref: "x", y: yMax * 0.95, yref: "y",
+            { text: "<b>" + _t("web.charts.uc_price_duration.zone_mid") + "</b>", x: 35, xref: "x", y: yMax * 0.95, yref: "y",
               showarrow: false, font: { size: 10, color: "#9A6700" } },
-            { text: "<b>Baseload</b>", x: 80, xref: "x", y: yMax * 0.95, yref: "y",
+            { text: "<b>" + _t("web.charts.uc_price_duration.zone_base") + "</b>", x: 80, xref: "x", y: yMax * 0.95, yref: "y",
               showarrow: false, font: { size: 10, color: "#1E8449" } },
         ],
         shapes: shapes,
-        xaxis: { title: "<b>Top X% of hours</b>", range: [0, 100] },
-        yaxis: { title: "<b>LMP (USD/MWh)</b>", rangemode: "tozero" },
+        xaxis: { title: "<b>" + _t("web.charts.uc_price_duration.axis_top_hours") + "</b>", range: [0, 100] },
+        yaxis: { title: "<b>" + _t("web.charts.uc_price_duration.axis_lmp") + "</b>", rangemode: "tozero" },
     };
     Plotly.purge("plot");
     Plotly.newPlot("plot", [trace], layout, {

@@ -52,7 +52,6 @@ def _minimal_system():
         "name": "TestSys",
         "demand_path": None,
         "demand_scale": 1.0,
-        "loss_demand_threshold": 0.05,
         "life_extension_cost_factor": 0.2,
         "sim_rooftop": False,
         "target_re_penetration": 0.5,
@@ -75,7 +74,8 @@ def _minimal_system():
 
 
 def _thermal_gen(name="Gas_plant", fuel="Gas", technology=None,
-                 fuel_cost=None, maintenance_cost=None, eff_at_rated=None):
+                 fuel_cost=None, maintenance_cost=None, eff_at_rated=None,
+                 fixed_cost=None):
     return {
         "name": name,
         "type": "Non-renewable",
@@ -87,7 +87,7 @@ def _thermal_gen(name="Gas_plant", fuel="Gas", technology=None,
         "degradation_rate": [0.005, 0.005],
         "decommissioning_cost": [300, 300],
         "rated_power": [100, 100],
-        "min_power": [10, 10],
+        "min_power": [0.1, 0.1],
         "min_up": [4, 4],
         "min_down": [4, 4],
         "ramp_up": [0.5, 0.5],
@@ -97,7 +97,7 @@ def _thermal_gen(name="Gas_plant", fuel="Gas", technology=None,
         "inertia": [4, 4],
         "start_up_cost": [1000, 1000],
         "fuel_cost": fuel_cost if fuel_cost is not None else [0, 0],
-        "fixed_cost": [5.0, 5.0],
+        "fixed_cost": fixed_cost if fixed_cost is not None else [0.0, 0.0],
         "maintenance_cost": maintenance_cost if maintenance_cost is not None else [0.0, 0.0],
         "invest_cost": [800000, 800000],
         "invest_max_power": [200, 200],
@@ -192,7 +192,6 @@ class TestConvertDCPowerFlowExtra:
     def test_nested_dict_takes_priority(self):
         data = {
             "dc_power_flow": {
-                "base_impedance": 250.0,
                 "reactance_per_km": 0.7,
                 "voltage_level_kv": 500.0,
                 "max_angle_diff_deg": 45.0,
@@ -201,10 +200,10 @@ class TestConvertDCPowerFlowExtra:
                 "pwl_loss_segments": 5,
                 "pwl_loss_segments_master": 4,
             },
-            "dc_base_impedance": 100.0,  # should be ignored
+            "dc_reactance_per_km": 0.2,  # should be ignored
         }
         result = _convert_dc_power_flow(data)
-        assert result.base_impedance == 250.0
+        assert result.reactance_per_km == 0.7
         assert result.slack_bus == 3
         assert result.loss_model == "linear"
         assert result.pwl_loss_segments == 5
@@ -212,9 +211,9 @@ class TestConvertDCPowerFlowExtra:
 
     def test_non_dict_nested_falls_back_to_flat(self):
         # nested is not a dict -> reset to {} then fall back to flat keys
-        data = {"dc_power_flow": "not_a_dict", "dc_base_impedance": 333.0}
+        data = {"dc_power_flow": "not_a_dict", "dc_voltage_level_kv": 333.0}
         result = _convert_dc_power_flow(data)
-        assert result.base_impedance == 333.0
+        assert result.voltage_level_kv == 333.0
 
     def test_loss_model_defaults(self):
         result = _convert_dc_power_flow({})
@@ -269,12 +268,6 @@ class TestConvertBatteryExtra:
         assert bat.bus_id_per_node == {0: "bus_b"}
         assert bat.bus_index == 7
 
-    def test_invest_cost_energy_explicit(self):
-        data = _battery()
-        data["invest_cost_energy"] = [123, 123]
-        bat = _convert_battery("bat_0", data)
-        assert bat.invest_cost_energy == [123, 123]
-
     def test_default_current_type_dc(self):
         bat = _convert_battery("bat_0", _battery())
         assert bat.current_type == "DC"
@@ -312,6 +305,32 @@ class TestConvertSystemUnitKeys:
         sc = _convert_system(data)
         assert sc.generators["unit_2"].type == "Renewable"
 
+    @pytest.mark.parametrize("label, expected", [
+        ("renewable", "Renewable"), ("Renovable", "Renewable"),
+        ("再生可能", "Renewable"), ("non-renewable", "Non-renewable"),
+        ("No renovable", "Non-renewable"),
+    ])
+    def test_type_spelling_normalized_before_sanitizing(self, label, expected, caplog):
+        """Lower-case and localized labels are valid spellings, not unknown
+        types: a solar unit must stay Renewable so its availability applies."""
+        data = _minimal_system()
+        unit = _renewable_gen(name="Sun1")
+        unit["type"] = label
+        data["unit_2"] = unit
+        with caplog.at_level(logging.WARNING):
+            sc = _convert_system(data)
+        assert sc.generators["unit_2"].type == expected
+        assert not any("unknown type" in r.message for r in caplog.records)
+
+    def test_lower_case_storage_routed_to_batteries(self):
+        data = _minimal_system()
+        bat = _battery(name="Bat")
+        bat["type"] = "storage"
+        data["bat_1"] = bat
+        sc = _convert_system(data)
+        assert "bat_1" in sc.batteries
+        assert "bat_1" not in sc.generators
+
 
 # ---------------------------------------------------------------------------
 # _convert_system: pre-converted generators/batteries dicts
@@ -327,6 +346,16 @@ class TestConvertSystemPreConverted:
         with caplog.at_level(logging.WARNING):
             sc = _convert_system(data)
         assert sc.generators["g0"].type == "Non-renewable"
+
+    def test_generators_dict_with_localized_renewable_type(self, caplog):
+        data = _minimal_system()
+        g = _renewable_gen(name="Sol")
+        g["type"] = "Renovable"
+        data["generators"] = {"g0": g}
+        with caplog.at_level(logging.WARNING):
+            sc = _convert_system(data)
+        assert sc.generators["g0"].type == "Renewable"
+        assert not any("unknown type" in r.message for r in caplog.records)
 
     def test_batteries_dict(self):
         data = _minimal_system()
@@ -357,11 +386,8 @@ class TestConvertSystemSubBlocks:
                 "import_cost": [50, 50],
                 "storage_capacity": [500, 500],
                 "initial_storage_level": [0.5, 0.5],
-                "storage_investment_cost": 10000,
                 "transport_cost": 5,
                 "transport_losses": 0.01,
-                "max_storage_investment_per_node": 200,
-                "max_transport_investment_per_arc": 100,
             }
         }
         sc = _convert_system(data)
@@ -477,14 +503,14 @@ class TestConvertSystemSubBlocks:
 class TestConvertSystemDCStripping:
     def test_dc_prefixed_keys_removed(self):
         data = _minimal_system()
-        data["DC_BASE_IMPEDANCE"] = 200.0
+        data["DC_SLACK_BUS"] = 2
         data["dc_reactance_per_km"] = 0.9
         sc = _convert_system(data)
         # DC config built from the flat keys
-        assert sc.dc_power_flow.base_impedance == 200.0
+        assert sc.dc_power_flow.slack_bus == 2
         assert sc.dc_power_flow.reactance_per_km == 0.9
         # The raw DC_/dc_ keys must not survive as attributes
-        assert not hasattr(sc, "DC_BASE_IMPEDANCE")
+        assert not hasattr(sc, "DC_SLACK_BUS")
         assert not hasattr(sc, "dc_reactance_per_km")
 
 
@@ -497,10 +523,7 @@ def _electrolyzer_data():
     return {
         "name": "EL1",
         "life_time": [20, 20],
-        "initial_age": [0, 0],
-        "degradation_rate": [0.01, 0.01],
         "rated_power": [50, 50],
-        "min_power": [5, 5],
         "ramp_up": [1.0, 1.0],
         "ramp_down": [1.0, 1.0],
         "eff_at_rated": [0.7, 0.7],
@@ -606,6 +629,20 @@ class TestFuelLinking:
         # Gas adder is 60.0, fuel_cost>0 at both nodes
         assert maint[0] == pytest.approx(60.0)
 
+    def test_non_fuel_adder_logged_per_generator(self, caplog):
+        """Each unit that receives the adder is named in the log."""
+        data = _minimal_system()
+        data["fuels"] = {"Gas": _fuel()}
+        data["unit_0"] = _thermal_gen(
+            name="GP", fuel="Gas", fuel_cost=[30, 30], maintenance_cost=[0.0, 0.0])
+        data["unit_1"] = _thermal_gen(
+            name="GQ", fuel="Gas", fuel_cost=[30, 30], maintenance_cost=[40.0, 40.0])
+        with caplog.at_level(logging.INFO, logger="esfex.config.loader"):
+            _convert_system(data)
+        lines = [r.getMessage() for r in caplog.records if "non-fuel O&M adder" in r.getMessage()]
+        assert len(lines) == 1
+        assert "unit_0" in lines[0] and "60" in lines[0]
+
     def test_existing_substantial_maintenance_not_doubled(self):
         """If maintenance already >= adder*0.5, skip the LCOE add."""
         data = _minimal_system()
@@ -616,6 +653,21 @@ class TestFuelLinking:
         sc = _convert_system(data)
         # 40 >= 60*0.5=30 -> unchanged
         assert sc.generators["unit_0"].maintenance_cost == [40.0, 40.0]
+
+    def test_own_fixed_cost_gets_no_adder(self, caplog):
+        """The adder (non-fuel LCOE, fixed O&M included) is not added to a
+        generator with its own fixed O&M in $/MW·yr: it was, so the fixed
+        O&M was charged twice (per MW·yr and inside the $/MWh adder)."""
+        data = _minimal_system()
+        data["fuels"] = {"Gas": _fuel()}
+        data["unit_0"] = _thermal_gen(
+            name="GP", fuel="Gas", fuel_cost=[30, 30], maintenance_cost=[2.0, 2.0],
+            fixed_cost=[25000.0, 25000.0])
+        with caplog.at_level(logging.INFO, logger="esfex.config.loader"):
+            sc = _convert_system(data)
+        assert sc.generators["unit_0"].maintenance_cost == [2.0, 2.0]
+        assert sc.generators["unit_0"].fixed_cost == [25000.0, 25000.0]
+        assert not any("non-fuel O&M adder" in r.getMessage() for r in caplog.records)
 
     def test_renewable_generators_skipped(self):
         """Renewable gens are not modified by the linking pass."""
@@ -668,6 +720,209 @@ class TestFuelLinking:
         sc = _convert_system(data)
         # Coal not in _NON_FUEL_LCOE -> adder 0 -> maintenance unchanged
         assert sc.generators["unit_0"].maintenance_cost == [0.0, 0.0]
+
+
+    def test_renewable_with_priced_fuel_pays_it(self):
+        """A Renewable unit whose fuel has a price (biomass) gets its fuel
+        cost and the biomass adder: it was skipped for being Renewable, so
+        it ran for free."""
+        data = _minimal_system()
+        data["fuels"] = {"Biomass": _fuel(price_base=40.0, energy_content=4.5)}
+        data["fuels"]["Biomass"]["name"] = "Biomass"
+        g = _renewable_gen(name="Bagasse", fuel="Biomass")
+        g["eff_at_rated"] = [0.28, 0.28]
+        g["fixed_cost"] = [0.0, 0.0]
+        g["maintenance_cost"] = [0.0, 0.0]
+        data["unit_0"] = g
+        sc = _convert_system(data)
+        gen = sc.generators["unit_0"]
+        assert gen.fuel_cost[0] == pytest.approx(40.0 / 4.5 / 0.28)
+        assert gen.maintenance_cost == [20.0, 20.0]
+
+    def test_renewable_without_fuel_entry_not_flagged(self, caplog):
+        """Sun/Wind/Water have no fuel entry: no cost, no 'free unit' warning."""
+        data = _minimal_system()
+        data["fuels"] = {"Gas": _fuel()}
+        data["unit_0"] = _renewable_gen(name="PV", fuel="Sun")
+        data["unit_1"] = _renewable_gen(name="WT", fuel="None")
+        with caplog.at_level(logging.WARNING):
+            sc = _convert_system(data)
+        assert sc.generators["unit_0"].fuel_cost == [0, 0]
+        assert not any("no valid fuel" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.parametrize("fuel_key,adder", [
+        ("Natural_gas", 60.0), ("Natural Gas", 60.0), ("NG", 60.0),
+        ("LNG", 60.0), ("Gas", 60.0), ("Fuel_oil", 55.0), ("HFO", 55.0),
+        ("Crude", 55.0), ("Oil", 55.0), ("Diesel", 60.0), ("Gasoil", 60.0),
+        ("Biomass", 20.0), ("Coal", 0.0),
+    ])
+    def test_non_fuel_adder_matches_fuel_aliases(self, fuel_key, adder):
+        """The adder is found whatever the fuel is called: the Studio's
+        "Natural_gas" got none while fuel oil and diesel did."""
+        data = _minimal_system()
+        fuel = _fuel()
+        fuel["name"] = fuel_key
+        data["fuels"] = {fuel_key: fuel}
+        data["unit_0"] = _thermal_gen(name="P", fuel=fuel_key, fuel_cost=[30, 30])
+        sc = _convert_system(data)
+        assert sc.generators["unit_0"].maintenance_cost == [adder, adder]
+
+    def test_non_fuel_adder_matches_fuel_display_name(self):
+        data = _minimal_system()
+        gas = _fuel()
+        gas["name"] = "Natural Gas"
+        data["fuels"] = {"fuel_1": gas}
+        data["unit_0"] = _thermal_gen(name="P", fuel="fuel_1", fuel_cost=[30, 30])
+        sc = _convert_system(data)
+        assert sc.generators["unit_0"].maintenance_cost == [60.0, 60.0]
+
+
+def _tech(fuel="Fuel_oil", typ="Non-renewable", **kw):
+    d = {
+        "type": typ,
+        "fuel": fuel,
+        "invest_cost": [900000.0, 900000.0],
+        "invest_max_power": [500.0, 500.0],
+        "eff_at_rated": [0.42, 0.42],
+        "degradation_rate": [0.0, 0.0],
+        "lifetime": 25,
+        "maintenance_cost": [6.4, 6.4],
+        "fixed_cost": [40000.0, 40000.0],
+    }
+    d.update(kw)
+    return d
+
+
+class TestTechnologyFuelLinking:
+    """Candidate technologies get their fuel cost from the fuels block like
+    generators: they kept fuel_cost 0, so the master built fuel-oil engines
+    as free generation (Cuba, 2,538 MW running at no fuel cost)."""
+
+    def _fuel_oil(self):
+        f = _fuel(price_base=405.0, energy_content=11.2, emission_factor=0.279)
+        f["name"] = "Fuel oil"
+        return {"Fuel_oil": f}
+
+    def test_technology_gets_fuel_cost(self):
+        data = _minimal_system()
+        data["fuels"] = self._fuel_oil()
+        data["technologies"] = {"engines": _tech()}
+        sc = _convert_system(data)
+        fc = sc.technologies["engines"].fuel_cost
+        assert fc == pytest.approx([405.0 / 11.2 / 0.42] * 2)
+        # No non-fuel O&M adder: a technology pays capital through invest_cost
+        assert sc.technologies["engines"].maintenance_cost == [6.4, 6.4]
+
+    def test_per_node_efficiency_and_single_value(self):
+        data = _minimal_system()
+        data["fuels"] = self._fuel_oil()
+        data["technologies"] = {
+            "a": _tech(eff_at_rated=[0.4, 0.0]),
+            "b": _tech(eff_at_rated=[0.35]),
+        }
+        sc = _convert_system(data)
+        assert sc.technologies["a"].fuel_cost == pytest.approx([405.0 / 11.2 / 0.4, 0.0])
+        assert sc.technologies["b"].fuel_cost == pytest.approx([405.0 / 11.2 / 0.35] * 2)
+
+    def test_explicit_fuel_cost_wins(self):
+        data = _minimal_system()
+        data["fuels"] = self._fuel_oil()
+        data["technologies"] = {"engines": _tech(fuel_cost=[70.0, 75.0])}
+        sc = _convert_system(data)
+        assert sc.technologies["engines"].fuel_cost == [70.0, 75.0]
+
+    def test_renewables_free_priced_biomass_pays(self):
+        data = _minimal_system()
+        bio = _fuel(price_base=40.0, energy_content=4.5, emission_factor=0.0)
+        data["fuels"] = {**self._fuel_oil(), "Biomass": bio,
+                         "Sun": _fuel(price_base=0.0, energy_content=0.0)}
+        data["technologies"] = {
+            "pv": _tech(fuel="Sun", typ="Renewable", eff_at_rated=[1.0, 1.0]),
+            "wind": _tech(fuel="Wind", typ="Renewable", eff_at_rated=[1.0, 1.0]),
+            "bio": _tech(fuel="Biomass", typ="Renewable", eff_at_rated=[0.3, 0.3]),
+        }
+        sc = _convert_system(data)
+        assert sc.technologies["pv"].fuel_cost == [0.0]
+        assert sc.technologies["wind"].fuel_cost == [0.0]
+        assert sc.technologies["bio"].fuel_cost == pytest.approx([40.0 / 4.5 / 0.3] * 2)
+
+    def test_free_non_renewable_technology_warns(self, caplog):
+        data = _minimal_system()
+        data["fuels"] = self._fuel_oil()
+        data["technologies"] = {
+            "ghost": _tech(fuel="Kerosene"),
+            "nofuel": _tech(fuel="None"),
+            "ok": _tech(),
+            "pv": _tech(fuel="Sun", typ="Renewable"),
+        }
+        with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+            _convert_system(data)
+        msgs = [r.getMessage() for r in caplog.records
+                if "candidate technologies with fuel_cost 0" in r.getMessage()]
+        assert len(msgs) == 1
+        assert "ghost" in msgs[0] and "not in fuels" in msgs[0]
+        assert "nofuel" in msgs[0]
+        assert "ok (" not in msgs[0] and "pv" not in msgs[0]
+
+    def test_free_technology_warns_without_fuels_block(self, caplog):
+        data = _minimal_system()
+        data["technologies"] = {"engines": _tech()}
+        with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+            _convert_system(data)
+        assert any("candidate technologies with fuel_cost 0" in r.getMessage()
+                   and "engines" in r.getMessage() for r in caplog.records)
+
+    def test_virtual_unit_of_built_capacity_pays_fuel(self):
+        """The fuel cost reaches the units the dispatch and the myopic master
+        build from the technology."""
+        from esfex.runner import technology_unit_fields
+
+        data = _minimal_system()
+        data["fuels"] = self._fuel_oil()
+        data["technologies"] = {"engines": _tech()}
+        sc = _convert_system(data)
+        fields = technology_unit_fields(
+            sc.technologies["engines"], lambda arr, d: list(arr) or [d])
+        assert fields["fuel_cost"] == pytest.approx([405.0 / 11.2 / 0.42] * 2)
+
+
+class TestGeneratorFractionBounds:
+    """min_power is a fraction of rated power and ramps a fraction per hour:
+    the loader clamps values outside that range with a warning (Studio
+    merges summed them, e.g. min_power 1.6)."""
+
+    def test_min_power_above_one_clamped(self, caplog):
+        data = _minimal_system()
+        data["unit_0"] = _thermal_gen(name="CCGT")
+        data["unit_0"]["min_power"] = [1.6, 0.4]
+        with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+            sc = _convert_system(data)
+        assert sc.generators["unit_0"].min_power == [1.0, 0.4]
+        msg = [r.getMessage() for r in caplog.records if "min_power" in r.getMessage()]
+        assert len(msg) == 1
+        assert "unit_0" in msg[0] and "node 0: 1.6 → 1" in msg[0]
+
+    def test_negative_values_clamped_to_zero(self, caplog):
+        data = _minimal_system()
+        data["unit_0"] = _thermal_gen(name="CCGT")
+        data["unit_0"]["min_power"] = [-0.2, 0.4]
+        data["unit_0"]["ramp_up"] = [-1.0, 0.5]
+        with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+            sc = _convert_system(data)
+        gen = sc.generators["unit_0"]
+        assert gen.min_power == [0.0, 0.4]
+        assert gen.ramp_up == [0.0, 0.5]
+        assert any("ramp_up must be ≥ 0" in r.getMessage() for r in caplog.records)
+
+    def test_valid_values_untouched(self, caplog):
+        data = _minimal_system()
+        data["unit_0"] = _thermal_gen(name="CCGT")
+        data["unit_0"]["ramp_up"] = [21.0, 0.5]     # large but valid (no upper bound)
+        with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+            sc = _convert_system(data)
+        assert sc.generators["unit_0"].min_power == [0.1, 0.1]
+        assert sc.generators["unit_0"].ramp_up == [21.0, 0.5]
+        assert not any("clamped" in r.getMessage() for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -757,3 +1012,25 @@ class TestLoadSystemConfigValidation:
         p.write_text(yaml.dump({"name": "OnlyName"}), encoding="utf-8")
         with pytest.raises(ConfigLoadError):
             load_system_config(p)
+
+
+class TestFieldNameAndAlias:
+    def test_field_name_wins_over_alias(self, caplog):
+        """Studio files up to 0.3.0 hold a setting twice: the loaded value under
+        its alias and the user's edit under the field name. Pydantic preferred
+        the alias, which discarded the edit."""
+        data = _minimal_system()
+        data.update(TARGET_RE_PENETRATION=1.0, target_re_penetration=0.8,
+                    MAX_ANNUAL_INCREMENT=0.1, max_annual_increment=0.1)
+        with caplog.at_level(logging.WARNING, logger="esfex.config.loader"):
+            sc = _convert_system(data)
+        assert sc.target_re_penetration == 0.8
+        assert sc.max_annual_increment == 0.1
+        warned = [r.getMessage() for r in caplog.records if "are set; using" in r.getMessage()]
+        assert len(warned) == 1 and "target_re_penetration" in warned[0]
+
+    def test_alias_alone_still_read(self):
+        data = _minimal_system()
+        data.pop("target_re_penetration", None)
+        data["TARGET_RE_PENETRATION"] = 0.7
+        assert _convert_system(data).target_re_penetration == 0.7

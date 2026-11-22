@@ -78,7 +78,6 @@ def minimal_system_data():
         "name": "TestSys",
         "demand_path": None,
         "demand_scale": 1.0,
-        "loss_demand_threshold": 0.05,
         "life_extension_cost_factor": 0.2,
         "sim_rooftop": False,
         "target_re_penetration": 0.5,
@@ -478,6 +477,26 @@ class TestConvertGenerator:
         gen = _convert_generator("my_gen", sample_generator_data)
         assert gen.name == "my_gen"
 
+    def test_studio_fields_are_kept(self, sample_generator_data):
+        """Schema fields the Studio writes must survive loading."""
+        sample_generator_data.update(
+            droop=[0.04, 0.0], governor_time_const=[6.0, 0.0],
+            risk_coefficient=[0.8, 0.0], reservoir_min_release=[2.0, 0.0],
+            reservoir_head_min_factor=[0.6, 0.0],
+            cascade_downstream="lower_dam", cascade_delay_hours=3,
+            q_max_mvar=[30.0, 0.0], power_factor=0.9,
+        )
+        gen = _convert_generator("solar", sample_generator_data)
+        assert gen.droop == [0.04, 0.0]
+        assert gen.governor_time_const == [6.0, 0.0]
+        assert gen.risk_coefficient == [0.8, 0.0]
+        assert gen.reservoir_min_release == [2.0, 0.0]
+        assert gen.reservoir_head_min_factor == [0.6, 0.0]
+        assert gen.cascade_downstream == "lower_dam"
+        assert gen.cascade_delay_hours == 3
+        assert gen.q_max_mvar == [30.0, 0.0]
+        assert gen.power_factor == 0.9
+
 
 # ---------------------------------------------------------------------------
 # _convert_battery
@@ -497,10 +516,16 @@ class TestConvertBattery:
         bat = _convert_battery("bat_0", sample_battery_data)
         assert bat.type == "Storage"
 
-    def test_invest_cost_energy_defaults_to_invest_cost(self, sample_battery_data):
-        """If invest_cost_energy missing, it defaults to invest_cost."""
+    def test_studio_fields_are_kept(self, sample_battery_data):
+        sample_battery_data.update(
+            throughput_degradation_cost=[1.5, 0.0], risk_coefficient=[0.9, 0.0],
+            technology="LFP", Availability="bess_avail.csv",
+        )
         bat = _convert_battery("bat_0", sample_battery_data)
-        assert bat.invest_cost_energy == sample_battery_data["invest_cost"]
+        assert bat.throughput_degradation_cost == [1.5, 0.0]
+        assert bat.risk_coefficient == [0.9, 0.0]
+        assert bat.technology == "LFP"
+        assert bat.availability_file == "bess_avail.csv"
 
 
 # ---------------------------------------------------------------------------
@@ -513,22 +538,21 @@ class TestConvertDCPowerFlow:
 
     def test_returns_dc_power_flow_config(self):
         """_convert_dc_power_flow returns DCPowerFlowConfig instance."""
-        data = {"dc_base_impedance": 100.0, "dc_reactance_per_km": 0.4}
+        data = {"dc_slack_bus": 1, "dc_reactance_per_km": 0.4}
         result = _convert_dc_power_flow(data)
         assert isinstance(result, DCPowerFlowConfig)
-        assert result.base_impedance == 100.0
+        assert result.slack_bus == 1
 
     def test_uppercase_keys(self):
         """Accepts uppercase DC_ keys (legacy format)."""
-        data = {"DC_BASE_IMPEDANCE": 200.0, "DC_VOLTAGE_LEVEL_KV": 345.0}
+        data = {"DC_REACTANCE_PER_KM": 0.5, "DC_VOLTAGE_LEVEL_KV": 345.0}
         result = _convert_dc_power_flow(data)
-        assert result.base_impedance == 200.0
+        assert result.reactance_per_km == 0.5
         assert result.voltage_level_kv == 345.0
 
     def test_defaults_when_no_keys(self):
         """Returns defaults when no DC keys are present."""
         result = _convert_dc_power_flow({})
-        assert result.base_impedance == 100.0
         assert result.reactance_per_km == 0.4
         assert result.voltage_level_kv == 220.0
         # enable_angle_limits removed — kept only ACOPF-meaningful fields.
@@ -552,15 +576,19 @@ class TestConvertPrimaryEnergySource:
             "import_cost": [50, 50],
             "storage_capacity": [500, 500],
             "initial_storage_level": [0.5, 0.5],
-            "storage_investment_cost": 10000,
             "transport_cost": 5,
             "transport_losses": 0.01,
-            "max_storage_investment_per_node": 200,
-            "max_transport_investment_per_arc": 100,
         }
         result = _convert_primary_energy_source("LNG", data)
         assert isinstance(result, PrimaryEnergySourceConfig)
         assert result.name == "LNG"
+
+        data.update(transport_transit_days_per_100km=0.5, disruption_start_hour=100,
+                    disruption_end_hour=200, disruption_availability=0.3)
+        result = _convert_primary_energy_source("LNG", data)
+        assert result.transport_transit_days_per_100km == 0.5
+        assert (result.disruption_start_hour, result.disruption_end_hour) == (100, 200)
+        assert result.disruption_availability == 0.3
 
 
 # ---------------------------------------------------------------------------
@@ -580,6 +608,75 @@ class TestConvertSystem:
         """DC power flow config is populated from system data."""
         sc = _convert_system(minimal_system_data)
         assert isinstance(sc.dc_power_flow, DCPowerFlowConfig)
+
+    def test_zero_ramp_is_reported(self, minimal_system_data, sample_generator_data, caplog):
+        sample_generator_data["ramp_up"] = [0.0, 0.0]
+        minimal_system_data["generators"] = {"solar": sample_generator_data}
+        with caplog.at_level("WARNING", logger="esfex.config.loader"):
+            _convert_system(minimal_system_data)
+        assert "ramp_up/ramp_down = 0" in caplog.text
+        assert "solar" in caplog.text
+
+    def test_node_without_demand_bus_is_reported(self, minimal_system_data, caplog):
+        minimal_system_data["buses"] = [
+            {"bus_id": "a", "parent_node": 0},
+            {"bus_id": "b", "parent_node": 1, "role": "connection", "demand_fraction": 0.0},
+        ]
+        with caplog.at_level("WARNING", logger="esfex.config.loader"):
+            _convert_system(minimal_system_data)
+        assert "node(s) [1]" in caplog.text
+        assert "demand is dropped" in caplog.text
+
+    def test_self_loop_branches_are_reported_once(self, minimal_system_data, caplog):
+        # A line or transformer from a bus to itself was dropped by the model
+        # (TransmissionDC) with no word; only the Studio validation flagged it.
+        minimal_system_data["transmission_lines_geo"] = [
+            {"line_id": "ok", "from_node": 0, "to_node": 1, "from_bus": 0, "to_bus": 1},
+            {"line_id": "loop_a", "from_node": 0, "to_node": 0, "from_bus": 0, "to_bus": 0},
+            {"line_id": "loop_b", "from_node": 0, "to_node": 1, "from_bus": 1, "to_bus": 1},
+            # Equipment-to-bus link on one bus: not a self-loop (Studio rule)
+            {"line_id": "link", "from_node": 0, "to_node": 0, "from_bus": 0, "to_bus": 0,
+             "from_endpoint_type": "generator", "from_endpoint_id": "g1",
+             "to_endpoint_type": "bus", "to_endpoint_id": "b0"},
+        ]
+        minimal_system_data["transformers"] = [
+            {"name": "T1", "from_node": 1, "to_node": 1, "from_voltage_kv": 220.0,
+             "to_voltage_kv": 110.0, "rated_power_mva": 100.0},
+        ]
+        with caplog.at_level("WARNING", logger="esfex.config.loader"):
+            _convert_system(minimal_system_data)
+        msgs = [r.getMessage() for r in caplog.records if "connect a bus to itself" in r.getMessage()]
+        assert len(msgs) == 1
+        assert "3 branch(es)" in msgs[0] and "ignored" in msgs[0]
+        assert "line loop_a" in msgs[0] and "line loop_b" in msgs[0]
+        assert "transformer T1" in msgs[0]
+        assert "line ok" not in msgs[0] and "line link" not in msgs[0]
+
+    def test_no_self_loop_warning_without_self_loops(self, minimal_system_data, caplog):
+        minimal_system_data["transmission_lines_geo"] = [
+            {"line_id": "ok", "from_node": 0, "to_node": 1, "from_bus": 0, "to_bus": 1}]
+        with caplog.at_level("WARNING", logger="esfex.config.loader"):
+            _convert_system(minimal_system_data)
+        assert "connect a bus to itself" not in caplog.text
+
+    def test_all_penalties_are_read(self, minimal_system_data):
+        minimal_system_data["penalties"] = {
+            "SOC_violation": 5.0e5, "non_electric_demand_loss": 1.0e4,
+        }
+        pen = _convert_system(minimal_system_data).penalties
+        assert pen.soc_violation == 5.0e5
+        assert pen.non_electric_demand_loss == 1.0e4
+
+    def test_removed_penalty_keys_are_dropped(self, minimal_system_data):
+        """Penalties that priced nothing were removed from the schema: an old
+        file that still sets one loads, and the key is not kept."""
+        minimal_system_data["penalties"] = {"Coupling_Slack_Penalty": 3.0,
+                                            "curtailment_excess_penalty": 1.0,
+                                            "delay_retirement_per_mw": 1.0e4}
+        pen = _convert_system(minimal_system_data).penalties
+        assert "coupling_slack_penalty" not in pen.model_dump()
+        assert "curtailment_excess_penalty" not in pen.model_dump()
+        assert "delay_retirement_per_mw" not in pen.model_dump()
 
 
 # ---------------------------------------------------------------------------

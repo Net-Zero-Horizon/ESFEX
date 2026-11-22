@@ -21,7 +21,11 @@ from typing import Any, Optional
 import h5py
 import numpy as np
 
+from esfex.utils.temporal import HOURS_STD_YEAR
+from esfex.visualization.i18n import tr
+
 from esfex.visualization.panels.results_charts import (
+    _SlicedScenarioView,
     _open_scenario,
     _open_summary_results,
     _open_system_config,
@@ -83,6 +87,25 @@ def _collect_arrays_with_fuel(
                             str(f) if f is not None else None))
         return out
     return []
+
+
+def _unit_is_renewable(grp, name: str, cfg=None) -> Optional[bool]:
+    """Whether the unit behind generation dataset ``grp[name]`` counts as
+    renewable in the RE share: the dataset's ``attrs["is_renewable"]`` (the
+    model's rule, a unit of type "Renewable", written by the export since
+    round 27), else the type in its config ``cfg``; None when neither says.
+    """
+    try:
+        flag = grp[name].attrs.get("is_renewable")
+    except Exception:
+        flag = None
+    if flag is not None:
+        if isinstance(flag, (bytes, str)):
+            return str(flag).lower() in ("true", "1", "yes")
+        return bool(flag)
+    if isinstance(cfg, dict) and cfg.get("type"):
+        return cfg.get("type") == "Renewable"
+    return None
 
 
 def _fmt_compact_usd(v: float) -> str:
@@ -411,14 +434,8 @@ class DashboardLoader:
         from esfex.visualization.panels.results_charts import (
             orient_to_node_hours,
         )
-        rng = None
-        try:
-            from esfex.visualization.panels.results_charts import (
-                _system_node_range as _sys_node_range,
-            )
-            rng = _sys_node_range(f, bp)
-        except Exception:
-            pass
+        # A subsystem's ``sc`` is already sliced to its nodes
+        # (_open_scenario): the arrays are summed as read.
         tres = int(f.attrs.get("temporal_resolution_hours", 1))
 
         # LMPs (system average + hourly load shed for the trajectory
@@ -439,9 +456,6 @@ class DashboardLoader:
             # nodes > hours (all of Japan: 72 nodes > 24 h) mis-reads demand and
             # inflates the shed share (184% instead of the true 69%).
             arr = orient_to_node_hours(arr, n_hours)
-            if rng is not None:
-                lo, hi = rng
-                arr = arr[lo:hi]
             s = arr.sum(axis=0).astype(float)
             if n_hours and len(s) < n_hours:
                 s = _np.pad(s, (0, n_hours - len(s)))
@@ -457,7 +471,7 @@ class DashboardLoader:
         try:
             from esfex.visualization.panels.results_charts import (
                 _load_gen_data,
-                _load_gen_configs,
+                _gen_config_resolver,
                 _tech_bucket_for_gen,
                 get_generation_colors,
                 get_generation_default_color,
@@ -465,20 +479,29 @@ class DashboardLoader:
         except Exception:
             _load_gen_data = None
         tech_series: dict[str, _np.ndarray] = {}
+        # Renewable generation per hour by the model's rule (None when a
+        # unit's rule is unknown: the KPI falls back to the mix labels)
+        re_hourly: Optional[_np.ndarray] = _np.zeros(n_hours or 0)
         if _load_gen_data is not None:
-            cfgs = _load_gen_configs(f, bp)
+            # Each dataset finds its unit's config by name (h5py lists them
+            # alphabetically; the master's builds take their technology's)
+            unit_config = _gen_config_resolver(f, bp)
             gen_data = _load_gen_data(sc)
+            gen_grp = sc["generation"] if "generation" in sc else None
             for gi, (gname, arr) in enumerate(gen_data.items()):
                 if arr.ndim < 2:
                     continue
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
                 hourly = arr.sum(axis=0).astype(float)
                 if n_hours and len(hourly) < n_hours:
                     hourly = _np.pad(hourly, (0, n_hours - len(hourly)))
                 hourly = hourly[:n_hours] if n_hours else hourly
-                cfg = cfgs[gi] if gi < len(cfgs) else {}
+                cfg = unit_config(gname, gi)
+                is_re = (_unit_is_renewable(gen_grp, gname, cfg)
+                         if gen_grp is not None else None)
+                if is_re is None or re_hourly is None or len(hourly) != len(re_hourly):
+                    re_hourly = None
+                elif is_re:
+                    re_hourly = re_hourly + hourly
                 tech = _tech_bucket_for_gen(cfg, gname)
                 if tech in tech_series:
                     tech_series[tech] = tech_series[tech] + hourly
@@ -497,9 +520,6 @@ class DashboardLoader:
             for arr in d.values():
                 if arr.ndim < 2:
                     continue
-                if rng is not None:
-                    lo, hi = rng
-                    arr = arr[lo:hi]
                 s = arr.sum(axis=0).astype(float)
                 if n_hours and len(s) < n_hours:
                     s = _np.pad(s, (0, n_hours - len(s)))
@@ -529,18 +549,23 @@ class DashboardLoader:
             "demand_mw": [float(v) for v in demand],
         }
 
+        # ``id`` is the stable series identity (the RE-share KPI keys on
+        # it); ``label`` is what the legend shows: the technology bucket
+        # as is, the non-generation series in the current language.
         series = []
         for label, vals in sorted(
             tech_series.items(), key=lambda kv: -float(_np.mean(kv[1]))
         ):
             series.append({
+                "id": label,
                 "label": label,
                 "color": _color_for(label),
                 "values": [float(v) for v in vals],
             })
         if bat_discharge.size and bat_discharge.any():
             series.append({
-                "label": "Battery (discharge)",
+                "id": "battery_discharge",
+                "label": tr("dashboard_loader.battery_discharge"),
                 "color": "rgba(155, 89, 182, 0.85)",
                 "values": [float(v) for v in bat_discharge],
             })
@@ -548,19 +573,22 @@ class DashboardLoader:
         series_neg = []
         if bat_charge.size and bat_charge.any():
             series_neg.append({
-                "label": "Battery (charge)",
+                "id": "battery_charge",
+                "label": tr("dashboard_loader.battery_charge"),
                 "color": "rgba(155, 89, 182, 0.45)",
                 "values": [float(v) for v in bat_charge],
             })
         if curtailment.size and curtailment.any():
             series_neg.append({
-                "label": "Curtailment",
+                "id": "curtailment",
+                "label": tr("dashboard_loader.curtailment"),
                 "color": "rgba(241, 196, 15, 0.7)",
                 "values": [float(v) for v in curtailment],
             })
         if load_shed.size and load_shed.any():
             series.append({
-                "label": "Load shed",
+                "id": "load_shed",
+                "label": tr("dashboard_loader.load_shed"),
                 "color": "rgba(231, 76, 60, 0.85)",
                 "values": [float(v) for v in load_shed],
             })
@@ -571,6 +599,7 @@ class DashboardLoader:
             "series_neg": series_neg,
             "demand_mw": [float(v) for v in demand],
             "tres": tres,
+            "re_mw": (None if re_hourly is None else [float(v) for v in re_hourly]),
         }
         return {"trajectory": trajectory, "mix": mix}
 
@@ -618,14 +647,21 @@ class DashboardLoader:
         dem_mwh = float(demand.sum() * tres)
         ens_pct = (ens_mwh / dem_mwh * 100.0) if dem_mwh > 0 else 0.0
 
-        # RE share (energy-weighted). Use the same RE label set as the
-        # planning mix.
+        # RE share (energy-weighted): renewable over total generation.
+        # Battery discharge and load shed are not generation; the units'
+        # own rule (type "Renewable") when the file has it, else the
+        # planning mix's labels.
         re_gen = total_gen = 0.0
         for s in series_pos:
+            sid = self._series_id(s)
+            if sid in self._NOT_GENERATION_LABELS:
+                continue
             v = _np.asarray(s.get("values", []), dtype=float).sum() * tres
             total_gen += v
-            if s.get("label") in self._RENEWABLE_MIX_LABELS:
+            if sid in self._RENEWABLE_MIX_LABELS:
                 re_gen += v
+        if mix.get("re_mw") is not None:
+            re_gen = float(_np.sum(mix["re_mw"])) * tres
         re_share = (re_gen / total_gen) if total_gen > 0 else None
 
         # Battery cycles (equivalent full): Σ discharge MWh / capacity.
@@ -658,20 +694,22 @@ class DashboardLoader:
         kpis = {
             "cost": _card(
                 _fmt_compact_usd(cost_v) if cost_v is not None else None,
-                "Operational cost (horizon)"),
+                tr("dashboard_loader.kpi_cost_note")),
             "avg_lmp": _card(
                 f"{avg_lmp:,.1f} USD/MWh" if avg_lmp is not None else None,
-                "Demand-weighted average"),
+                tr("dashboard_loader.kpi_avg_lmp_note")),
             "ens": _card(
-                f"{ens_mwh:,.0f} MWh ({ens_pct:.1f}% demand)"
+                tr("dashboard_loader.kpi_ens_value",
+                   mwh=f"{ens_mwh:,.0f}", pct=f"{ens_pct:.1f}")
                 if dem_mwh > 0 else None,
-                "Unserved energy"),
+                tr("dashboard_loader.kpi_ens_note")),
             "re_share": _card(
                 f"{re_share * 100:.1f}%" if re_share is not None else None,
-                "Renewable share of generation"),
+                tr("dashboard_loader.kpi_re_share_note")),
             "battery_cycles": _card(
-                f"{cycles:.2f} eq. full cycles" if cap_mwh > 0 else "No batteries",
-                "Throughput / capacity"),
+                tr("dashboard_loader.kpi_cycles_value", cycles=f"{cycles:.2f}")
+                if cap_mwh > 0 else tr("dashboard_loader.kpi_no_batteries"),
+                tr("dashboard_loader.kpi_cycles_note")),
         }
         return kpis
 
@@ -680,10 +718,48 @@ class DashboardLoader:
     # emit. "Other" intentionally excluded — keyword fallback assigns
     # any plant whose name doesn't match a known tech to "Other",
     # which is safer to classify as non-renewable than to assume.
+    # Only a fallback for files without the units' own rule (an export
+    # before round 27): the RE share counts a unit of type "Renewable"
+    # (``attrs["is_renewable"]`` on each generation dataset, the mix's
+    # ``re_gwh`` / ``re_mw``), so nuclear is not renewable.
     _RENEWABLE_MIX_LABELS = frozenset({
         "Wind", "Solar", "Hydro", "Biomass", "OTEC",
-        "Geothermal", "Nuclear", "Hydrogen",
+        "Geothermal", "Hydrogen",
     })
+    # Mix series that are not generation (left out of the RE share's total),
+    # by series id (``battery_discharge`` / ``load_shed``) or, for payloads
+    # without one, the English label they used to carry
+    _NOT_GENERATION_LABELS = frozenset({
+        "battery_discharge", "load_shed",
+        "Battery (discharge)", "Battery discharge", "Battery", "Load shed",
+    })
+
+    @staticmethod
+    def _series_id(s: dict) -> Optional[str]:
+        """Stable identity of a mix series: its ``id``, else its label
+        (planning series and older payloads carry only the label, which
+        is then the technology bucket)."""
+        return s.get("id") or s.get("label")
+
+    @classmethod
+    def _mix_year_re(cls, mix: dict, i: int) -> tuple[float, float]:
+        """``(renewable, total)`` generation of year ``i`` of a planning
+        ``mix``: the total of its series, and the renewable part by the
+        units' rule (``mix["re_gwh"]``) when the file has it, else by the
+        series labels (``_RENEWABLE_MIX_LABELS``)."""
+        ren = tot = 0.0
+        for s in mix.get("series") or []:
+            vals = s.get("values") or []
+            if i >= len(vals) or vals[i] is None:
+                continue
+            v = float(vals[i])
+            tot += v
+            if cls._series_id(s) in cls._RENEWABLE_MIX_LABELS:
+                ren += v
+        re_gwh = mix.get("re_gwh") or []
+        if i < len(re_gwh) and re_gwh[i] is not None:
+            ren = float(re_gwh[i])
+        return ren, tot
 
     @classmethod
     def _patch_re_from_mix(cls, trajectory: Optional[dict],
@@ -704,24 +780,11 @@ class DashboardLoader:
         traj_years = trajectory.get("years") or []
         if not series or not mix_years or mix_years != traj_years:
             return
-        n = len(traj_years)
-        re_total = [0.0] * n
-        all_total = [0.0] * n
-        for s in series:
-            vals = s.get("values") or []
-            if len(vals) != n:
-                continue
-            is_re = s.get("label") in cls._RENEWABLE_MIX_LABELS
-            for i, v in enumerate(vals):
-                if v is None:
-                    continue
-                all_total[i] += float(v)
-                if is_re:
-                    re_total[i] += float(v)
-        trajectory["re_pct"] = [
-            (re_total[i] / all_total[i] * 100.0) if all_total[i] > 0 else None
-            for i in range(n)
-        ]
+        pct = []
+        for i in range(len(traj_years)):
+            ren, tot = cls._mix_year_re(mix, i)
+            pct.append(ren / tot * 100.0 if tot > 0 else None)
+        trajectory["re_pct"] = pct
 
     # ── HDF5 helpers ──────────────────────────────────────────────
 
@@ -802,6 +865,9 @@ class DashboardLoader:
         """
         fuel_map = self._fuel_map_for(f, system)
         per_tech: dict[str, list[float]] = {}
+        # Renewable GWh per year by the units' own rule; None for a year
+        # whose datasets do not carry it (older exports)
+        re_gwh: list[Optional[float]] = []
         for y in years_view:
             sc_key = f"year_{y}_threshold_0"
             try:
@@ -810,8 +876,11 @@ class DashboardLoader:
                 # Pad every existing tech with None for this year.
                 for series in per_tech.values():
                     series.append(0.0)
+                re_gwh.append(None)
                 continue
             year_totals: dict[str, float] = {}
+            year_re: Optional[float] = 0.0
+            gen_grp = yrg["generation"] if "generation" in yrg else None
             # Per-dataset ``attrs["fuel"]`` is the authoritative source
             # added by the export (2026-05+). When present, bucketing
             # is just ``fuel → tech label``; when absent (legacy h5),
@@ -825,6 +894,12 @@ class DashboardLoader:
                 # annual generation in MWh; convert to GWh.
                 total_gwh = float(np.nansum(arr)) / 1000.0
                 year_totals[tech] = year_totals.get(tech, 0.0) + total_gwh
+                is_re = (_unit_is_renewable(gen_grp, gen_name)
+                         if gen_grp is not None else None)
+                if is_re is None or year_re is None:
+                    year_re = None
+                elif is_re:
+                    year_re += total_gwh
             # Append per-tech, padding missing techs with 0 so all
             # series stay aligned in length.
             seen = set(year_totals.keys()) | set(per_tech.keys())
@@ -834,6 +909,7 @@ class DashboardLoader:
                 while len(per_tech[tech]) < years_view.index(y):
                     per_tech[tech].append(0.0)
                 per_tech[tech].append(year_totals.get(tech, 0.0))
+            re_gwh.append(year_re)
 
         # Sort series by mean magnitude descending so the largest
         # contributors land at the bottom of the stack (more readable).
@@ -851,12 +927,12 @@ class DashboardLoader:
         return {
             "years": list(years_view),
             "series": series,
+            "re_gwh": re_gwh,
         }
 
-    # Cost-breakdown component → display label + sign convention.
-    # ``benefit`` flag marks components that *reduce* the objective
-    # (revenue / avoided cost) — they're stored positive in the HDF5
-    # but should subtract in the waterfall.
+    # Cost-breakdown component → English label. The waterfall shows
+    # ``dashboard_loader.cost_<component>`` in the current language
+    # (``_cost_label``); each step also carries the component key as ``id``.
     _COST_COMPONENTS = [
         ("fuel_cost",                "Fuel"),
         ("co2_emission_cost",        "CO₂ emissions"),
@@ -868,6 +944,7 @@ class DashboardLoader:
         ("investment_cost",          "Investment (CAPEX)"),
         ("electrolyzer_cost",        "Electrolyzer"),
         ("converter_cost",           "Converter"),
+        ("line_flow_cost",           "Line flow cost"),
         ("reservoir_invest_cost",    "Reservoir CAPEX"),
         ("load_shedding_cost",       "Load shedding"),
         ("curtailment_cost",         "Curtailment"),
@@ -880,11 +957,16 @@ class DashboardLoader:
         ("soc_violation_cost",       "SOC violation"),
         ("transfer_margin_cost",     "Transfer margin"),
         ("fre_penetration_cost",     "RE-penetration penalty"),
-        ("npv_penalty_cost",         "NPV penalty"),
-        ("delay_retirement_cost",    "Delayed retirement"),
         ("demand_shift_cost",        "Demand shift"),
-        ("v2g_compensation",         "V2G compensation"),
+        ("operating_budget_penalty", "Operating budget excess"),
     ]
+
+    @classmethod
+    def _cost_label(cls, key: str) -> str:
+        """Display label of cost component ``key`` (unknown keys as is)."""
+        if key in dict(cls._COST_COMPONENTS):
+            return tr(f"dashboard_loader.cost_{key}")
+        return key
 
     def _read_cost_breakdown(self, f: h5py.File, bp: str,
                              years: list[int]) -> Optional[dict]:
@@ -922,12 +1004,10 @@ class DashboardLoader:
                     else:
                         comp_sum_recon[k] = comp_sum_recon.get(k, 0.0) + float(v)
             if recon_found:
-                # Translate component keys to the same human labels the
-                # legacy path produces so the JS waterfall renders the
-                # same legend regardless of which path provided the data.
-                label_by_key = dict(self._COST_COMPONENTS)
+                # Same labels as the legacy path, so the JS waterfall
+                # renders the same legend whichever path provided the data.
                 steps = [
-                    {"label": label_by_key.get(k, k), "value": v}
+                    {"id": k, "label": self._cost_label(k), "value": v}
                     for k, v in comp_sum_recon.items() if abs(v) >= 1.0
                 ]
                 if steps:
@@ -974,9 +1054,8 @@ class DashboardLoader:
         if not found:
             return None
 
-        label_by_key = dict(self._COST_COMPONENTS)
         steps = [
-            {"label": label_by_key[k], "value": v}
+            {"id": k, "label": self._cost_label(k), "value": v}
             for k, v in comp_sum.items() if abs(v) >= 1.0
         ]
         if not steps:
@@ -1016,18 +1095,9 @@ class DashboardLoader:
         idx = [i for i, y in enumerate(myears) if y in years_view]
         if not idx:
             return None
-        series = mix.get("series", [])
         best: Optional[float] = None
         for i in idx:
-            ren = tot = 0.0
-            for s in series:
-                vals = s.get("values") or []
-                if i >= len(vals):
-                    continue
-                v = vals[i]
-                tot += v
-                if s.get("label") in self._RENEWABLE_MIX_LABELS:
-                    ren += v
+            ren, tot = self._mix_year_re(mix, i)
             if tot > 0:
                 share = ren / tot
                 if best is None or share > best:
@@ -1127,109 +1197,130 @@ class DashboardLoader:
             self._cost_cache[cache_key] = None
             return None
 
-        # Read the GLOBAL scenario datasets, then slice to this system's
-        # node range. ``_open_scenario`` returns a sliced view when
-        # ``bp`` carries a subsystem prefix, but the per-system mirror
-        # is collapsed in the Phase-2 layout — we re-derive the range
-        # explicitly so the math is the same whether or not the mirror
-        # exists.
+        # A subsystem's scenario is a view whose node axis is already this
+        # system's nodes (``_open_scenario``); the configs' per-node lists
+        # stay global, so its row k is global node ``node0 + k``. The root
+        # (single system) and a legacy per-system mirror are read as is.
         rng = self._system_node_range(f, bp)
+        node0 = rng[0] if (rng is not None and isinstance(sc, _SlicedScenarioView)) else 0
         tres = int(f.attrs.get("temporal_resolution_hours", 1))
 
+        from esfex.models.financial_analysis import (
+            _index_configs_by_name, _lookup_config, power_in_service,
+        )
         from esfex.visualization.panels.results_charts import (
             _load_gen_configs, _load_bat_configs, _load_tech_configs,
             _load_bat_tech_configs, _load_gen_data, _load_bat_data,
         )
         gen_cfgs = _load_gen_configs(f, bp)
         bat_cfgs = _load_bat_configs(f, bp)
-        tech_cfgs = _load_tech_configs(f, bp)
-        bat_tech_cfgs = _load_bat_tech_configs(f, bp)
 
-        # Stable mapping ``dataset name → index in gen_cfgs`` so we can
-        # look up the right ``fuel_cost`` per generator. Datasets are
-        # iterated in the same insertion order the runner wrote them,
-        # so a positional zip is correct.
+        # Each dataset finds its unit's config by name: h5py lists the
+        # datasets alphabetically, not in config order. The units the master
+        # built ("Investment <technology>") have no config of their own: they
+        # take their technology's. Fixed O&M is charged on the MW in service
+        # the runner records on each unit's dataset (retirements, life
+        # extension and degradation applied; older files: the configured
+        # rating). Position is only the fallback for files whose configs
+        # carry no name.
+        gen_by_name = _index_configs_by_name(gen_cfgs)
+        bat_by_name = _index_configs_by_name(bat_cfgs)
+        tech_by_name = _index_configs_by_name(_load_tech_configs(f, bp))
+        bat_tech_by_name = _index_configs_by_name(_load_bat_tech_configs(f, bp))
+
+        def _gen_cfg(name, idx):
+            return _lookup_config(
+                name, gen_by_name, gen_cfgs, idx, tech_by_name=tech_by_name,
+                in_service_mw=power_in_service(sc["generation"], name)
+                if "generation" in sc else None)
+
+        def _bat_cfg(name, idx):
+            return _lookup_config(
+                name, bat_by_name, bat_cfgs, idx, tech_by_name=bat_tech_by_name,
+                in_service_mw=power_in_service(sc["battery_discharge"], name)
+                if "battery_discharge" in sc else None,
+                power_key="MaxDischargePower")
+
         gen_data = _load_gen_data(sc)
         gen_charge = _load_bat_data(sc, "battery_charge")
         gen_discharge = _load_bat_data(sc, "battery_discharge")
 
-        def _slice_nodes(arr: np.ndarray) -> np.ndarray:
-            """Return ``arr`` restricted to this system's node range
-            along axis 0. ``arr`` is ``[nodes, hours]`` or flat ``[hours]``
-            (single-node legacy export); the latter passes through."""
-            if arr.ndim < 2 or rng is None:
-                return arr
-            lo, hi = rng
-            return arr[lo:hi]
-
         fuel_c = fix_c = maint_c = startup_c = bat_maint_c = 0.0
 
         # Operational costs: Σ_{g, n∈sys, h} P[g,n,h] × coef[g,n] × Δt
-        gen_names_in_order = list(gen_data.keys())
-        for gi, gname in enumerate(gen_names_in_order):
+        gen_cfg_by_ds: dict[str, dict] = {}
+        for gi, gname in enumerate(gen_data):
             arr = gen_data[gname]
-            cfg = gen_cfgs[gi] if gi < len(gen_cfgs) else {}
-            sliced = _slice_nodes(arr)
-            if sliced.ndim < 2:
+            cfg = gen_cfg_by_ds[gname] = _gen_cfg(gname, gi)
+            if arr.ndim < 2:
                 # Treat as node-0 series.
-                energy_by_node = np.array([float(np.nansum(sliced)) * tres])
+                energy_by_node = np.array([float(np.nansum(arr)) * tres])
                 lo = 0
             else:
-                energy_by_node = np.nansum(sliced, axis=1) * tres
-                lo = rng[0] if rng is not None else 0
+                energy_by_node = np.nansum(arr, axis=1) * tres
+                lo = node0
+            # Share of the year these steps cover (fixed O&M is $/MW·yr)
+            year_share = arr.shape[-1] * tres / HOURS_STD_YEAR
             for k, e in enumerate(energy_by_node):
+                n = lo + k
+                # Fixed O&M on the power in service, whether or not it ran
+                fix_c += (self._attr_at_node(cfg, "fixed_cost", n)
+                          * self._attr_at_node(cfg, "rated_power", n) * year_share)
                 if e == 0:
                     continue
-                n = lo + k
                 fuel_c  += float(e) * self._attr_at_node(cfg, "fuel_cost", n)
-                fix_c   += float(e) * self._attr_at_node(cfg, "fixed_cost", n)
                 maint_c += float(e) * self._attr_at_node(cfg, "maintenance_cost", n)
 
-        # Startup: ESFEX writes gen_status (binary on/off) but the
-        # number of starts is what the cost is keyed on. Without a
-        # ``gen_startup`` dataset we fall back to counting 0→1
-        # transitions in ``gen_status`` (same as the solver's
-        # ``startup`` decision variable in UC mode).
-        gen_status = sc.get("gen_status") if hasattr(sc, "get") else None
-        if gen_status is not None:
-            gs_data = (
-                gen_status if isinstance(gen_status, dict)
-                else {k: gen_status[k][:] for k in gen_status}
-            )
-            for gi, gname in enumerate(gs_data):
-                arr = gs_data[gname]
-                cfg = gen_cfgs[gi] if gi < len(gen_cfgs) else {}
-                sliced = _slice_nodes(arr)
-                if sliced.ndim < 2:
+        # Startup: ESFEX writes gen_status (units online) and the units
+        # started are what the cost is keyed on: the increases of
+        # ``gen_status`` (the solver's ``startup`` variable in UC mode).
+        # One of a plant's num_units units costs start_up_cost / num_units.
+        # A subsystem view slices ``gen_status`` to this system's units and
+        # nodes, like generation.
+        if "gen_status" in sc:
+            from esfex.visualization.panels.results_charts import num_units_at
+            gs_grp = sc["gen_status"]
+            for gname in gs_grp:
+                if gname not in gen_data:
                     continue
-                # transitions per node = sum of clip(diff, 0, 1)
-                diffs = np.diff(sliced, axis=1, prepend=0)
-                starts_by_node = np.clip(diffs, 0, 1).sum(axis=1)
-                lo = rng[0] if rng is not None else 0
-                for k, s in enumerate(starts_by_node):
-                    if s == 0:
+                ds = gs_grp[gname]
+                arr = np.asarray(ds[:])
+                if arr.ndim < 2:
+                    continue
+                cfg = gen_cfg_by_ds[gname]
+                # units started per node = sum of the increases
+                diffs = np.diff(arr, axis=1, prepend=0)
+                starts_by_node = np.clip(diffs, 0, None).sum(axis=1)
+                for k, st in enumerate(starts_by_node):
+                    if st == 0:
                         continue
-                    n = lo + k
-                    startup_c += float(s) * self._attr_at_node(
-                        cfg, "start_up_cost", n
-                    )
+                    startup_c += float(st) * self._attr_at_node(
+                        cfg, "start_up_cost", node0 + k
+                    ) / num_units_at(ds, node0 + k)
 
         # Battery maintenance: (charge + discharge) × per-node coeff.
-        bat_names = list(set(gen_charge.keys()) | set(gen_discharge.keys()))
+        # (A set gave an arbitrary order, paired with bat_cfgs by position.)
+        bat_names = list(dict.fromkeys([*gen_discharge, *gen_charge]))
         for bi, bname in enumerate(bat_names):
             c_arr = gen_charge.get(bname, np.zeros(0))
             d_arr = gen_discharge.get(bname, np.zeros(0))
-            cfg = bat_cfgs[bi] if bi < len(bat_cfgs) else {}
+            cfg = _bat_cfg(bname, bi)
+            # Fixed O&M ($/MW·yr) on the discharge power in service
+            if d_arr.ndim == 2:
+                share = d_arr.shape[-1] * tres / HOURS_STD_YEAR
+                for k in range(d_arr.shape[0]):
+                    fix_c += (self._attr_at_node(cfg, "fixed_cost", node0 + k)
+                              * self._attr_at_node(cfg, "MaxDischargePower", node0 + k)
+                              * share)
             for arr in (c_arr, d_arr):
                 if arr.size == 0:
                     continue
-                sliced = _slice_nodes(arr)
-                if sliced.ndim < 2:
-                    energy_by_node = np.array([float(np.nansum(sliced)) * tres])
+                if arr.ndim < 2:
+                    energy_by_node = np.array([float(np.nansum(arr)) * tres])
                     lo = 0
                 else:
-                    energy_by_node = np.nansum(sliced, axis=1) * tres
-                    lo = rng[0] if rng is not None else 0
+                    energy_by_node = np.nansum(arr, axis=1) * tres
+                    lo = node0
                 for k, e in enumerate(energy_by_node):
                     if e == 0:
                         continue
@@ -1238,41 +1329,34 @@ class DashboardLoader:
                         cfg, "maintenance_cost", n
                     )
 
-        # Investment cost: MW added per-system × invest cost per MW.
-        # We piggy-back on the existing ``_investment_mw`` logic but
-        # need the tech-config invest_cost (a per-node vector stored
-        # as a string by the runner).
+        # Investment cost: MW (MWh) the master added this year × the
+        # technology's invest cost per MW (per MWh). The attrs are on the
+        # ROOT scenario, keyed by global technology and node index:
+        # ``investment_tech_investment_power_<t>_<n>``,
+        # ``investment_bat_tech_investment_{power|capacity}_<bt>_<n>``.
+        tech_cfgs = _load_tech_configs(f, "")
+        bat_tech_cfgs = _load_bat_tech_configs(f, "")
         inv_cost = 0.0
         root_path = f"detailed_results/year_{year}_threshold_0"
         if root_path in f:
             for attr_key, attr_val in f[root_path].attrs.items():
-                if not attr_key.startswith("investment_") or "_power_" not in attr_key:
+                if attr_key.startswith("investment_bat_tech_investment_power_"):
+                    pool, cost_key = bat_tech_cfgs, "invest_cost_power"
+                elif attr_key.startswith("investment_bat_tech_investment_capacity_"):
+                    pool, cost_key = bat_tech_cfgs, "invest_cost_energy"
+                elif attr_key.startswith("investment_tech_investment_power_"):
+                    pool, cost_key = tech_cfgs, "invest_cost"
+                else:
                     continue
                 try:
-                    node = int(attr_key.rsplit("_", 1)[-1])
+                    t_idx, node = (int(v) for v in attr_key.rsplit("_", 2)[-2:])
                     mw = float(attr_val)
                 except (TypeError, ValueError):
                     continue
                 if rng is not None and not (rng[0] <= node < rng[1]):
                     continue
-                # Pick the tech config: the attr name carries the tech
-                # index (e.g. ``investment_gen_power_3_7`` → gen tech 3,
-                # node 7). Fallback to gen tech 0 if we can't parse.
-                # ``investment_<bat|gen>_power_<t>_<n>``
-                parts = attr_key.split("_")
-                tech_pool = (
-                    bat_tech_cfgs if "bat" in attr_key else tech_cfgs
-                )
-                try:
-                    t_idx = int(parts[-2])
-                except (ValueError, IndexError):
-                    t_idx = 0
-                tech_cfg = (
-                    tech_pool[t_idx] if 0 <= t_idx < len(tech_pool) else {}
-                )
-                inv_cost += mw * self._attr_at_node(
-                    tech_cfg, "invest_cost", node
-                )
+                tech_cfg = pool[t_idx] if 0 <= t_idx < len(pool) else {}
+                inv_cost += mw * self._attr_at_node(tech_cfg, cost_key, node)
 
         components = {
             "fuel_cost": fuel_c,
@@ -1467,16 +1551,10 @@ class DashboardLoader:
         if not idx:
             return None
         ren = tot = 0.0
-        for s in mix.get("series", []):
-            vals = s.get("values") or []
-            is_re = s.get("label") in self._RENEWABLE_MIX_LABELS
-            for i in idx:
-                if i >= len(vals):
-                    continue
-                v = vals[i] or 0.0
-                tot += v
-                if is_re:
-                    ren += v
+        for i in idx:
+            r, t = self._mix_year_re(mix, i)
+            ren += r
+            tot += t
         return (ren / tot) if tot > 0 else None
 
     def _re_share_at_year(self, mix: Optional[dict],
@@ -1495,15 +1573,7 @@ class DashboardLoader:
             i = myears.index(year)
         except ValueError:
             return None
-        ren = tot = 0.0
-        for s in mix.get("series", []):
-            vals = s.get("values") or []
-            if i >= len(vals):
-                continue
-            v = vals[i] or 0.0
-            tot += v
-            if s.get("label") in self._RENEWABLE_MIX_LABELS:
-                ren += v
+        ren, tot = self._mix_year_re(mix, i)
         return (ren / tot) if tot > 0 else None
 
     # ── Year-detail payload (drill-down click on Trajectory) ─────

@@ -3,18 +3,22 @@ Time-Series Aggregation Method (TSAM) for representative period selection.
 
 Replaces peak-demand-based representative day selection with data-driven
 clustering (k-medoids or k-means) that produces weighted representative
-periods with optional inter-period SOC linking for seasonal storage.
+periods, with the period each day of the year belongs to for the master's
+seasonal storage (inter-period linking, Kotzur et al. 2018).
 
 References:
     Nahmmacher et al. (2016). Carpe diem: A novel approach to select
     representative days for long-term power system planning models.
     Energy, 112, 430-442.
+    Kotzur et al. (2018). Time series aggregation for energy system design:
+    modeling seasonal storage. Applied Energy, 213, 123-135.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -30,15 +34,22 @@ class TSAMResult:
             period within the annual demand array.
         period_weights: Number of original periods each representative period
             stands for (cluster sizes). sum(weights) == total_periods.
-        chronological_order: Indices into period_start_hours sorted by their
-            position in the year (ascending day-of-year).
+        day_period: The representative period (index into
+            period_start_hours) of each period of the year, in calendar order
+            (365 entries for daily periods). The master's seasonal storage
+            runs through the year on it; each period's count in it equals its
+            weight.
         num_periods: Number of representative periods (K).
     """
 
     period_start_hours: list[int]
     period_weights: list[float]
-    chronological_order: list[int]
+    day_period: list[int]
     num_periods: int
+    # Indices of the periods modelled as they are (the critical days): the
+    # renewable profiles are rescaled on the other periods only
+    # (``rescale_profile_periods``)
+    critical_periods: list[int] = field(default_factory=list)
 
 
 def compute_tsam_periods(
@@ -69,7 +80,7 @@ def compute_tsam_periods(
             weights are unaffected (only the representative changes).
 
     Returns:
-        TSAMResult with period start hours, weights, and chronological order.
+        TSAMResult with period start hours, weights and the day-to-period map.
     """
     total_timesteps = demand.shape[0]
     num_possible_periods = total_timesteps // period_length_hours
@@ -86,7 +97,7 @@ def compute_tsam_periods(
         return TSAMResult(
             period_start_hours=[0],
             period_weights=[float(num_possible_periods)],
-            chronological_order=[0],
+            day_period=[0] * num_possible_periods,
             num_periods=1,
         )
 
@@ -149,18 +160,12 @@ def compute_tsam_periods(
             medoid_indices = list(medoid_indices)
             medoid_indices[peak_label] = peak_period_idx
 
-    # --- Compute weights (cluster sizes) ---
-    weights = []
-    for k in range(num_periods):
-        cluster_size = int(np.sum(labels == k))
-        weights.append(float(max(cluster_size, 1)))
+    # --- Weights: cluster sizes, each day in exactly one cluster ---
+    labels, medoid_indices = _own_medoids(labels, medoid_indices, features_normalized)
+    weights = [float(np.sum(labels == k)) for k in range(num_periods)]
 
     # --- Map medoid indices to start hours ---
     period_start_hours = [int(idx * period_length_hours) for idx in medoid_indices]
-
-    # --- Chronological ordering (sort by day-of-year) ---
-    sorted_indices = sorted(range(num_periods), key=lambda i: medoid_indices[i])
-    chronological_order = sorted_indices
 
     logger.info(
         f"TSAM: {num_periods} representative periods selected via {method}. "
@@ -170,9 +175,185 @@ def compute_tsam_periods(
     return TSAMResult(
         period_start_hours=period_start_hours,
         period_weights=weights,
-        chronological_order=chronological_order,
+        day_period=[int(k) for k in labels],
         num_periods=num_periods,
     )
+
+
+def with_critical_days(result: TSAMResult, critical_starts: Sequence[int],
+                       period_length: int) -> TSAMResult:
+    """*result* with the critical days (first steps, 0-based within the
+    year, ``period_length`` steps each) appended as periods of their own.
+    Each critical day leaves its cluster and maps to its own period in
+    ``day_period``; every weight is the period's count of days, so the
+    weights that scale the periods' costs and energy are the days the
+    seasonal storage runs through (a critical day stands for 1 day, its
+    cluster for one day less)."""
+    day_period = list(result.day_period)
+    k0 = len(result.period_start_hours)
+    for j, start in enumerate(critical_starts):
+        day = int(start) // max(1, int(period_length))
+        if not 0 <= day < len(day_period):
+            raise ValueError(f"critical day starting at step {start} is outside the year")
+        day_period[day] = k0 + j
+    starts = list(result.period_start_hours) + [int(s) for s in critical_starts]
+    counts = np.bincount(np.asarray(day_period, dtype=int), minlength=len(starts))
+    return TSAMResult(
+        period_start_hours=starts,
+        period_weights=[float(c) for c in counts],
+        day_period=day_period,
+        num_periods=len(starts),
+        critical_periods=list(range(k0, len(starts))))
+
+
+def _own_medoids(labels: np.ndarray, medoids: Sequence[int],
+                 features: np.ndarray) -> tuple[np.ndarray, list[int]]:
+    """*labels* with every representative day in its own cluster, so each
+    cluster has at least one day and its size (the period's weight) is the
+    number of days the year maps to it. A k-means cluster can come out empty
+    (its representative is the day nearest its centroid, labelled to another
+    cluster), and two clusters can share a representative: the later one
+    takes the nearest day no other cluster represents."""
+    labels = np.asarray(labels, dtype=int).copy()
+    medoids = [int(m) for m in medoids]
+    taken: set[int] = set()
+    for k, m in enumerate(medoids):
+        if m in taken:
+            order = np.argsort(np.linalg.norm(features - features[m], axis=1), kind="stable")
+            m = next(int(d) for d in order if int(d) not in taken)
+            medoids[k] = m
+        taken.add(m)
+        labels[m] = k
+    return labels, medoids
+
+
+def _scale_capped(values: np.ndarray, weights: np.ndarray, energy: float,
+                  cap: float) -> np.ndarray:
+    """*values* scaled by one factor so their *weights*-weighted sum is
+    *energy*, each capped at *cap*: the energy a capped value cannot take is
+    spread over the uncapped ones, repeated until no further value reaches
+    the cap. Every value at the cap and still short: all at the cap."""
+    out = values.copy()
+    capped = np.zeros(len(values), dtype=bool)
+    for _ in range(len(values) + 1):
+        free = ~capped
+        current = float(weights[free] @ values[free])
+        rest = energy - cap * float(weights[capped].sum())
+        if current <= 1e-15:
+            break
+        trial = values[free] * (max(rest, 0.0) / current)
+        over = trial > cap
+        if not over.any():
+            out[free] = trial
+            break
+        capped[np.flatnonzero(free)[over]] = True
+    out[capped] = cap
+    return out
+
+
+def rescale_periods_to_year(
+    block: np.ndarray,
+    period_starts: Sequence[int],
+    weights: Sequence[float],
+    period_length: int,
+    critical: Iterable[int] = (),
+) -> tuple[np.ndarray, np.ndarray]:
+    """One year of an availability profile (*block*, steps × columns, or
+    1-D) with its representative periods rescaled to the year's energy.
+
+    The periods starting at *period_starts* (``period_length`` steps each)
+    stand for the year with *weights* (days of the year each): their
+    weighted energy should be the year's. The clustering does not ensure it
+    (Cuba, 12 TSAM periods: PV +8 %, wind −13 %). Each column is scaled on
+    the periods not in *critical* (indices into *period_starts*) by one
+    factor so the weighted energy of all periods equals the year's, values
+    capped at full availability (1, or the column's own maximum above 1);
+    the energy a capped step cannot take is spread over the uncapped ones,
+    repeated until no further step reaches the cap (the ``tsam`` library's
+    rescaling). The shape of each period is kept (a step at 0 stays 0). The
+    critical periods, extreme on purpose, are kept as they are and count
+    in the periods' energy. A column with no energy in the year, or none on
+    the periods it may scale, is left as it is.
+
+    Returns the rescaled block (a copy) and, per column, the periods'
+    weighted mean over the year's mean after rescaling: 1.0 when matched,
+    below 1 where the cap kept the periods short, NaN for a column with no
+    energy in the year.
+    """
+    out = np.array(block, dtype=float)
+    flat = out.ndim == 1
+    if flat:
+        out = out[:, None]
+    steps, n_cols = out.shape
+    crit = {int(k) for k in critical}
+    rows = [np.arange(int(s), min(int(s) + int(period_length), steps)) for s in period_starts]
+    w = np.asarray(weights, dtype=float)
+
+    def stacked(keys: list[int]) -> tuple[np.ndarray, np.ndarray]:
+        idx = [rows[k] for k in keys]
+        if not idx:
+            return np.zeros(0, dtype=int), np.zeros(0)
+        return (np.concatenate(idx),
+                np.concatenate([np.full(len(rows[k]), w[k]) for k in keys]))
+
+    free_idx, free_w = stacked([k for k in range(len(rows)) if k not in crit])
+    fixed_idx, fixed_w = stacked([k for k in range(len(rows)) if k in crit])
+    weighted_steps = float(free_w.sum() + fixed_w.sum())
+    annual = out.mean(axis=0)
+    ratios = np.full(n_cols, np.nan)
+    for c in range(n_cols):
+        if annual[c] <= 1e-12 or weighted_steps <= 0:
+            continue
+        target = annual[c] * weighted_steps
+        cap = max(1.0, float(out[:, c].max()))
+        out[free_idx, c] = _scale_capped(out[free_idx, c], free_w,
+                                         target - float(fixed_w @ out[fixed_idx, c]), cap)
+        achieved = float(free_w @ out[free_idx, c] + fixed_w @ out[fixed_idx, c])
+        ratios[c] = achieved / target
+    return (out[:, 0] if flat else out), ratios
+
+
+def rescale_profile_periods(
+    profile: np.ndarray,
+    years: Sequence[tuple[int, Sequence[int], Sequence[float]]],
+    period_length: int,
+    steps_per_year: int,
+    critical: Iterable[int] = (),
+) -> tuple[np.ndarray, np.ndarray]:
+    """``rescale_periods_to_year`` on each modelled year of a profile (steps
+    × columns, or 1-D).
+
+    *years* gives, per modelled year, the first row of its block (rows
+    ``first … first + steps_per_year − 1``, wrapping around a shorter
+    profile, as the master reads a one-year profile every year), its period
+    starts within the year and their weights. Each block is rescaled from
+    the original profile, once (a one-year profile serves every year). A
+    profile that is not a whole number of years is returned unchanged.
+
+    Returns the rescaled profile (a copy) and the ratios of
+    ``rescale_periods_to_year``, one row per entry of *years* (NaN where
+    the profile was left unchanged).
+    """
+    source = np.asarray(profile, dtype=float)
+    flat = source.ndim == 1
+    src = source[:, None] if flat else source
+    n, steps = len(src), int(steps_per_year)
+    out = src.copy()
+    ratios = np.full((len(years), src.shape[1]), np.nan)
+    if n == 0 or steps <= 0 or n % steps:
+        return (out[:, 0] if flat else out), ratios
+    critical = list(critical)
+    done: dict[int, np.ndarray] = {}
+    for i, (first, starts, weights) in enumerate(years):
+        if not len(starts):
+            continue
+        b0 = int(first) % n
+        if b0 not in done:
+            rows = (b0 + np.arange(steps)) % n
+            out[rows], done[b0] = rescale_periods_to_year(
+                src[rows], starts, weights, period_length, critical)
+        ratios[i] = done[b0]
+    return (out[:, 0] if flat else out), ratios
 
 
 def _cluster_kmedoids(

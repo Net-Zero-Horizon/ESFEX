@@ -107,7 +107,7 @@ class FuelRouteForm(QWidget):
         self._length_km = QDoubleSpinBox()
         self._length_km.setRange(0, 100000)
         self._length_km.setDecimals(2)
-        self._length_km.setSpecialValueText("Auto")
+        self._length_km.setSpecialValueText(tr("fuel_route_form.auto"))
         self._length_km.setReadOnly(True)
         self._length_km.setObjectName("readOnlyField")
         prop_layout.addRow(tr("fuel_route_form.length"), self._length_km)

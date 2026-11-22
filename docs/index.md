@@ -25,15 +25,15 @@ ESFEX is implemented as a hybrid Python/Julia system. Python handles configurati
 
 ### Optimization Architecture
 
-- **Two-stage decomposition** — Master Problem (all years simultaneously, representative days, representative periods) + Operational Dispatch (year-by-year, rolling horizon, full year). Investment decisions are validated operationally before being accepted.
+- **Two-stage decomposition** — Master Problem (all years simultaneously, representative days or TSAM periods, optional Benders decomposition) + Operational Dispatch (year-by-year, rolling horizon, full year). The master problem includes operation on representative days; every planned year is then dispatched hour by hour.
 - **Rolling horizon dispatch** — Configurable overlapping time windows with boundary condition propagation (battery SOC, generator status) and automatic result stitching. Window size and overlap are user-defined parameters.
-- **Three simulation modes** — `development` (LP, continuous commitment + investment), `economic_dispatch` (LP, fixed fleet), `unit_commitment` (MIP, binary startup/shutdown with min up/down times).
+- **Three simulation modes** — `development` (LP master problem + LP dispatch, optionally with unit commitment), `economic_dispatch` (fixed fleet; LP, or conic/NLP with AC-OPF), `unit_commitment` (MIP, binary startup/shutdown with min up/down times).
 - **Units decommissioning planning** — Age-based retirement plus NPV based retirement, allows a flexible and effective planning of the phasing-out / retention of units inventory.
 
 ### Power System Modeling
 
-- **DC power flow** — KCL/KVL constraints with cycle-based formulation for meshed networks [**[1]**](reference/bibliography.md#ref1), voltage angle variables, piecewise-linear loss approximation, and transmission investment.
-- **AC optimal power flow** — Four ACOPF formulations selectable via `power_flow_mode`: SOC relaxation [**[2]**](reference/bibliography.md#ref2) (convex W-space), QC relaxation [**[3]**](reference/bibliography.md#ref3) (McCormick envelopes), Polar NLP (exact V-θ), and Rectangular NLP (exact e-f). All use Ipopt [**[4]**](reference/bibliography.md#ref4). Models voltage magnitudes, reactive power balance, apparent power line limits (`P² + Q² ≤ S²`), and reactive generation with configurable Q limits. See [AC OPF](formulation/ac-power-flow.md).
+- **DC power flow** — Bus-level KCL with angle-based line flows [**[1]**](reference/bibliography.md#ref1), one angle reference per connected component, piecewise-linear loss approximation, and transmission investment.
+- **AC optimal power flow** — Five ACOPF formulations selectable via `power_flow_mode`: SOC relaxation [**[2]**](reference/bibliography.md#ref2) (convex W-space), QC relaxation [**[3]**](reference/bibliography.md#ref3) (McCormick envelopes), SDP relaxation, Polar NLP (exact V-θ) and Rectangular NLP (exact e-f). SOC and QC need a conic-capable solver (Clarabel, SCS, Gurobi, ...), SDP needs SCS or Clarabel, and the two exact NLP formulations use Ipopt [**[4]**](reference/bibliography.md#ref4). Models voltage magnitudes, reactive power balance, apparent power line limits (`P² + Q² ≤ S²`), and reactive generation with configurable Q limits. See [AC OPF](formulation/ac-power-flow.md) and the [Solver Guide](user-guide/solver-guide.md).
 - **AC power flow verification** — Post-DC Newton-Raphson AC power flow for validating voltage profiles, reactive power flows, and actual transmission losses. Dual implementation: a native Julia solver (`transmission_ac.jl`) and a pandapower bridge (`pandapower_bridge.py`) for IEC 60909 short-circuit analysis. Detects voltage magnitude violations and line overloads not captured by the DC approximation.
 - **N-1 security** — Automatic identification of critical contingencies; post-contingency flow redistribution constraints for both generation and transmission elements. Supports both DC and AC contingency analysis with automatic fallback.
 - **Frequency stability** — Post-contingency frequency metrics via center-of-inertia (COI) model [**[5]**](reference/bibliography.md#ref5), [**[6]**](reference/bibliography.md#ref6): ROCOF, frequency nadir, and steady-state frequency. N-1 screening for all online generators with configurable protection thresholds.
@@ -57,13 +57,13 @@ The currently implemented sector coupling modules are:
 - **MGA and SPORES** [**[7]**](reference/bibliography.md#ref7), [**[8]**](reference/bibliography.md#ref8) — Two distinct methods for near-optimal alternative generation under a shared cost-slack envelope. MGA runs the classical Hop-Skip-Jump diversity loop; SPORES solves one alternative per *named objective* (minimum build, technology equity, regional equity, evolutionary distance). See the [tutorial](tutorials/mga.md) for the dual workflow.
 - **Stochastic programming** [**[9]**](reference/bibliography.md#ref9), [**[10]**](reference/bibliography.md#ref10) — Scenario-based capacity expansion with probability-weighted costs, shared investment variables across scenarios (EVPI/VSS analysis).
 - **Sobol sensitivity analysis** [**[11]**](reference/bibliography.md#ref11), [**[12]**](reference/bibliography.md#ref12) — Global sensitivity indices for quantifying how input parameter uncertainty (costs, demand growth, availability) propagates to investment decisions and system cost.
-- **Progressive RE targets** — Linear interpolation from initial to target RE penetration with annual increment bounds. Constraint-based curtailment limits (not just penalty-based).
+- **Progressive RE targets** — Linear interpolation from initial to target RE penetration with annual increment bounds. Annual curtailment limits per system (a constraint whose excess is priced at max(10⁴, 100 × the dearer of the RE shortfall price and the curtailment cost) $/MWh, not just a curtailment cost).
 
 ### Tools and Interface
 
 - **GIS-based Studio** — PySide6 + Leaflet.js map for visually building power systems: place nodes, generators, batteries, transmission lines with polyline routing. Includes resource assessment wizards for solar rooftop, solar PV utility-scale, wind and OTEC availability profiles.
 - **Plugin system** — Directory-based plugins with simulation lifecycle hooks, GUI integration, and Julia overlay modules for custom constraints.
-- **CLI** — `esfex run`, `validate`, `export`, `studio`, `precompile`, `info`, and `plugin` commands with Rich formatting and progress tracking.
+- **CLI** — `esfex run`, `validate`, `export`, `studio`, `precompile`, `info`, `add-solver` / `remove-solver` / `list-solvers` and `plugin` commands with Rich formatting and progress tracking.
 - **HDF5 output** — Structured results with derived metrics (LCOE, VALLCOE, capacity factor) exportable to CSV, Excel, and JSON.
 
 
@@ -122,14 +122,13 @@ pip install esfex
 # Validate a configuration file
 esfex validate -c my_system.yaml
 
-# Run a simulation
+# Run a simulation (writes results/my_system_<ddmmyyyy>_<HHMM>.h5)
 esfex run -c my_system.yaml --years 25 --verbose
 
-# Export results
-esfex export -r results/output.h5 -f csv
+# Export results to CSV (into results/export/)
+esfex export -r results/my_system_29102026_1430.h5 -f csv
 
 # Launch the Studio
-pip install esfex
 esfex studio
 ```
 
@@ -140,11 +139,15 @@ esfex studio
 ## Python API
 
 ```python
+from pathlib import Path
+
 from esfex import load_config
 from esfex.runner import Orchestrator
 
-config = load_config("my_system.yaml")
-orchestrator = Orchestrator(config, output_dir="./results")
+config_file = Path("my_system.yaml")
+config = load_config(config_file)
+orchestrator = Orchestrator(config, output_dir="./results",
+                            config_path=config_file)
 results = orchestrator.run(years=25)
 
 for year in results:
@@ -177,10 +180,10 @@ for year in results:
 
 | Property | Value |
 |----------|-------|
-| Current version | 0.1.3 (alpha) |
-| Python support | 3.10, 3.11, 3.12 |
+| Current version | 0.4.0 (alpha) |
+| Python support | 3.10, 3.11, 3.12, 3.13 |
 | Julia support | 1.9+ (via juliacall) |
-| Default solver | HiGHS (open-source LP/MIP) |
+| Default solver | HiGHS (open-source LP/MIP); GLPK, Clarabel, SCS and Ipopt also bundled |
 | License | Apache-2.0 |
 | Status | Active development |
 
@@ -190,16 +193,32 @@ for year in results:
 
 ## Citation
 
-If you use ESFEX in academic work, please cite:
+If you use ESFEX in academic work, please cite the article:
+
+```bibtex
+@article{sotocalvo2026esfex,
+  title   = {{ESFEX}: an open-source framework for multi-model power-system
+             optimization and energy-flexibility analysis},
+  author  = {Soto Calvo, Manuel and Lee, Han Soo},
+  journal = {SoftwareX},
+  volume  = {36},
+  pages   = {103244},
+  year    = {2026},
+  doi     = {10.1016/j.softx.2026.103244}
+}
+```
+
+To cite the software of a given release, use its Zenodo record:
 
 ```bibtex
 @software{esfex2026,
   title   = {ESFEX: Energy System Flexibility — Power System Optimization},
-  author  = {Soto Calvo, Manuel & Han Soo, Lee},
+  author  = {Soto Calvo, Manuel and Lee, Han Soo},
   year    = {2026},
   url     = {https://github.com/Net-Zero-Horizon/ESFEX},
+  doi     = {10.5281/zenodo.20504838},
   license = {Apache-2.0},
-  version = {0.1.3}
+  version = {0.4.0}
 }
 ```
 
@@ -209,7 +228,7 @@ If you use ESFEX in academic work, please cite:
 
 ## License
 
-Released under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
+Released under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). Third-party data and libraries shipped with ESFEX keep their own licences: see [Data Sources and Licences](reference/data-sources.md).
 
 
 ---

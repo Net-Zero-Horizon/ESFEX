@@ -159,6 +159,26 @@ class TestSolverOptions:
                 )
 
 
+class TestFormulationSolvers:
+    def test_cone_formulations_exclude_highs(self):
+        """SOC/QC add (Rotated)SecondOrderCone constraints, which HiGHS
+        rejects ("not supported by the solver"); the Studio must not offer it."""
+        from esfex.config.solver import FORMULATION_SOLVERS
+        for mode in ("acopf_soc", "acopf_qc", "acopf_sdp"):
+            assert "highs" not in FORMULATION_SOLVERS[mode]
+            assert {"clarabel", "scs"} <= FORMULATION_SOLVERS[mode]
+
+    def test_every_power_flow_mode_and_solver_is_known(self):
+        import typing
+        from esfex.config.schema import SystemConfig
+        from esfex.config.solver import FORMULATION_SOLVERS
+        modes = typing.get_args(SystemConfig.model_fields["power_flow_mode"].annotation)
+        solvers = set(typing.get_args(SolverConfig.model_fields["name"].annotation))
+        assert set(FORMULATION_SOLVERS) == set(modes)
+        for names in FORMULATION_SOLVERS.values():
+            assert names <= solvers
+
+
 # ---------------------------------------------------------------------------
 # _can_import
 # ---------------------------------------------------------------------------
@@ -470,6 +490,19 @@ class TestGetJuliaOptimizerString:
         assert '"THREADS" => 6' in result
         assert '"OUTPUTLOG" => 0' in result
 
+    @pytest.mark.parametrize("name,key", [
+        ("highs", "time_limit"), ("gurobi", "TimeLimit"),
+        ("cplex", "CPXPARAM_TimeLimit"), ("glpk", "tm_lim"),
+        ("cbc", "seconds"), ("scip", "limits/time"), ("xpress", "MAXTIME"),
+    ])
+    def test_time_limit_zero_sets_no_limit(self, name, key):
+        """time_limit 0 (= unlimited) leaves the solver's limit out, a
+        positive one sets it."""
+        assert f'"{key}"' not in get_julia_optimizer_string(
+            SolverConfig(name=name, time_limit=0))
+        assert f'"{key}"' in get_julia_optimizer_string(
+            SolverConfig(name=name, time_limit=60))
+
     def test_verbose_flag_highs(self):
         """HiGHS verbose flag is lowercase boolean string."""
         cfg = SolverConfig(name="highs", verbose=True)
@@ -591,3 +624,35 @@ class TestCheckJuliaSolverAvailable:
         sig = inspect.signature(check_julia_solver_available)
         default = sig.parameters["solver_name"].default
         assert default == "highs"
+
+
+@pytest.mark.julia
+def test_development_run_solves_with_glpk(tmp_path):
+    """The master set its solver output through HiGHS's own parameter name
+    ("output_flag"), so every master solve with GLPK failed at once
+    (UnsupportedAttribute) and the run aborted (round 45)."""
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import numpy as np
+    import yaml
+
+    repo = Path(__file__).resolve().parents[1]
+    data = yaml.safe_load((repo / "tests" / "fixtures" / "studio_export_island.yaml").read_text())
+    sysname = next(iter(data["systems"]))
+    np.savetxt(tmp_path / "demand.csv", np.full((8760, 2), 5.0), delimiter=",")
+    data["systems"][sysname]["demand_path"] = "demand.csv"
+    data["simulation_mode"] = "development"
+    data["temporal"].update(resolution_hours=24, rolling_horizon_hours=8760, overlap_hours=0)
+    data["enable_primary_energy"] = False
+    (tmp_path / "case.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
+    env = {**os.environ, "PYTHONPATH": str(repo / "src")}
+    out = subprocess.run(
+        [sys.executable, "-m", "esfex.cli", "run", "-c", "case.yaml", "-o", "out", "-y", "1",
+         "--solver", "glpk", "--json"],
+        cwd=tmp_path, capture_output=True, text=True, env=env, timeout=1200)
+    doc = json.loads(out.stdout)
+    assert out.returncode == 0 and doc["status"] == "complete", (doc, out.stderr[-3000:])

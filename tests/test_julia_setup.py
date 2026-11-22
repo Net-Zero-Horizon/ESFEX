@@ -315,8 +315,11 @@ class TestInitializeJulia:
 
         def seval_side_effect(code):
             call_count[0] += 1
-            if "include(" in code and call_count[0] <= 2:
-                raise Exception("LoadError: package not found")
+            if "include(" in code and call_count[0] <= 4:
+                raise Exception(
+                    "LoadError: ArgumentError: Package JuMP not found in "
+                    "current path."
+                )
             return None
 
         mock_jl.seval.side_effect = seval_side_effect
@@ -335,6 +338,205 @@ class TestInitializeJulia:
                 result = initialize_julia()
 
         assert result is mock_jl
+
+
+# ---------------------------------------------------------------------------
+# initialize_julia: load errors vs dependency repair (Manifest.toml safety)
+# ---------------------------------------------------------------------------
+
+_SYNTAX_ERROR = (
+    "LoadError: LoadError: ParseError:\n"
+    "# Error @ /pkg/julia/src/types.jl:3:5\n"
+    "x = 1 +\ny = )\n"
+    "#   \u2559 \u2500\u2500 unexpected `)`\n"
+    "in expression starting at /pkg/julia/src/types.jl:3\n"
+    "in expression starting at /pkg/julia/src/ESFEX.jl:12"
+)
+_ESFEX_ARGUMENT_ERROR = (
+    "LoadError: ArgumentError: bad value in ESFEX code\n"
+    "in expression starting at /pkg/julia/src/master_problem.jl:40"
+)
+_NOT_INSTALLED = (
+    "LoadError: ArgumentError: Package JuMP "
+    "[4076af6c-e467-56ae-b986-b466b2749572] is required but does not seem to "
+    "be installed:\n - Run `Pkg.instantiate()` to install all recorded "
+    "dependencies.\n\nin expression starting at /pkg/julia/src/ESFEX.jl:3"
+)
+_MANIFEST = 'julia_version = "1.12.4"\nmanifest_format = "2.0"\n'
+
+
+class TestLoadErrorHandling:
+    """A load error only triggers a dependency repair when a package is
+    missing; Manifest.toml is never deleted."""
+
+    @staticmethod
+    def _julia_dir(tmp_path, manifest=_MANIFEST):
+        (tmp_path / "Project.toml").touch()
+        (tmp_path / "src").mkdir(exist_ok=True)
+        (tmp_path / "src" / "ESFEX.jl").touch()
+        if manifest is not None:
+            (tmp_path / "Manifest.toml").write_text(manifest, encoding="utf-8")
+        return tmp_path
+
+    @staticmethod
+    def _run(tmp_path, seval, version="1.12.4"):
+        mock_jl = MagicMock()
+        mock_jl.ESFEX = MagicMock()
+        calls: list[str] = []
+
+        def _seval(code):
+            calls.append(code)
+            if code == "string(VERSION)":
+                return version
+            return seval(code)
+
+        mock_jl.seval.side_effect = _seval
+        fake_juliacall = MagicMock()
+        fake_juliacall.Main = mock_jl
+        with patch(
+            "esfex.bridge.julia_setup.get_julia_path", return_value=tmp_path
+        ), patch.dict(sys.modules, {"juliacall": fake_juliacall}):
+            try:
+                return initialize_julia(), calls
+            except RuntimeError as e:
+                e.calls = calls
+                raise
+
+    @staticmethod
+    def _pkg_calls(calls):
+        return [c for c in calls
+                if "Pkg.instantiate" in c or "Pkg.resolve" in c]
+
+    @pytest.mark.parametrize("error", [_SYNTAX_ERROR, _ESFEX_ARGUMENT_ERROR])
+    def test_source_error_reraised_without_repair(self, tmp_path, error):
+        d = self._julia_dir(tmp_path)
+
+        def seval(code):
+            if "include(" in code:
+                raise Exception(error)
+
+        with pytest.raises(RuntimeError) as exc:
+            self._run(d, seval)
+        assert self._pkg_calls(exc.value.calls) == []
+        assert "not a missing package" in str(exc.value)
+        assert (d / "Manifest.toml").read_text(encoding="utf-8") == _MANIFEST
+        assert list(d.glob("Manifest.toml.bak-*")) == []
+
+    def test_source_error_points_at_file_and_line(self, tmp_path):
+        d = self._julia_dir(tmp_path)
+
+        def seval(code):
+            if "include(" in code:
+                raise Exception(_SYNTAX_ERROR)
+
+        with pytest.raises(RuntimeError, match=r"failed to load at /pkg/julia/src/types\.jl:3:5"):
+            self._run(d, seval)
+
+    def test_argument_error_location_is_innermost_file(self, tmp_path):
+        d = self._julia_dir(tmp_path)
+
+        def seval(code):
+            if "include(" in code:
+                raise Exception(_ESFEX_ARGUMENT_ERROR)
+
+        with pytest.raises(
+            RuntimeError,
+            match=r"failed to load at /pkg/julia/src/master_problem\.jl:40",
+        ):
+            self._run(d, seval)
+
+    def test_missing_package_instantiates_and_keeps_manifest(
+        self, tmp_path, caplog
+    ):
+        d = self._julia_dir(tmp_path)
+        state = {"installed": False}
+
+        def seval(code):
+            if code == "Pkg.instantiate()":
+                state["installed"] = True
+            elif "include(" in code and not state["installed"]:
+                raise Exception(_NOT_INSTALLED)
+
+        with caplog.at_level("WARNING", logger="esfex.bridge.julia_setup"):
+            _, calls = self._run(d, seval)
+        assert self._pkg_calls(calls) == ["Pkg.instantiate()"]
+        assert (d / "Manifest.toml").read_text(encoding="utf-8") == _MANIFEST
+        # Unchanged Manifest: the temporary backup is dropped again
+        assert list(d.glob("Manifest.toml.bak-*")) == []
+        assert "dependencies are missing" in caplog.text
+
+    def test_instantiate_failure_never_deletes_manifest(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("ESFEX_JULIA_RESOLVE", raising=False)
+        d = self._julia_dir(tmp_path)
+
+        def seval(code):
+            if code == "Pkg.instantiate()":
+                raise Exception("Unsatisfiable requirements detected")
+            if "include(" in code:
+                raise Exception(_NOT_INSTALLED)
+
+        with pytest.raises(RuntimeError, match="ESFEX_JULIA_RESOLVE=1") as exc:
+            self._run(d, seval)
+        assert self._pkg_calls(exc.value.calls) == ["Pkg.instantiate()"]
+        assert (d / "Manifest.toml").read_text(encoding="utf-8") == _MANIFEST
+        assert "left unchanged" in str(exc.value)
+
+    def test_still_missing_after_instantiate_explains(self, tmp_path):
+        d = self._julia_dir(tmp_path)
+
+        def seval(code):
+            if "include(" in code:
+                raise Exception(_NOT_INSTALLED)
+
+        with pytest.raises(RuntimeError, match="still fails to load") as exc:
+            self._run(d, seval)
+        assert self._pkg_calls(exc.value.calls) == ["Pkg.instantiate()"]
+        assert (d / "Manifest.toml").read_text(encoding="utf-8") == _MANIFEST
+
+    def test_resolve_only_on_opt_in_and_backs_up_manifest(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("ESFEX_JULIA_RESOLVE", "1")
+        d = self._julia_dir(tmp_path)
+        state = {"resolved": False}
+
+        def seval(code):
+            if code == "Pkg.instantiate()":
+                raise Exception("Unsatisfiable requirements detected")
+            if "Pkg.resolve()" in code:
+                (d / "Manifest.toml").write_text(
+                    'julia_version = "1.11.8"\n', encoding="utf-8"
+                )
+                state["resolved"] = True
+            elif "include(" in code and not state["resolved"]:
+                raise Exception(_NOT_INSTALLED)
+
+        self._run(d, seval)
+        backups = list(d.glob("Manifest.toml.bak-*"))
+        assert len(backups) == 1
+        assert backups[0].read_text(encoding="utf-8") == _MANIFEST
+
+    def test_version_mismatch_warns_once(self, tmp_path, caplog):
+        d = self._julia_dir(tmp_path)
+        with caplog.at_level("WARNING", logger="esfex.bridge.julia_setup"):
+            self._run(d, lambda code: None, version="1.11.8")
+        msgs = [r.getMessage() for r in caplog.records
+                if "was resolved with Julia" in r.getMessage()]
+        assert len(msgs) == 1
+        assert "1.12.4" in msgs[0] and "1.11.8" in msgs[0]
+
+    @pytest.mark.parametrize(
+        "manifest,version", [(_MANIFEST, "1.12.1"), (None, "1.11.8")]
+    )
+    def test_no_version_warning_when_compatible_or_no_manifest(
+        self, tmp_path, caplog, manifest, version
+    ):
+        d = self._julia_dir(tmp_path, manifest=manifest)
+        with caplog.at_level("WARNING", logger="esfex.bridge.julia_setup"):
+            self._run(d, lambda code: None, version=version)
+        assert "was resolved with Julia" not in caplog.text
 
 
 # ---------------------------------------------------------------------------

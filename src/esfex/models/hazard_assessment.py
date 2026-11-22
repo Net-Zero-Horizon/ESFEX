@@ -8,7 +8,8 @@ plan for the Risk & Resilience Analysis module:
    FIRMS, Smithsonian GVP, NASA AR6, ThinkHazard!).
 
 2. **FragilityLibrary** — lognormal CDF fragility curves for power system
-   components, with ~40 built-in defaults from NHESS-2024 and PNNL-33587.
+   components, with built-in defaults from published sources (NHESS-2024,
+   PNNL-33587, Suppasri-2013, HAZUS-MH-MR5 and others).
 
 3. **CompositeRiskAssessment** — overlay multiple hazard layers to compute
    per-node composite risk indices and Expected Annual Loss (EAL).
@@ -2007,8 +2008,8 @@ class FragilityLibrary:
 
     Built-in curves come from NHESS-2024 (Nirandjan et al., 1,510+ curves)
     and PNNL-33587 (US DOE infrastructure fragility).  Users can override
-    or extend with custom curves via the YAML ``risk.fragility_curves``
-    configuration.
+    or extend them with custom curves (``load_from_config``) or in the
+    Studio's Risk Workbench.
     """
 
     def __init__(self) -> None:
@@ -2055,7 +2056,9 @@ class FragilityLibrary:
             )
 
     def load_from_config(self, configs: list[Any]) -> None:
-        """Load additional curves from YAML ComponentFragilityConfig objects.
+        """Load additional curves from objects with ``component_type``,
+        ``hazard_type``, ``source`` and ``curves`` (each with
+        ``damage_state``, ``im_median``, ``beta``).
 
         User-defined curves override built-in defaults for the same
         (component_type, hazard_type) combination.

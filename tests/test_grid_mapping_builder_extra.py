@@ -419,6 +419,20 @@ class TestCreateBusesFromSubstation:
         assert result.transformers_added == 1
         assert len(state.transformers) == 1
 
+    def test_auto_transformer_impedance_on_system_base(self):
+        """The substation transformer's impedance is referred to
+        ac_power_flow.base_mva (800 MVA bank at 10 % own base: 0.05 p.u. on
+        400 MVA, 0.0125 p.u. on the 100 MVA it used regardless)."""
+        state = _make_state(buses={})
+        state.ac_power_flow.base_mva = 400.0
+        sub = _feat("substation", name="S", voltage_kv=220.0,
+                    voltage_kv_secondary=110.0)
+        gmb._create_buses_from_substation(
+            state, sub, "per_voltage", 5.0, ParseResult(), {}, None)
+        tr = state.transformers[0]
+        assert tr.rated_power_mva == 800.0
+        assert tr.impedance_pu == pytest.approx(0.05)
+
     def test_per_voltage_snap_collapse_no_transformer(self):
         # Both voltage levels snap to a single existing bus (huge snap_km
         # and an existing close bus) → no self-transformer.
@@ -703,8 +717,63 @@ class TestCreateLine:
         gmb._create_line(state, line, 5.0, result, {}, None)
         gl = state.transmission_lines[-1]
         assert gl.voltage_kv is None
-        assert gl.length_km is None
-        assert gl.resistance_pu is None
+        # The length is measured anyway, so the impedance can be derived
+        # once _propagate_voltage infers the voltage.
+        assert gl.length_km == pytest.approx(151.9, abs=0.5)
+        assert gl.resistance_pu is None and gl.reactance_pu is None
+
+    def test_untagged_line_gets_impedance_from_inferred_voltage(self):
+        """Regression: an OSM line without a voltage tag kept no length, so
+        _propagate_voltage gave it a voltage but no impedance, and the
+        node-level reduction then wrote 0.01 p.u. for it whatever its
+        length."""
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            estimate_line_pu_params,
+        )
+        state = _make_state(buses={})
+        result = ParseResult()
+        line = _feat("line", name="L", voltage_kv=0.0, num_circuits=2,
+                     line_coords=[(21.0, -82.0), (21.5, -82.5)])
+        gmb._create_line(state, line, 5.0, result, {}, None)
+        gl = state.transmission_lines[-1]
+        assert gl.reactance_pu is None
+        # One end turns out to be a 110 kV substation (tagged neighbour)
+        state.buses[gl.from_bus].voltage_kv = 110.0
+
+        gmb._propagate_voltage(state)
+        assert gl.voltage_kv == 110.0
+        r, x, b = estimate_line_pu_params(110.0, gl.length_km)
+        # Two circuits in parallel, as for a tagged line
+        assert gl.reactance_pu == pytest.approx(x / 2)
+        assert gl.resistance_pu == pytest.approx(r / 2)
+        assert gl.susceptance_pu == pytest.approx(b * 2)
+
+    def test_impedance_on_system_base(self):
+        """Line impedances are on ac_power_flow.base_mva, not a fixed
+        100 MVA (tagged lines and voltages inferred later alike)."""
+        from esfex.visualization.workflows.grid_mapping_quality import (
+            estimate_line_pu_params,
+        )
+        state = _make_state(buses={})
+        state.ac_power_flow.base_mva = 250.0
+        result = ParseResult()
+        tagged = _feat("line", name="T", voltage_kv=220.0,
+                       line_coords=[(21.0, -82.0), (21.5, -82.5)])
+        gmb._create_line(state, tagged, 5.0, result, {}, None)
+        gl = state.transmission_lines[-1]
+        r, x, b = estimate_line_pu_params(220.0, gl.length_km, 250.0)
+        assert gl.reactance_pu == pytest.approx(x)
+        assert gl.resistance_pu == pytest.approx(r)
+        assert gl.susceptance_pu == pytest.approx(b)
+
+        untagged = _feat("line", name="U", voltage_kv=0.0,
+                         line_coords=[(23.0, -80.0), (23.5, -80.5)])
+        gmb._create_line(state, untagged, 5.0, result, {}, None)
+        ul = state.transmission_lines[-1]
+        state.buses[ul.from_bus].voltage_kv = 110.0
+        gmb._propagate_voltage(state)
+        r, x, b = estimate_line_pu_params(110.0, ul.length_km, 250.0)
+        assert ul.reactance_pu == pytest.approx(x)
 
     def test_explicit_capacity_scaled_by_circuits(self):
         state = _make_state(buses={})
@@ -747,16 +816,26 @@ class TestCreateTransformer:
         assert gt.to_voltage_kv == 110.0
         assert gt.rated_power_mva == 200.0
 
-    def test_default_voltages_and_capacity(self):
+    def test_untagged_side_is_not_invented(self):
+        # An untagged secondary is not given a fixed 110 kV (above a 34.5 kV
+        # primary, once): its side snaps voltage-agnostically to the primary's
+        # bus and the transformer is skipped, with the reason.
         state = _make_state(buses={})
         result = ParseResult()
-        tr = _feat("transformer", name="TR", voltage_kv=0.0,
+        tr = _feat("transformer", name="TR", voltage_kv=34.5,
                    voltage_kv_secondary=0.0, capacity_mw=0.0)
         gmb._create_transformer(state, tr, 5.0, result, {}, None)
-        gt = state.transformers[-1]
-        assert gt.from_voltage_kv == 220.0
-        assert gt.to_voltage_kv == 110.0
-        assert gt.rated_power_mva == 100.0
+        assert state.transformers == []
+        assert {b.voltage_kv for b in state.buses.values()} == {34.5}
+        assert any("untagged" in w for w in result.warnings)
+
+    def test_default_capacity(self):
+        state = _make_state(buses={})
+        result = ParseResult()
+        tr = _feat("transformer", name="TR", voltage_kv=110.0,
+                   voltage_kv_secondary=34.5, capacity_mw=0.0)
+        gmb._create_transformer(state, tr, 5.0, result, {}, None)
+        assert state.transformers[-1].rated_power_mva == 100.0
 
     def test_self_loop_skipped(self):
         # HV and LV sides snap to the same existing bus.
@@ -796,7 +875,7 @@ class TestCreateConverter:
         conv = _feat("converter", name="C", voltage_kv=0.0, capacity_mw=0.0)
         gmb._create_converter(state, conv, 0.01, result, {}, None)
         gc = state.acdc_converters[-1]
-        assert gc.from_voltage_kv == 220.0
+        assert gc.from_voltage_kv == 0.0      # unknown until propagation
         assert gc.rated_power_mva == 100.0
 
     def test_self_loop_skipped(self):
@@ -2180,6 +2259,41 @@ class TestFrequencyConsistency:
         assert st.buses["D"].frequency_hz == 60.0
         # Generator runs at the frequency of the bus it connects to.
         assert st.generators["g"].frequency_hz == 50.0
+        # So do the AC lines of the area.
+        assert {ln.frequency_hz for ln in st.transmission_lines} == {50.0}
+
+    def test_gridfinder_lines_do_not_turn_a_60hz_grid_to_50hz(self):
+        """Cuba is a 60 Hz grid. GridFinder lines and WRI/GEM plants carry no
+        frequency; they used to carry the GridFeature default of 50 Hz, their
+        endpoint buses outvoted the 60 Hz substations, and the whole build
+        (buses, lines, generators) ended up at 50 Hz."""
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            GridFeature,
+        )
+        model = MockGuiModel(_make_state(buses={}))
+        feats = [
+            GridFeature(source="osm", feature_type="substation", name="A",
+                        latitude=22.0, longitude=-80.0, voltage_kv=220.0,
+                        frequency_hz=60.0),
+            GridFeature(source="wri", feature_type="generator", name="G",
+                        latitude=22.0, longitude=-80.0, capacity_mw=100.0,
+                        fuel="Gas"),
+            GridFeature(source="gridfinder", feature_type="line", name="GF1",
+                        latitude=22.0, longitude=-79.7,
+                        line_coords=[(22.0, -80.0), (22.0, -79.5)]),
+            GridFeature(source="gridfinder", feature_type="line", name="GF2",
+                        latitude=22.0, longitude=-79.2,
+                        line_coords=[(22.0, -79.5), (22.0, -79.0)]),
+            GridFeature(source="gridfinder", feature_type="line", name="GF3",
+                        latitude=22.2, longitude=-79.5,
+                        line_coords=[(22.0, -79.5), (22.5, -79.5)]),
+        ]
+        gmb.build_grid_from_features(model, feats)
+        s = model.state
+        assert len(s.buses) >= 3 and len(s.transmission_lines) >= 2
+        assert {b.frequency_hz for b in s.buses.values()} == {60.0}
+        assert {ln.frequency_hz for ln in s.transmission_lines} == {60.0}
+        assert {g.frequency_hz for g in s.generators.values()} == {60.0}
 
 
 class TestVoltagePropagation:
@@ -2217,8 +2331,9 @@ class TestVoltagePropagation:
         # Voltage flows A → B → C along the untagged chain.
         assert st.buses["B"].voltage_kv == 275.0
         assert st.buses["C"].voltage_kv == 275.0
-        # An isolated untagged bus falls back to the 220 kV default.
-        assert st.buses["X"].voltage_kv == 220.0
+        # An isolated untagged bus is medium voltage (33 kV at 50 Hz), not a
+        # fixed 220 kV.
+        assert st.buses["X"].voltage_kv == 33.0
 
         # Untagged lines take the endpoint voltage and their capacity/impedance
         # are recomputed from it (not left at the spurious default).
@@ -2227,3 +2342,294 @@ class TestVoltagePropagation:
             assert ln.voltage_kv == 275.0
             assert abs(ln.capacity_mw - exp) < 1.0
             assert ln.reactance_pu > 0.0
+
+
+class TestVoltagesFromTheData:
+    """Voltages come from the data, never from fixed numbers (Cuba case: an
+    untagged ``substation=transmission`` on Isla de la Juventud became 220 kV,
+    and two stations tagged 132 kV, a level no Cuban line carries, put 132 kV
+    buses and lines into a 220/110 kV grid)."""
+
+    def _fetcher(self, **kw):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            OSMGridFetcher,
+        )
+        return OSMGridFetcher((0.0, 0.0, 1.0, 1.0), **kw)
+
+    @pytest.mark.parametrize("role", ["transmission", "sub_transmission",
+                                      "distribution"])
+    def test_untagged_substation_voltage_stays_unknown(self, role):
+        feat = self._fetcher()._process_element(
+            tags={"power": "substation", "substation": role},
+            lat=0.5, lng=0.5, osm_id="way/1")
+        assert feat.voltage_kv == 0.0
+
+    @pytest.mark.parametrize("tag,levels", [
+        ("220000", [220.0]),
+        ("220000;110000", [220.0, 110.0]),
+        ("400000,220000", [400.0, 220.0]),
+        ("33000; 13200", [33.0, 13.2]),
+        # forms PyPSA's OSM cleaning also accepts
+        ("110 kV", [110.0]),
+        ("13.8kV", [13.8]),
+        ("13,8 kV", [13.8]),
+        ("33,11 kV", [33.0, 11.0]),
+        ("220/110 kV", [220.0, 110.0]),
+        ("220000/110000", [220.0, 110.0]),
+        ("400 kV; 220 kV", [400.0, 220.0]),
+        ("220000V", [220.0]),
+        ("2x220000", [220.0]),
+        ("2*220000", [220.0]),
+        ("220000;220000", [220.0]),
+        # words stay unknown: the builder infers the level
+        ("medium", []), ("high", []), ("", []),
+    ])
+    def test_voltage_tag_forms(self, tag, levels):
+        from esfex.visualization.workflows.grid_mapping_fetchers import (
+            _parse_voltage_tag,
+        )
+        assert _parse_voltage_tag(tag) == levels
+
+    def test_untagged_transformer_secondary_and_converter_stay_unknown(self):
+        f = self._fetcher()
+        tr = f._process_element(tags={"power": "transformer",
+                                      "voltage": "34500"},
+                                lat=0.5, lng=0.5, osm_id="node/2")
+        assert (tr.voltage_kv, tr.voltage_kv_secondary) == (34.5, 0.0)
+        cv = f._process_element(tags={"power": "converter"},
+                                lat=0.5, lng=0.5, osm_id="node/3")
+        assert cv.voltage_kv == 0.0
+
+    def test_untagged_distribution_substation_dropped_under_hv_floor(self):
+        f = self._fetcher(min_voltage_kv=66.0)
+        dist = f._process_element(
+            tags={"power": "substation", "substation": "distribution"},
+            lat=0.5, lng=0.5, osm_id="way/4")
+        trans = f._process_element(
+            tags={"power": "substation", "substation": "transmission"},
+            lat=0.5, lng=0.6, osm_id="way/5")
+        assert f._apply_filters([dist, trans]) == [trans]
+
+    def test_country_mv_level_is_the_most_tagged(self):
+        feats = [_feat("substation", voltage_kv=34.5,
+                       raw_tags={"voltage": "34500"}),
+                 _feat("line", voltage_kv=13.8, raw_tags={"voltage": "13800"}),
+                 _feat("line", voltage_kv=34.5, raw_tags={"voltage": "34500"}),
+                 _feat("line", voltage_kv=110.0, raw_tags={"voltage": "110000"})]
+        assert gmb._country_mv_level(feats) == 34.5
+        assert gmb._country_mv_level([feats[-1]]) == 0.0
+
+    @staticmethod
+    def _line(name, a, b, kv):
+        tags = {"voltage": str(int(kv * 1000))} if kv else {}
+        return _feat("line", name=name, lat=(a[0] + b[0]) / 2,
+                     lng=(a[1] + b[1]) / 2, voltage_kv=kv, raw_tags=tags,
+                     line_coords=[a, b], num_circuits=1)
+
+    def test_station_level_no_line_carries_is_snapped(self):
+        lines = [self._line("L1", (21.0, -82.0), (21.5, -82.0), 110.0),
+                 self._line("L2", (21.5, -82.0), (22.0, -82.0), 220.0)]
+        odd = _feat("substation", name="PCC", lat=23.0, lng=-82.0,
+                    voltage_kv=132.0, osm_id="way/9")
+        hv = _feat("substation", name="HV", lat=24.0, lng=-82.0,
+                   voltage_kv=500.0, osm_id="way/10")   # 500/220 > 1.3: kept
+        mv = _feat("substation", name="MV", lat=25.0, lng=-82.0,
+                   voltage_kv=13.8, osm_id="way/11")    # MV: kept
+        notes = []
+        out = gmb._reconcile_station_voltages([odd, hv, mv], lines, 1.0, notes)
+        assert [s.voltage_kv for s in out] == [110.0, 500.0, 13.8]
+        assert odd.voltage_kv == 132.0                  # input untouched
+        assert [(n["name"], n["was"], n["kv"], n["rule"]) for n in notes] == [
+            ("PCC", 132.0, 110.0, "off_standard_level")]
+
+    @pytest.mark.parametrize("name,levels", [
+        ("Taguasco 13.8 kV", [13.8]), ("Sub 220/110 kV", [220.0, 110.0]),
+        ("El Rubi", []), ("T 34,5kV", [34.5])])
+    def test_name_levels(self, name, levels):
+        assert gmb._name_levels(name) == levels
+
+    def test_levels_no_line_carries_resolved_like_cuba(self):
+        # Cuba's lines are 220/110 kV and its data tags 13.8 and 13.2 kV
+        # somewhere. The four stations tagged 132/138 kV, as OSM has them:
+        lines = [self._line("L1", (21.0, -82.0), (21.5, -82.0), 110.0),
+                 self._line("L2", (21.5, -82.0), (22.0, -82.0), 220.0)]
+        mdist = {"substation": "minor_distribution"}
+        stations = [
+            # name gives another level: the tag has a zero too many
+            _feat("substation", name="Taguasco 13.8 kV", lat=22.0, lng=-79.26,
+                  voltage_kv=138.0, raw_tags=mdist, osm_id="way/30"),
+            # name repeats the tag: an HV level was meant (it is 110 kV)
+            _feat("substation", name="Ciudad Libertad 138 kV", lat=23.09,
+                  lng=-82.42, voltage_kv=138.0, raw_tags=mdist, osm_id="way/31"),
+            # distribution role, no name: misplaced decimal
+            _feat("substation", name="Subestación La Mambisa", lat=20.31,
+                  lng=-76.88, voltage_kv=132.0, raw_tags=mdist, osm_id="way/32"),
+            # no role, no name: nearest line level
+            _feat("substation", name="San Jose PCC", lat=22.96, lng=-82.15,
+                  voltage_kv=132.0, osm_id="way/33"),
+        ]
+        notes = []
+        out = gmb._reconcile_station_voltages(
+            stations, lines, 1.0, notes, data_levels={220.0, 110.0, 13.8, 13.2})
+        assert [s.voltage_kv for s in out] == [13.8, 110.0, 13.2, 110.0]
+        assert [n["rule"] for n in notes] == [
+            "name_level", "off_standard_level", "decimal_slip",
+            "off_standard_level"]
+
+    def test_decimal_slip_needs_the_level_in_the_data(self):
+        # 138 kV is standard (ANSI C84.1, IEC 60038): a distribution station
+        # tagged 138 kV becomes 13.8 kV only where the data uses 13.8 kV.
+        lines = [self._line("L1", (21.0, -82.0), (21.5, -82.0), 110.0)]
+        st = _feat("substation", name="S", lat=23.0, lng=-82.0,
+                   voltage_kv=138.0, osm_id="way/40",
+                   raw_tags={"substation": "distribution"})
+        out = gmb._reconcile_station_voltages([st], lines, 1.0, [],
+                                              data_levels={110.0, 34.5})
+        assert out[0].voltage_kv == 110.0
+
+    def test_standard_voltages(self):
+        from esfex.visualization.workflows.voltage_standards import (
+            is_standard_kv, mv_default_kv,
+        )
+        assert all(is_standard_kv(v) for v in (13.8, 34.5, 110, 132, 138, 220))
+        assert not any(is_standard_kv(v) for v in (1380, 125, 13.5))
+        assert (mv_default_kv(50), mv_default_kv(60)) == (33.0, 34.5)
+
+    def test_station_tag_overruled_when_its_lines_agree(self):
+        st = (20.3, -76.9)
+        lines = [self._line("A", st, (20.5, -76.9), 110.0),
+                 self._line("B", (20.1, -76.9), st, 110.0),
+                 self._line("C", (21.0, -77.0), (21.5, -77.0), 220.0)]
+        sub = _feat("substation", name="Mambisa", lat=st[0], lng=st[1],
+                    voltage_kv=220.0, osm_id="way/12")
+        lone = _feat("substation", name="Lone", lat=20.5, lng=-76.9,
+                     voltage_kv=220.0, osm_id="way/13")  # one line: kept
+        notes = []
+        out = gmb._reconcile_station_voltages([sub, lone], lines, 1.0, notes)
+        assert [s.voltage_kv for s in out] == [110.0, 220.0]
+        assert notes[0]["rule"] == "line_consensus"
+
+    def test_neighbour_stations_lines_are_not_borrowed(self):
+        # A 110 kV station 300 m from a 220 kV one keeps its tag: the 220 kV
+        # lines end at the 220 kV station (Cuba: "TE Refinería 110 kV").
+        s220 = (20.005, -75.871)
+        lines = [self._line("A", s220, (20.2, -75.871), 220.0),
+                 self._line("B", (19.8, -75.871), s220, 220.0)]
+        st220 = _feat("substation", name="Ref 220", lat=s220[0], lng=s220[1],
+                      voltage_kv=220.0, osm_id="way/20")
+        st110 = _feat("substation", name="Ref 110", lat=20.0077, lng=-75.871,
+                      voltage_kv=110.0, osm_id="way/21")
+        notes = []
+        out = gmb._reconcile_station_voltages([st220, st110], lines, 1.0, notes)
+        assert [s.voltage_kv for s in out] == [220.0, 110.0] and notes == []
+
+    def test_isolated_island_gets_mv_and_survives_the_floor(self):
+        # Mainland: two 110 kV stations on a tagged line. Island: an untagged
+        # "transmission" station, an untagged line and a plant; the data tags
+        # 34.5 kV somewhere. Floor 66 kV.
+        from esfex.visualization.data.gui_model import GuiModel
+        m = GuiModel()
+        m._undo_suspended = True
+        while m.state.nodes:
+            m.remove_node(len(m.state.nodes) - 1)
+        for name, la, lo in [("Main", 22.5, -82.0), ("Isle", 21.7, -82.8)]:
+            m.update_node(m.add_node(name), centroid_lat=la, centroid_lng=lo)
+        feats = [
+            _feat("substation", name="S1", lat=22.5, lng=-82.0,
+                  voltage_kv=110.0, raw_tags={"voltage": "110000"}, osm_id="s1"),
+            _feat("substation", name="S2", lat=22.6, lng=-82.0,
+                  voltage_kv=110.0, raw_tags={"voltage": "110000"}, osm_id="s2"),
+            self._line("L12", (22.5, -82.0), (22.6, -82.0), 110.0),
+            _feat("substation", name="Mv", lat=22.9, lng=-82.0,
+                  voltage_kv=34.5, raw_tags={"voltage": "34500"}, osm_id="s3"),
+            _feat("substation", name="Isle", lat=21.70, lng=-82.80,
+                  voltage_kv=0.0, raw_tags={"substation": "transmission"},
+                  osm_id="s4"),
+            _feat("substation", name="Isle2", lat=21.80, lng=-82.80,
+                  voltage_kv=0.0, osm_id="s5"),
+            self._line("Lisle", (21.70, -82.80), (21.80, -82.80), 0.0),
+            _feat("generator", name="Plant", lat=21.701, lng=-82.80,
+                  capacity_mw=40.0, fuel="Oil", gen_type="Thermal",
+                  osm_id="g1"),
+        ]
+        res = gmb.build_grid_from_features(m, feats, station_radius_km=1.0,
+                                           min_voltage_kv=66.0)
+        st = m.state
+        isle = [b for b in st.buses.values() if b.latitude < 22.0]
+        assert isle and {b.voltage_kv for b in isle} == {34.5}
+        (ln,) = [l for l in st.transmission_lines if l.voltage_kv < 60]
+        assert ln.capacity_mw < 60.0                 # MV rating, not 220 kV
+        (g,) = st.generators.values()
+        assert st.buses[g.bus].latitude < 22.0       # not moved to the mainland
+        rules = {d["rule"] for d in res.voltage_decisions}
+        assert "isolated_mv" in rules
+        text = res.summary()
+        assert "Voltage decisions" in text and "isolated grid" in text
+        assert "Isle: 2 bus(es) at 34.5 kV" in text
+
+
+class TestUntaggedBusOfSeveralVoltages:
+    """An untagged bus whose lines run at several voltages gets a bus per
+    voltage, and the substation's transformer joins them. Rebuilding Cuba
+    left Boca de Jaruco (an untagged substation with 220 and 110 kV lines)
+    and TE Nuevitas (a chain of untagged buses between a 220 and a 110 kV
+    line) with 110 kV lines on a 220 kV bus and no transformer."""
+
+    @staticmethod
+    def _state():
+        from esfex.visualization.data.gui_model import EndpointRef, GuiTransmissionLine
+        st = GuiSystemState(name="S")
+        st.nodes = [GuiNode(index=0, name="N0")]
+        st.buses = {
+            "hv": GuiBus(bus_id="hv", parent_node=0, voltage_kv=220.0,
+                         latitude=22.0, longitude=-80.0),
+            "lv": GuiBus(bus_id="lv", parent_node=0, voltage_kv=110.0,
+                         latitude=22.0, longitude=-79.5),
+            "sub": GuiBus(bus_id="sub", name="Boca", parent_node=0, voltage_kv=0.0,
+                          latitude=22.2, longitude=-79.7),
+            # Untagged chain: t1 (220 kV line) -- t2 (110 kV line)
+            "t1": GuiBus(bus_id="t1", parent_node=0, voltage_kv=0.0,
+                         latitude=22.4, longitude=-79.7),
+            "t2": GuiBus(bus_id="t2", parent_node=0, voltage_kv=0.0,
+                         latitude=22.401, longitude=-79.7),
+        }
+        st.transmission_lines = [
+            GuiTransmissionLine(line_id="a", from_bus="hv", to_bus="sub", voltage_kv=220.0,
+                                length_km=30, from_endpoint=EndpointRef("bus", "hv"),
+                                to_endpoint=EndpointRef("bus", "sub")),
+            GuiTransmissionLine(line_id="b", from_bus="sub", to_bus="lv", voltage_kv=110.0,
+                                length_km=25, from_endpoint=EndpointRef("bus", "sub"),
+                                to_endpoint=EndpointRef("bus", "lv")),
+            GuiTransmissionLine(line_id="c", from_bus="hv", to_bus="t1", voltage_kv=220.0,
+                                length_km=45),
+            GuiTransmissionLine(line_id="d", from_bus="t1", to_bus="t2", voltage_kv=0.0,
+                                length_km=0.1),
+            GuiTransmissionLine(line_id="e", from_bus="t2", to_bus="lv", voltage_kv=110.0,
+                                length_km=45),
+        ]
+        st.transformers, st.generators, st.batteries = [], {}, {}
+        return st
+
+    def test_no_line_joins_two_voltages(self):
+        st = self._state()
+        decisions: list = []
+        gmb._propagate_voltage(st, decisions=decisions)
+        buses = st.buses
+        for ln in st.transmission_lines:
+            assert buses[ln.from_bus].voltage_kv == buses[ln.to_bus].voltage_kv == ln.voltage_kv, ln.line_id
+            for end, ep in ((ln.from_bus, ln.from_endpoint), (ln.to_bus, ln.to_endpoint)):
+                assert ep is None or ep.element_id == end
+        # The 110 kV line left the untagged substation for a 110 kV bus at its place
+        b = next(ln for ln in st.transmission_lines if ln.line_id == "b")
+        assert b.from_bus != "sub" and buses[b.from_bus].voltage_kv == 110.0
+        assert (buses[b.from_bus].latitude, buses[b.from_bus].longitude) == (22.2, -79.7)
+        assert buses[b.from_bus].name == "Boca 110 kV"
+        assert sum(1 for d in decisions if d["rule"] == "split_by_line_voltage") == 2
+
+    def test_the_levels_get_their_transformer(self):
+        st = self._state()
+        gmb._propagate_voltage(st)
+        added = gmb._connect_colocated_voltage_levels(st, ParseResult(), 1.0)
+        assert added == 2
+        assert {frozenset((st.buses[t.from_bus].voltage_kv, st.buses[t.to_bus].voltage_kv))
+                for t in st.transformers} == {frozenset((220.0, 110.0))}

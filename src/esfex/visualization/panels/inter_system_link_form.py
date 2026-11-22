@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 from esfex.visualization.data.gui_model import EndpointRef, GuiModel
 from esfex.visualization.i18n import tr
+from esfex.visualization.panels.multi_edit import add_choices, combo_value, select_value
 from esfex.visualization.panels.visual_style_widget import VisualStyleWidget
 
 
@@ -73,6 +74,15 @@ class InterSystemLinkForm(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(4)
 
+        # Fuel carried by a fuel-route link (hidden for transmission links).
+        # On a fuel route, capacity is the route's daily capacity in the
+        # fuel's unit, operational cost is $/unit/km and the loss factor is
+        # per 100 km (see SystemLinkConfig).
+        self._fuel = QComboBox()
+        self._fuel.setEditable(True)
+        self._fuel.currentTextChanged.connect(self._on_changed)
+        layout.addRow(tr("generator_form.fuel"), self._fuel)
+
         self._capacity = QDoubleSpinBox()
         self._capacity.setRange(0, 1e6)
         self._capacity.editingFinished.connect(self._on_changed)
@@ -86,14 +96,19 @@ class InterSystemLinkForm(QWidget):
         layout.addRow(tr("line_form.voltage"), self._voltage)
 
         self._line_type = QComboBox()
-        self._line_type.addItems(["", "overhead", "underground", "submarine"])
-        self._line_type.currentTextChanged.connect(self._on_changed)
+        add_choices(self._line_type, [
+            ("", ""),
+            ("overhead", tr("line_form.type_overhead")),
+            ("underground", tr("line_form.type_underground")),
+            ("submarine", tr("line_form.type_submarine")),
+        ])
+        self._line_type.currentIndexChanged.connect(self._on_changed)
         layout.addRow(tr("line_form.type"), self._line_type)
 
         self._length_km = QDoubleSpinBox()
         self._length_km.setRange(0, 100000)
         self._length_km.setDecimals(2)
-        self._length_km.setSpecialValueText("Auto")
+        self._length_km.setSpecialValueText(tr("line_form.auto"))
         self._length_km.setReadOnly(True)
         layout.addRow(tr("line_form.length"), self._length_km)
 
@@ -101,12 +116,6 @@ class InterSystemLinkForm(QWidget):
         # numeric inputs. No specialValueText (the user can read the
         # current value at a glance and override it) and 6-decimal
         # precision to match electrical units in the YAML.
-        self._base_impedance = QDoubleSpinBox()
-        self._base_impedance.setRange(0, 1e6)
-        self._base_impedance.setDecimals(2)
-        self._base_impedance.editingFinished.connect(self._on_changed)
-        layout.addRow(tr("line_form.base_impedance"), self._base_impedance)
-
         self._reactance_per_km = QDoubleSpinBox()
         self._reactance_per_km.setRange(0, 100)
         self._reactance_per_km.setDecimals(4)
@@ -133,29 +142,31 @@ class InterSystemLinkForm(QWidget):
 
         self._num_circuits = QSpinBox()
         self._num_circuits.setRange(1, 10)
+        self._num_circuits.setToolTip(tr("line_form.circuits_tip"))
         self._num_circuits.valueChanged.connect(self._on_changed)
         layout.addRow(tr("line_form.circuits"), self._num_circuits)
 
         self._frequency_hz = QDoubleSpinBox()
         self._frequency_hz.setRange(0.0, 400)
         self._frequency_hz.setDecimals(1)
-        self._frequency_hz.setSpecialValueText("N/A")
+        self._frequency_hz.setSpecialValueText(tr("line_form.not_applicable"))
         self._frequency_hz.editingFinished.connect(self._on_changed)
         self._frequency_hz.setEnabled(False)
         self._frequency_hz.setToolTip(tr("electrical.inherited_tooltip"))
         layout.addRow(tr("line_form.frequency"), self._frequency_hz)
 
         self._current_type = QComboBox()
-        self._current_type.addItems(["AC", "DC"])
-        self._current_type.currentTextChanged.connect(self._on_changed)
+        add_choices(self._current_type, [("AC", "AC"), ("DC", "DC")])
+        self._current_type.currentIndexChanged.connect(self._on_changed)
         self._current_type.setEnabled(False)
         self._current_type.setToolTip(tr("electrical.inherited_tooltip"))
         layout.addRow(tr("line_form.current_type"), self._current_type)
 
+        self._props_layout = layout
         outer.addWidget(grp)
 
         # --- Economic properties ---
-        econ = QGroupBox("Economic")
+        econ = QGroupBox(tr("line_form.group_economic"))
         econ_layout = QFormLayout(econ)
         econ_layout.setContentsMargins(6, 6, 6, 6)
         econ_layout.setSpacing(4)
@@ -165,28 +176,28 @@ class InterSystemLinkForm(QWidget):
         self._investment_cost.setDecimals(2)
         self._investment_cost.setSuffix(" $/MW")
         self._investment_cost.editingFinished.connect(self._on_changed)
-        econ_layout.addRow("Investment cost", self._investment_cost)
+        econ_layout.addRow(tr("line_form.investment_cost"), self._investment_cost)
 
         self._max_investment = QDoubleSpinBox()
         self._max_investment.setRange(0, 1e6)
         self._max_investment.setDecimals(2)
         self._max_investment.setSuffix(" MW")
         self._max_investment.editingFinished.connect(self._on_changed)
-        econ_layout.addRow("Max investment", self._max_investment)
+        econ_layout.addRow(tr("line_form.max_investment"), self._max_investment)
 
         self._cost_per_mw_km = QDoubleSpinBox()
         self._cost_per_mw_km.setRange(0, 1e6)
         self._cost_per_mw_km.setDecimals(4)
         self._cost_per_mw_km.setSuffix(" $/MW·km")
         self._cost_per_mw_km.editingFinished.connect(self._on_changed)
-        econ_layout.addRow("Operational cost", self._cost_per_mw_km)
+        econ_layout.addRow(tr("line_form.operational_cost"), self._cost_per_mw_km)
 
         self._loss_factor = QDoubleSpinBox()
         self._loss_factor.setRange(0, 1)
         self._loss_factor.setDecimals(4)
         self._loss_factor.setSingleStep(0.005)
         self._loss_factor.editingFinished.connect(self._on_changed)
-        econ_layout.addRow("Loss factor", self._loss_factor)
+        econ_layout.addRow(tr("line_form.loss_factor"), self._loss_factor)
 
         outer.addWidget(econ)
 
@@ -247,27 +258,32 @@ class InterSystemLinkForm(QWidget):
         self._updating = True
         try:
             self._refresh_header(link)
+            is_fuel = link.link_type == "fuel_route"
+            self._props_layout.setRowVisible(self._fuel, is_fuel)
+            self._fuel.clear()
+            if is_fuel:
+                names = set()
+                for sname in (link.from_system, link.to_system):
+                    st = self._state_of(sname)
+                    names.update(getattr(st, "fuels", {}) or {})
+                self._fuel.addItems(sorted(names))
+                self._fuel.setCurrentText(link.fuel or "")
             self._capacity.setValue(float(link.capacity_mw or 0.0))
             self._voltage.setValue(float(link.voltage_kv or 0.0))
-            lt_idx = self._line_type.findText(link.line_type or "")
-            if lt_idx >= 0:
-                self._line_type.setCurrentIndex(lt_idx)
+            select_value(self._line_type, link.line_type or "")
             # length_km is shown read-only; if absent, fall back to
             # distance_km — they mean the same thing on a link.
             self._length_km.setValue(
                 float(link.length_km if link.length_km is not None
                       else (link.distance_km or 0.0))
             )
-            self._base_impedance.setValue(float(link.base_impedance or 0.0))
             self._reactance_per_km.setValue(float(link.reactance_per_km or 0.0))
             self._reactance_pu.setValue(float(link.reactance_pu or 0.0))
             self._resistance_pu.setValue(float(link.resistance_pu or 0.0))
             self._susceptance_pu.setValue(float(link.susceptance_pu or 0.0))
             self._num_circuits.setValue(int(link.num_circuits or 1))
             ct = getattr(link, "current_type", "AC") or "AC"
-            ct_idx = self._current_type.findText(ct)
-            if ct_idx >= 0:
-                self._current_type.setCurrentIndex(ct_idx)
+            select_value(self._current_type, ct)
             freq = getattr(link, "frequency_hz", 50.0) or 50.0
             if ct == "DC":
                 freq = 0.0
@@ -337,7 +353,8 @@ class InterSystemLinkForm(QWidget):
             selected_idx = -1
             target_id = current_endpoint.element_id if current_endpoint else None
             for i, (bid, bus) in enumerate(st.buses.items()):
-                combo.addItem(f"{bid}  ({bus.voltage_kv:g} kV)", bid)
+                combo.addItem(tr("line_form.bus_with_voltage", bus=bid,
+                                 kv=f"{bus.voltage_kv:g}"), bid)
                 if bid == target_id:
                     selected_idx = i
             if selected_idx >= 0:
@@ -382,9 +399,7 @@ class InterSystemLinkForm(QWidget):
         try:
             self._voltage.setValue(float(link.voltage_kv or 0.0))
             ct = getattr(link, "current_type", "AC") or "AC"
-            ct_idx = self._current_type.findText(ct)
-            if ct_idx >= 0:
-                self._current_type.setCurrentIndex(ct_idx)
+            select_value(self._current_type, ct)
             freq = getattr(link, "frequency_hz", 50.0) or 50.0
             if ct == "DC":
                 freq = 0.0
@@ -403,16 +418,17 @@ class InterSystemLinkForm(QWidget):
         # ``or None``) — otherwise the next load_element would render
         # the field as the special-value text ("Default" / "Global"),
         # which the user perceived as "not editable".
+        if link.link_type == "fuel_route":
+            link.fuel = self._fuel.currentText().strip()
         link.capacity_mw = float(self._capacity.value())
         link.voltage_kv = float(self._voltage.value())
-        link.line_type = self._line_type.currentText() or None
-        link.base_impedance = float(self._base_impedance.value())
+        link.line_type = combo_value(self._line_type) or None
         link.reactance_per_km = float(self._reactance_per_km.value())
         link.reactance_pu = float(self._reactance_pu.value())
         link.resistance_pu = float(self._resistance_pu.value())
         link.susceptance_pu = float(self._susceptance_pu.value())
         link.num_circuits = int(self._num_circuits.value())
-        ct = self._current_type.currentText() or "AC"
+        ct = combo_value(self._current_type) or "AC"
         link.current_type = ct
         link.frequency_hz = 0.0 if ct == "DC" else float(self._frequency_hz.value())
 

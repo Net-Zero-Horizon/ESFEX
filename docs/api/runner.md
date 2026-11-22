@@ -11,8 +11,8 @@ class Orchestrator:
     def __init__(
         self,
         config: ESFEXConfig,
-        output_dir: Optional[Path] = None,
-        config_path: Optional[Path] = None,
+        output_dir: Optional[Union[str, Path]] = None,
+        config_path: Optional[Union[str, Path]] = None,
     ) -> None
 ```
 
@@ -21,8 +21,8 @@ class Orchestrator:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `config` | `ESFEXConfig` | (required) | Validated ESFEX configuration object |
-| `output_dir` | `Optional[Path]` | `"./results"` | Directory for HDF5 output files and logs |
-| `config_path` | `Optional[Path]` | `None` | Path to the original YAML file (for relative path resolution of demand files, availability profiles, etc.) |
+| `output_dir` | `Optional[Union[str, Path]]` | `"./results"` | Directory for HDF5 output files and logs |
+| `config_path` | `Optional[Union[str, Path]]` | `None` | Path to the original YAML file (for relative path resolution of demand files, availability profiles, etc.) |
 
 **Attributes:**
 
@@ -30,10 +30,18 @@ class Orchestrator:
 |-----------|------|-------------|
 | `config` | `ESFEXConfig` | The validated configuration |
 | `output_dir` | `Path` | Output directory (created if needed) |
-| `primary_system` | `SystemConfig` | The first system in the meta-network |
-| `system_name` | `str` | Name of the primary system |
+| `primary_system` | `SystemConfig` | All systems of `meta_network.systems` merged into one operational (bus-level) system, used for dispatch. Inter-system links become extra transmission lines |
+| `master_system` | `SystemConfig` | The same merged system at node level, used by the master problem |
+| `system_name` | `str` | The system names joined with `_` (for example `IslaJuventud_Cuba`) |
 | `state` | `Optional[SimulationState]` | Current simulation state (set during `run()`) |
 | `results` | `list[YearResults]` | Accumulated results across years |
+| `master_solution` | `Optional[dict]` | Master problem decisions after `run(master_only=True)` (`investments`, `retirements`, `cumulative_capacities`, `re_targets`, each keyed by year); `None` otherwise |
+| `resume_plan` | `Optional[ResumePlan]` | After `run(resume_from=...)`: the checked checkpoint the run resumed from (`phase`, `resume_year`, `master_years`, `dispatch_years`, `forced`, `to_dict()`; see `esfex.io.checkpoint`); `None` otherwise |
+| `warnings_summary` | `Optional[WarningsSummary]` | After `run()` (also a failed one): the warnings and errors the run logged, grouped by kind (`total`, `kinds`, `groups`, `text()`, `to_dict()`; see `esfex.api.diagnostics`) |
+
+When development zones are configured, `run()` replaces `primary_system` and `master_system` with the zone-expanded systems.
+
+The constructor also loads plugins (`PluginManager.load_all()`), gives them the config (`PluginManager.apply_config()`: validates each plugin's `plugins.<name>` section and calls `on_config_loaded`; an invalid section raises `ValueError`) and registers their Julia modules.
 
 **Example:**
 
@@ -55,7 +63,11 @@ orch = Orchestrator(
 def run(
     self,
     years: Optional[int] = None,
-    start_year: int = 2025,
+    start_year: Optional[int] = None,
+    master_only: bool = False,
+    dispatch_years: Optional[Iterable[int]] = None,
+    resume_from: Optional[Union[str, Path]] = None,
+    force_resume: bool = False,
 ) -> list[YearResults]
 ```
 
@@ -67,29 +79,43 @@ Execute the full simulation: Master Problem (capacity expansion) followed by yea
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `years` | `Optional[int]` | `25` | Number of years to simulate |
-| `start_year` | `int` | `2025` | First simulation year |
+| `start_year` | `Optional[int]` | year of `date_start` | Label of the first simulated year. When given, the date labels start on `date_start`'s day and time in this year. It only relabels: it does not select demand rows, and the Feb 29 rows dropped from leap-year data are those of `date_start`'s calendar |
+| `dispatch_years` | `Optional[Iterable[int]]` | all years | Run the operational dispatch only for these horizon years (labels); the others are skipped, each year keeps its own data block (year index × 8760 h) and the master problem still plans the whole horizon; the transmission and converter capacity it builds in skipped years still reaches the dispatched ones. In `unit_commitment` mode the first of them is dispatched instead of the first horizon year. `ValueError` for a year outside the horizon. Without it, the `ESFEX_OPS_ONLY_YEARS` environment variable is read |
+| `master_only` | `bool` | `False` | Stop after the Master Problem (step 10 below): the decisions are left in `master_solution`, the HDF5 file (system configuration only) is finalized, plugins are torn down and an empty list is returned. Needs `simulation_mode: development` (`ValueError` otherwise) |
+| `resume_from` | `Optional[str \| Path]` | `None` | Results file of an interrupted myopic `development` run to continue (see [Resuming an Interrupted Run](../user-guide/cli.md#resuming-an-interrupted-run)): the run takes the years, start year and dispatch years of that run (`years` / `start_year` may be left out; given, they must match), drops the unfinished year from the file, restores the state from its checkpoint and continues from the first year not completed, appending to that file. Not with `master_only` or `dispatch_years` (`ValueError`) |
+| `force_resume` | `bool` | `False` | With `resume_from`: continue although the configuration, its input files or the ESFEX version changed since the checkpoint was written (each difference is logged as a warning) |
 
-**Returns:** `list[YearResults]` -- One result object per simulated year.
+**Returns:** `list[YearResults]` -- One result object per simulated year (resumed: per year this call dispatched).
 
-**Raises:** Returns an empty list if the Master Problem fails.
+In `unit_commitment` mode only the first year is run, whatever `years` is.
 
-**Workflow:**
+**Failure modes:**
 
-1. Load and initialize plugins (`PluginManager.load_all()`)
-2. **`pre_simulation`** plugin hook
-3. Load demand data for all years (`_load_demand()`)
-4. Generate EV charging profiles with S-curve growth (`_generate_ev_demand()`)
-5. **`post_demand_loaded`** plugin hook (plugins may modify demand arrays)
-6. Create sectoral demand distribution (`_create_sectoral_demand()`)
-7. Preload availability profiles into cache (`_preload_availability_profiles()`)
-8. Expand development zones if configured (`expand_config_with_zones()`)
-9. Generate rooftop solar profiles if configured
-10. Initialize HDF5 output file
-11. **Step 1: Master Problem** (development mode only)
+- Raises `RunAbortedError` (a `RuntimeError`, in `esfex.runner`) if the Master Problem finds no plan; plugins are torn down and nothing is dispatched. It used to return an empty list, so `esfex run` reported success and exited 0.
+- Raises `RuntimeError` if no operational window of a year solves.
+- Any other exception raised while running a year is logged and re-raised.
+- Raises `esfex.io.checkpoint.ResumeError` (its `errors` are `ApiError` records with the codes listed under [Resuming an Interrupted Run](../user-guide/cli.md#resuming-an-interrupted-run)) when `resume_from` cannot be resumed; nothing is loaded or written.
+
+**Checkpoints:** a myopic `development` run (not `master_only`) writes `<results stem>.checkpoint.json` next to its results file when it starts, after every master year, when the plan is complete, after every dispatched year and at the end (see [Checkpoint of a Myopic Run](../reference/hdf5-output-schema.md#checkpoint-of-a-myopic-run)). The case's fingerprint (configuration hash, input files' SHA-256) is taken in the constructor, before plugins adjust the configuration. A checkpoint that cannot be written is logged as a warning and the run goes on.
+
+**Warnings:** the WARNING and ERROR records logged during the run (the Julia models' `@warn` lines included) are grouped by kind. At the end, after a failure too, `run()` logs a summary as a milestone (shown by the `basic` console, which hides warnings), keeps it in `warnings_summary` and writes it to [`/diagnostics/warnings`](../reference/hdf5-output-schema.md#diagnosticswarnings). Inside `esfex run` the collection starts with the configuration load and those warnings are included. A resumed run starts from the counts its checkpoint holds.
+
+**Workflow** (plugins are already loaded by the constructor):
+
+1. **`pre_simulation`** plugin hook
+2. Load demand data for all years (`_load_demand()`)
+3. Generate EV charging profiles with S-curve growth (`_generate_ev_demand()`)
+4. **`post_demand_loaded`** plugin hook (plugins may modify demand arrays)
+5. Create sectoral demand distribution (`_create_sectoral_demand()`)
+6. Preload availability profiles into cache (`_preload_availability_profiles()`)
+7. Expand development zones if configured (`expand_config_with_zones()`)
+8. Generate rooftop solar profiles if configured
+9. Initialize HDF5 output file
+10. **Step 1: Master Problem** (development mode only)
     - **`pre_master_problem`** plugin hook
-    - Solve capacity expansion for all years simultaneously
+    - Solve capacity expansion: all years at once (`planning_mode: perfect_foresight`) or one year at a time (`myopic`)
     - **`post_master_problem`** plugin hook
-12. **Step 2: Operational Dispatch** (year by year)
+11. **Step 2: Operational Dispatch** (year by year)
     - For each year:
         - Apply investment decisions from Master Problem
         - Build cumulative unit configuration (`_build_config_from_cumulative()`)
@@ -98,10 +124,10 @@ Execute the full simulation: Master Problem (capacity expansion) followed by yea
         - Run rolling horizon dispatch (`_run_operational_dispatch()`)
         - Compute derived metrics (LCOE, VALLCOE, capacity factor)
         - Export year to HDF5
-        - **`post_year`** plugin hook (receives open HDF5 handle)
-13. Finalize HDF5 file
-14. **`post_simulation`** plugin hook
-15. `PluginManager.teardown_all()`
+        - **`post_year`** plugin hook (receives the HDF5 file open in append mode)
+12. Finalize HDF5 file
+13. **`post_simulation`** plugin hook
+14. `PluginManager.teardown_all()`
 
 **Example:**
 
@@ -117,7 +143,7 @@ for yr in results:
 
 ### Plugin Hooks
 
-The Orchestrator dispatches hooks to all loaded plugins at key points in the pipeline. Plugins are discovered from `~/.esfex/plugins/` and loaded via the `PluginManager`. Each hook call is wrapped in `try/except` so a broken plugin is logged but never crashes the core simulation.
+The Orchestrator dispatches hooks to all loaded plugins at key points in the pipeline. Plugins are discovered from `~/.esfex/plugins/` and from the directories in the `ESFEX_PLUGIN_PATH` environment variable, and loaded via the `PluginManager`. The runner does not scan a project's `.esfex/plugins/` directory (it logs a warning if one exists). Each hook call is wrapped in `try/except` so a broken plugin is logged but never crashes the core simulation. Hooks are called with keyword arguments.
 
 | Hook | Timing | Arguments |
 |------|--------|-----------|
@@ -126,8 +152,8 @@ The Orchestrator dispatches hooks to all loaded plugins at key points in the pip
 | `pre_master_problem` | Before Master Problem solve | `config`, `years` |
 | `post_master_problem` | After Master Problem solve | `investments`, `retirements`, `config` |
 | `pre_year` | Before each year's dispatch | `year`, `year_idx`, `units_config`, `config` |
-| `post_year` | After each year's dispatch | `year`, `year_result`, `hdf5_handle` |
-| `post_simulation` | After all years complete | `results`, `config` |
+| `post_year` | After each year is written to HDF5 | `year`, `result`, `hdf5_file` (open `h5py.File`, or `None` if h5py is missing), `output_dir`, `config` |
+| `post_simulation` | After the HDF5 file is finalized | `results`, `hdf5_path`, `output_dir`, `config` |
 
 See `esfex.plugins.protocol.ESFEXPlugin` for the full hook API.
 
@@ -143,13 +169,14 @@ These methods are called internally during `run()` but are documented for subcla
 | `_preload_availability_profiles(num_nodes)` | Cache all availability files at startup |
 | `_solve_master_problem(years_range, demand, ...)` | Solve strategic capacity expansion |
 | `_run_operational_dispatch(year, demand, ...)` | Rolling horizon dispatch for one year |
-| `_solve_window(demand, hours, ...)` | Solve a single dispatch window |
+| `_solve_window(year, window, demand, hours, num_nodes, boundary_conditions, ...)` | Solve a single dispatch window |
 | `_build_config_from_cumulative(units, caps)` | Build unit config with investments applied |
 | `_rebuild_unit_names(units_config)` | Rebuild name lists to match Julia ordering |
-| `_compute_derived_metrics(year_result, ...)` | Compute LCOE, VALLCOE, capacity factor |
-| `_calculate_initial_re_penetration()` | Auto-calculate initial RE penetration from existing capacity |
+| `_compute_derived_metrics(result)` | Compute LCOE, VALLCOE, capacity factor, selling prices (in place) |
+| `_calculate_initial_re_penetration(first_year_demand)` | Estimate initial RE penetration from existing capacity |
 | `_apply_transfer_investments(investments)` | Apply transmission line investment decisions |
 | `_extract_year_demand(total_demand, y_idx, hours)` | Slice year-specific demand from multi-year array |
+| `_initialize_hdf5(path, ...)`, `_append_year_to_hdf5(path, result)`, `_finalize_hdf5(path)` | Write the results file ([HDF5 Output Schema](../reference/hdf5-output-schema.md)) |
 
 ---
 
@@ -189,6 +216,8 @@ class SimulationState:
 
 Complete results for one simulation year, including all optimization variables, derived metrics, and scalar summaries.
 
+Per-node arrays are at node level: when the operational network has buses that differ from the nodes, the runner aggregates bus results to nodes (sum for quantities, `gen_status` included: units online; max for `prices` and `voltage_angle`). Exceptions are noted in the tables below. With a rolling horizon the hour axis covers the year once (overlap hours are dropped), also for the `power_flow`, `transfer_margin` and N-1 dual series; a key missing from a window (no binding dual there) is zero-filled for that window's steps. The scalars (`objective`, `emissions`, `load_shed`, `total_generation`, `total_demand`) and `cost_breakdown` likewise add up each window's committed steps only ([Result Stitching](../formulation/operational-dispatch.md#104-result-stitching)).
+
 ```python
 @dataclass
 class YearResults:
@@ -213,10 +242,9 @@ class YearResults:
 | Field | Type | Shape | Description |
 |-------|------|-------|-------------|
 | `gen_output` | `Optional[np.ndarray]` | `(gen, node, hour)` | Generator output (MW) |
-| `gen_status` | `Optional[np.ndarray]` | `(gen, node, hour)` | Generator on/off status (UC mode) |
-| `gen_startup` | `Optional[np.ndarray]` | `(gen, node, hour)` | Startup events |
-| `gen_shutdown` | `Optional[np.ndarray]` | `(gen, node, hour)` | Shutdown events |
-| `curtailment` | `Optional[np.ndarray]` | `(gen, node, hour)` | RE curtailment (MW) |
+| `gen_status` | `Optional[np.ndarray]` | `(gen, node, hour)` | Units online (UC mode; 0/1 for a single-unit plant; 0 for a variable renewable, which is not committed and gets no HDF5 dataset) |
+| `gen_startup` | `Optional[np.ndarray]` | `(gen, node, hour)` | Units started |
+| `curtailment` | `Optional[np.ndarray]` | `(gen, node, hour)` | RE curtailment (MW); summed over generators when written to HDF5 |
 
 ### Storage Arrays
 
@@ -236,17 +264,24 @@ class YearResults:
 | `loss_of_reserve_static` | `Optional[np.ndarray]` | `(node, hour)` | Static reserve deficit (MW) |
 | `loss_of_reserve_dynamic` | `Optional[np.ndarray]` | `(node, hour)` | Dynamic reserve deficit (MW) |
 | `load_shed_array` | `Optional[np.ndarray]` | `(node, hour)` | Load shedding (MW) |
-| `loss_of_inertia` | `Optional[np.ndarray]` | `(hour,)` | Inertia deficit (MW*s) |
+| `co2_emissions` | `Optional[np.ndarray]` | `(node, hour)` | CO2 emission rate (tCO2/h); × `resolution_hours` for tonnes per step |
+| `loss_of_inertia` | `Optional[np.ndarray]` | `(hour,)` | System inertia deficit (labelled GW*s in the HDF5 file) |
 
 ### Network and Prices
 
 | Field | Type | Shape | Description |
 |-------|------|-------|-------------|
-| `power_flow` | `Optional[dict]` | `{(from,to): array}` | Line power flows (MW) |
-| `voltage_angle` | `Optional[np.ndarray]` | `(node, hour)` | Bus voltage angles (rad) |
+| `power_flow` | `Optional[dict]` | `{(from_bus, to_bus): array}` | Line power flows (MW), keyed by operational bus pair (not aggregated to nodes); parallel lines and transformers between the same two buses are summed |
+| `voltage_angle` | `Optional[np.ndarray]` | `(node, hour)` | Voltage angles (rad) |
+| `voltage_magnitude` | `Optional[np.ndarray]` | `(bus, hour)` | Voltage magnitude (p.u.), ACOPF modes only |
+| `reactive_generation` | `Optional[np.ndarray]` | `(gen, bus, hour)` | Reactive power (MVAr), ACOPF modes only |
 | `transfer_investment` | `Optional[dict]` | `{(from,to): float}` | Transmission investment (MW) |
+| `transfer_margin` | `Optional[dict]` | `{(from_bus, to_bus): array}` | Transfer margin slack (MW), keyed by operational bus pair like `power_flow` |
 | `prices` | `Optional[np.ndarray]` | `(node, hour)` | Nodal prices ($/MWh, dual of power balance) |
-| `demand` | `Optional[np.ndarray]` | `(hour, node)` | Demand used in optimization (MW) |
+| `price_energy_component` | `Optional[np.ndarray]` | `(hour,)` | Mean of `prices` over nodes ($/MWh) |
+| `price_congestion_component` | `Optional[np.ndarray]` | `(node, hour)` | `prices` minus the energy component ($/MWh) |
+| `demand` | `Optional[np.ndarray]` | `(hour, node)` | Gross demand for the year (MW): base demand, plus EV demand when EV optimisation is off. Rooftop generation is not subtracted here (it is subtracted only from the demand sent to the dispatch model) |
+| `rooftop_generation` | `Optional[np.ndarray]` | `(hour, node)` | Behind-the-meter rooftop solar (MW), diagnostic only |
 
 ### EV Variables
 
@@ -276,14 +311,27 @@ class YearResults:
 | `vallcoe` | `Optional[np.ndarray]` | `(gen, node, hour)` | Value-adjusted LCOE ($/MWh) |
 | `bat_capacity_factor` | `Optional[np.ndarray]` | `(bat, node, hour)` | Battery capacity factors |
 | `bat_lcoe` | `Optional[np.ndarray]` | `(bat, node, hour)` | Battery LCOE ($/MWh) |
-| `fuel_for_power` | `Optional[dict]` | `{gen_idx: array}` | Fuel consumption per generator |
-| `technology_selling_prices` | `Optional[dict]` | `{tech: dict}` | Technology-level selling prices |
+| `bat_vallcoe` | `Optional[np.ndarray]` | `(bat, node, hour)` | Battery value-adjusted LCOE ($/MWh) |
+| `fuel_for_power` | `Optional[dict]` | `{unit: (node, hour)}` | Fuel burnt by each fuel-coupled unit (fuel units per step), keyed by unit name; `None` without primary energy. Written to `primary_energy/fuel_for_power/` |
+| `technology_selling_prices` | `Optional[dict]` | `{dataset_name: dict}` | Selling-price data per generator, keyed by its HDF5 dataset name (`/` replaced, homonyms suffixed ` (1)`, ` (2)`, ...): `prices_weights`, `total_generation`, `total_revenue`, `average_selling_price`, `technology_type` |
+
+Formulas: [Results Export § Derived Metrics](../user-guide/results-export.md#derived-metrics).
+
+### Primary Energy and N-1 Security
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `primary_energy` | `Optional[dict]` | Primary energy results merged over windows (committed steps only, per period of `primary_energy_resolution` hours from the start of the year): `{section: {fuel: array}}` plus cost totals (summed over each window's committed steps) and `fuel_for_power` |
+| `n1_gen_reserve_duals` | `Optional[np.ndarray]` | `(hour,)` dual of the generation N-1 constraint |
+| `n1_trans_reserve_duals` | `Optional[dict]` | Duals of the transmission N-1 constraints |
+| `n1_binding_contingencies` | `Optional[list]` | Binding contingency IDs |
+| `n1_security_cost` | `float` | Cost of N-1 security ($): objective with N-1 minus objective without it, both over each window's committed (kept) steps, summed over the year; `0.0` unless `n1_security.compute_security_cost` is on |
 
 ### System-Level Scalars
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `emissions` | `float` | `0.0` | Total CO2 emissions (tonnes) |
+| `emissions` | `float` | `0.0` | Total CO2 emissions (tonnes; step rates × `resolution_hours`) |
 | `re_penetration` | `float` | `0.0` | Renewable energy penetration fraction |
 | `load_shed` | `float` | `0.0` | Total unserved energy (MWh) |
 | `total_generation` | `float` | `0.0` | Total energy generated (MWh) |
@@ -294,13 +342,13 @@ class YearResults:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `cost_breakdown` | `Optional[dict]` | `None` | Per-component decomposition of the annual system cost (fuel, O&M, CO2, investment, penalties, etc.). Contains 27 cost component keys plus `total`. See [HDF5 Output Schema — cost_breakdown](../reference/hdf5-output-schema.md#cost_breakdown) for the full list of fields. `None` when cost decomposition is not available. |
+| `cost_breakdown` | `Optional[dict]` | `None` | Per-component decomposition of the annual system cost (fuel, O&M, CO2, investment, penalties, etc.). Contains the cost components plus `total` (their sum; `pe_electrolyzer_cost`, `v2g_compensation` and `operating_budget_excess` are reporting entries outside it). See [HDF5 Output Schema — cost_breakdown](../reference/hdf5-output-schema.md#cost_breakdown) for the full list of fields. `None` when cost decomposition is not available. |
 
 ### Reservoir Hydroelectric
 
 | Field | Type | Shape | Description |
 |-------|------|-------|-------------|
-| `reservoir_level` | `Optional[np.ndarray]` | `(gen, node, hour)` | Reservoir storage level (MWh) |
+| `reservoir_level` | `Optional[np.ndarray]` | `(gen, node, hour)` | Reservoir storage level at the start of each hour (MWh) |
 | `reservoir_spillage` | `Optional[np.ndarray]` | `(gen, node, hour)` | Reservoir spillage (MW) |
 | `reservoir_pump` | `Optional[np.ndarray]` | `(gen, node, hour)` | Pump-storage pumping (MW) |
 | `reservoir_invest_capacity` | `Optional[np.ndarray]` | `(gen, node)` | Reservoir capacity investment (MWh) |

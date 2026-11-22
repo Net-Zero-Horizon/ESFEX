@@ -124,15 +124,17 @@ class SolarPVConfigStep(QWidget):
 
         filter_row1.addWidget(QLabel(tr("wizard_solar_pv.manufacturer")))
         self._combo_manufacturer = QComboBox()
-        self._combo_manufacturer.addItem("All")
+        self._combo_manufacturer.addItem(tr("wizard_solar_pv.all_items"), "")
         self._combo_manufacturer.currentIndexChanged.connect(self._apply_filter)
         filter_row1.addWidget(self._combo_manufacturer)
 
         filter_row1.addWidget(QLabel(tr("wizard_solar_pv.technology")))
         self._combo_technology = QComboBox()
-        self._combo_technology.addItems([
-            "All", "Mono-c-Si", "Multi-c-Si", "CdTe", "CIGS", "a-Si", "Thin Film",
-        ])
+        # Item data is the technology name used by the CEC module database.
+        self._combo_technology.addItem(tr("wizard_solar_pv.all_items"), "")
+        for _tech in ("Mono-c-Si", "Multi-c-Si", "CdTe", "CIGS", "a-Si"):
+            self._combo_technology.addItem(_tech, _tech)
+        self._combo_technology.addItem(tr("wizard_solar_pv.tech_thin_film"), "Thin Film")
         self._combo_technology.currentIndexChanged.connect(self._apply_filter)
         filter_row1.addWidget(self._combo_technology)
 
@@ -168,8 +170,10 @@ class SolarPVConfigStep(QWidget):
         # Module table
         self._mod_table = QTableWidget(0, 7)
         self._mod_table.setHorizontalHeaderLabels([
-            "Manufacturer", "Model", "Technology",
-            "STC (W)", "Eff (%)", "Area (m\u00b2)", "Bifacial",
+            tr("wizard_solar_pv.col_manufacturer"), tr("wizard_solar_pv.col_model"),
+            tr("wizard_solar_pv.col_technology"), tr("wizard_solar_pv.col_stc"),
+            tr("wizard_solar_pv.col_eff"), tr("wizard_solar_pv.col_area"),
+            tr("wizard_solar_pv.col_bifacial"),
         ])
         header = self._mod_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -192,9 +196,7 @@ class SolarPVConfigStep(QWidget):
         mod_lay.addWidget(self._mod_table)
 
         # Module details panel
-        self._details_label = QLabel(
-            "<i>Select a module from the table above to see its details.</i>"
-        )
+        self._details_label = QLabel(tr("wizard_solar_pv.select_module"))
         self._details_label.setWordWrap(True)
         self._details_label.setStyleSheet(
             "background-color: #2c2c2c; color: #e0e0e0; "
@@ -273,17 +275,13 @@ class SolarPVConfigStep(QWidget):
             tr("wizard_common.ds_nasa_power"),
             tr("wizard_common.ds_era5_atlite"),
         ])
-        self._combo_data_source.setToolTip(
-            "Open-Meteo: Fast download, same ERA5 data\n"
-            "NASA POWER: Fast download, MERRA-2 reanalysis\n"
-            "ERA5 via atlite: Slow (hours), requires CDS API key"
-        )
+        self._combo_data_source.setToolTip(tr("wizard_solar_pv.data_source_tip"))
         analysis_form.addRow(tr("wizard_common.data_source"), self._combo_data_source)
 
         self._spin_workers = QSpinBox()
         self._spin_workers.setRange(0, 64)
         self._spin_workers.setValue(0)
-        self._spin_workers.setSpecialValueText("Auto")
+        self._spin_workers.setSpecialValueText(tr("wizard_solar_pv.workers_auto"))
         self._spin_workers.setToolTip(tr("wizard_solar_pv.workers_tip"))
         analysis_form.addRow(tr("wizard_solar_pv.parallel_workers"), self._spin_workers)
 
@@ -336,8 +334,7 @@ class SolarPVConfigStep(QWidget):
         QMessageBox.warning(
             self,
             tr("wizard_solar_pv.module_db_title"),
-            f"Could not load CEC module database:\n{msg}\n\n"
-            "Make sure pvlib is installed: pip install pvlib",
+            tr("wizard_solar_pv.module_db_msg", e=msg),
         )
 
     def _populate_manufacturers(self):
@@ -345,13 +342,13 @@ class SolarPVConfigStep(QWidget):
         manufacturers = sorted(
             {m.manufacturer for m in self._modules if m.manufacturer},
         )
-        current = self._combo_manufacturer.currentText()
+        current = self._combo_manufacturer.currentData()
         self._combo_manufacturer.blockSignals(True)
         self._combo_manufacturer.clear()
-        self._combo_manufacturer.addItem("All")
+        self._combo_manufacturer.addItem(tr("wizard_solar_pv.all_items"), "")
         for m in manufacturers:
-            self._combo_manufacturer.addItem(m)
-        idx = self._combo_manufacturer.findText(current)
+            self._combo_manufacturer.addItem(m, m)
+        idx = self._combo_manufacturer.findData(current)
         if idx >= 0:
             self._combo_manufacturer.setCurrentIndex(idx)
         self._combo_manufacturer.blockSignals(False)
@@ -362,16 +359,16 @@ class SolarPVConfigStep(QWidget):
 
     def _apply_filter(self):
         """Filter module table based on manufacturer, technology, power, bifacial."""
-        mfr = self._combo_manufacturer.currentText()
-        tech = self._combo_technology.currentText()
+        mfr = self._combo_manufacturer.currentData() or ""
+        tech = self._combo_technology.currentData() or ""
         min_w = self._spin_min_power.value()
         max_w = self._spin_max_power.value()
         bifacial_only = self._chk_bifacial.isChecked()
 
         self._filtered_modules = [
             m for m in self._modules
-            if (mfr == "All" or m.manufacturer == mfr)
-            and (tech == "All" or m.technology == tech)
+            if (not mfr or m.manufacturer == mfr)
+            and (not tech or m.technology == tech)
             and min_w <= m.stc_power_w <= max_w
             and (not bifacial_only or m.bifacial)
         ]
@@ -405,8 +402,7 @@ class SolarPVConfigStep(QWidget):
         shown = len(display)
         if total > shown:
             self._details_label.setText(
-                f"<i>Showing {shown} of {total} matching modules. "
-                f"Refine filters to narrow results.</i>"
+                tr("wizard_solar_pv.showing_modules", shown=shown, total=total)
             )
         elif display:
             self._mod_table.selectRow(0)
@@ -420,9 +416,7 @@ class SolarPVConfigStep(QWidget):
     ):
         if row < 0 or row >= len(self._filtered_modules):
             self._selected_module = None
-            self._details_label.setText(
-                "<i>Select a module from the table above.</i>"
-            )
+            self._details_label.setText(tr("wizard_solar_pv.select_module_short"))
             return
 
         m = self._filtered_modules[row]
@@ -431,26 +425,28 @@ class SolarPVConfigStep(QWidget):
         # Build details text
         lines = [
             f"<b>{m.manufacturer} {m.name}</b>",
-            f"Rated power: <b>{m.stc_power_w:.0f} W</b> STC"
-            + (f" / {m.ptc_power_w:.0f} W PTC" if m.ptc_power_w > 0 else ""),
-            f"Technology: <b>{m.technology}</b>"
-            + (f" | Bifacial: <b>Yes</b>" if m.bifacial else " | Bifacial: No"),
+            (tr("wizard_solar_pv.detail_rated_stc_ptc",
+                stc=f"{m.stc_power_w:.0f}", ptc=f"{m.ptc_power_w:.0f}")
+             if m.ptc_power_w > 0 else
+             tr("wizard_solar_pv.detail_rated_stc", stc=f"{m.stc_power_w:.0f}")),
+            tr("wizard_solar_pv.detail_tech_bifacial" if m.bifacial
+               else "wizard_solar_pv.detail_tech_monofacial", tech=m.technology),
         ]
 
         if m.area_m2 > 0:
-            lines.append(
-                f"Area: <b>{m.area_m2:.2f} m\u00b2</b> | "
-                f"Efficiency: <b>{m.efficiency*100:.1f}%</b>"
-            )
+            lines.append(tr(
+                "wizard_solar_pv.detail_area_eff",
+                area=f"{m.area_m2:.2f}", eff=f"{m.efficiency*100:.1f}",
+            ))
 
         if m.length_m > 0 and m.width_m > 0:
-            lines.append(
-                f"Dimensions: {m.length_m:.2f}m \u00d7 {m.width_m:.2f}m | "
-                f"{m.n_cells} cells"
-            )
+            lines.append(tr(
+                "wizard_solar_pv.detail_dimensions",
+                length=f"{m.length_m:.2f}", width=f"{m.width_m:.2f}", cells=m.n_cells,
+            ))
 
         lines.append("")
-        lines.append("<b>Electrical at STC:</b>")
+        lines.append(tr("wizard_solar_pv.detail_electrical"))
         lines.append(
             f"  Voc: {m.v_oc:.1f} V | Vmp: {m.v_mp:.1f} V"
         )
@@ -459,10 +455,11 @@ class SolarPVConfigStep(QWidget):
         )
 
         lines.append("")
-        lines.append("<b>Temperature coefficients:</b>")
-        lines.append(
-            f"  Power: {m.gamma_pmax:.2f} %/\u00b0C | NOCT: {m.t_noct:.0f} \u00b0C"
-        )
+        lines.append(tr("wizard_solar_pv.detail_temp_coeffs"))
+        lines.append(tr(
+            "wizard_solar_pv.detail_temp_power",
+            gamma=f"{m.gamma_pmax:.2f}", noct=f"{m.t_noct:.0f}",
+        ))
 
         self._details_label.setText("<br>".join(lines))
 
@@ -531,25 +528,27 @@ class SolarPVConfigStep(QWidget):
 # Step 3: MCDA Criteria Configuration
 # =====================================================================
 
+# (criterion, translation key of its label, direction, default weight)
 _CRITERIA_DEFS = [
-    ("capacity_factor", "Solar Capacity Factor", "maximize", 0.40),
-    ("slope", "Terrain Slope", "minimize", 0.20),
-    ("elevation", "Elevation", "minimize", 0.05),
-    ("lulc_score", "LULC Suitability", "maximize", 0.20),
-    ("dist_grid_km", "Distance to Grid", "minimize", 0.15),
+    ("capacity_factor", "wizard_solar_pv.crit_capacity_factor", "maximize", 0.40),
+    ("slope", "wizard_solar_pv.crit_slope", "minimize", 0.20),
+    ("elevation", "wizard_solar_pv.crit_elevation", "minimize", 0.05),
+    ("lulc_score", "wizard_solar_pv.crit_lulc", "maximize", 0.20),
+    ("dist_grid_km", "wizard_solar_pv.crit_dist_grid", "minimize", 0.15),
 ]
 
+# ESA WorldCover class code -> translation key of its name
 _LULC_CLASS_NAMES = {
-    10: "Tree cover",
-    20: "Shrubland",
-    30: "Grassland",
-    40: "Cropland",
-    50: "Built-up",
-    60: "Bare / sparse veg.",
-    70: "Snow and ice",
-    80: "Water bodies",
-    90: "Herbaceous wetland",
-    95: "Mangroves",
+    10: "wizard_solar_pv.lulc_tree_cover",
+    20: "wizard_solar_pv.lulc_shrubland",
+    30: "wizard_solar_pv.lulc_grassland",
+    40: "wizard_solar_pv.lulc_cropland",
+    50: "wizard_solar_pv.lulc_built_up",
+    60: "wizard_solar_pv.lulc_bare",
+    70: "wizard_solar_pv.lulc_snow_ice",
+    80: "wizard_solar_pv.lulc_water",
+    90: "wizard_solar_pv.lulc_wetland",
+    95: "wizard_solar_pv.lulc_mangroves",
 }
 
 
@@ -579,10 +578,7 @@ class SolarPVCriteriaStep(QWidget):
             tr("wizard_solar_pv.weighting_method"), self._combo_method
         )
 
-        self._method_info = QLabel(
-            "Manually assign weights to each criterion. "
-            "Weights will be normalized to sum to 1."
-        )
+        self._method_info = QLabel(tr("wizard_solar_pv.method_manual_desc"))
         self._method_info.setWordWrap(True)
         self._method_info.setStyleSheet("color: #888; font-style: italic;")
         method_form.addRow(self._method_info)
@@ -595,7 +591,8 @@ class SolarPVCriteriaStep(QWidget):
 
         self._criteria_table = QTableWidget(len(_CRITERIA_DEFS), 4)
         self._criteria_table.setHorizontalHeaderLabels([
-            "Enabled", "Criterion", "Direction", "Weight",
+            tr("wizard_solar_pv.col_enabled"), tr("wizard_solar_pv.col_criterion"),
+            tr("wizard_solar_pv.col_direction"), tr("wizard_solar_pv.col_weight"),
         ])
         crit_header = self._criteria_table.horizontalHeader()
         crit_header.setSectionResizeMode(
@@ -616,11 +613,11 @@ class SolarPVCriteriaStep(QWidget):
             chk.setChecked(True)
             self._criteria_table.setCellWidget(row, 0, chk)
 
-            item = QTableWidgetItem(label)
+            item = QTableWidgetItem(tr(label))
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._criteria_table.setItem(row, 1, item)
 
-            item_dir = QTableWidgetItem(direction.capitalize())
+            item_dir = QTableWidgetItem(tr(f"wizard_solar_pv.dir_{direction}"))
             item_dir.setFlags(item_dir.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._criteria_table.setItem(row, 2, item_dir)
 
@@ -644,7 +641,8 @@ class SolarPVCriteriaStep(QWidget):
 
         self._lulc_table = QTableWidget(len(_LULC_CLASS_NAMES), 3)
         self._lulc_table.setHorizontalHeaderLabels([
-            "Code", "Land Cover Class", "Suitability (0-1)",
+            tr("wizard_solar_pv.col_code"), tr("wizard_solar_pv.col_land_cover"),
+            tr("wizard_solar_pv.col_suitability"),
         ])
         lulc_header = self._lulc_table.horizontalHeader()
         lulc_header.setSectionResizeMode(
@@ -660,7 +658,7 @@ class SolarPVCriteriaStep(QWidget):
             code_item.setFlags(code_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._lulc_table.setItem(row, 0, code_item)
 
-            name_item = QTableWidgetItem(name)
+            name_item = QTableWidgetItem(tr(name))
             name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self._lulc_table.setItem(row, 1, name_item)
 
@@ -679,12 +677,9 @@ class SolarPVCriteriaStep(QWidget):
 
     def _on_method_changed(self, index: int):
         descriptions = [
-            "Manually assign weights to each criterion. "
-            "Weights will be normalized to sum to 1.",
-            "Weights computed automatically from data using Shannon entropy. "
-            "Criteria with more variation get higher weights.",
-            "Weights derived from first principal component loadings. "
-            "Criteria that explain most variance get higher weights.",
+            tr("wizard_solar_pv.method_manual_desc"),
+            tr("wizard_solar_pv.method_entropy_desc"),
+            tr("wizard_solar_pv.method_pca_desc"),
         ]
         self._method_info.setText(descriptions[index])
 
@@ -811,31 +806,53 @@ class SolarPVAnalysisStep(QWidget):
             name for name, c in mcda_config.criteria.items() if c.enabled
         ]
 
-        orient_desc = solar_config.orientation
-        if orient_desc == "custom":
-            orient_desc = (
-                f"tilt={solar_config.tilt}\u00b0, "
-                f"azimuth={solar_config.azimuth}\u00b0"
+        if solar_config.orientation == "custom":
+            orient_desc = tr(
+                "wizard_solar_pv.orient_custom_desc",
+                tilt=solar_config.tilt, azimuth=solar_config.azimuth,
             )
+        elif solar_config.orientation == "latitude_optimal":
+            orient_desc = tr("wizard_solar_pv.orient_latitude")
+        else:
+            orient_desc = solar_config.orientation
 
         ds_labels = {
             "open_meteo": "Open-Meteo (ERA5)",
             "nasa_power": "NASA POWER (MERRA-2)",
-            "era5_atlite": "ERA5 via atlite",
+            "era5_atlite": tr("wizard_solar_pv.ds_era5_atlite_short"),
         }
-        self._summary_label.setText(
-            f"<b>Domain:</b> ({s:.4f}, {w:.4f}) to ({n:.4f}, {e:.4f})<br>"
-            f"<b>Module:</b> {solar_config.module_key.split('__')[-1].replace('_', ' ') if solar_config.module_key else 'N/A'} | "
-            f"<b>Efficiency:</b> {solar_config.module_efficiency*100:.1f}%<br>"
-            f"<b>Orientation:</b> {orient_desc} | "
-            f"<b>Tracking:</b> {solar_config.tracking}<br>"
-            f"<b>Year:</b> {solar_config.year} | "
-            f"<b>Grid:</b> {solar_config.grid_resolution}\u00b0 | "
-            f"<b>Type:</b> {solar_config.installation}<br>"
-            f"<b>Data Source:</b> {ds_labels.get(solar_config.data_source, solar_config.data_source)}<br>"
-            f"<b>MCDA Method:</b> {mcda_config.method} | "
-            f"<b>Criteria:</b> {', '.join(enabled_criteria)}"
+        tracking_labels = {
+            "none": tr("wizard_solar_pv.tracking_none"),
+            "horizontal": tr("wizard_solar_pv.tracking_h1"),
+            "vertical": tr("wizard_solar_pv.tracking_v1"),
+            "dual": tr("wizard_solar_pv.tracking_dual"),
+        }
+        install_labels = {
+            "ground": tr("wizard_solar_pv.install_ground"),
+            "floating": tr("wizard_solar_pv.install_floating"),
+        }
+        method_labels = {
+            "manual": tr("wizard_solar_pv.method_manual"),
+            "entropy": tr("wizard_solar_pv.method_entropy"),
+            "pca": tr("wizard_solar_pv.method_pca"),
+        }
+        module_name = (
+            solar_config.module_key.split("__")[-1].replace("_", " ")
+            if solar_config.module_key else tr("wizard_solar_pv.not_available")
         )
+        self._summary_label.setText(tr(
+            "wizard_solar_pv.run_summary",
+            south=f"{s:.4f}", west=f"{w:.4f}", north=f"{n:.4f}", east=f"{e:.4f}",
+            module=module_name,
+            eff=f"{solar_config.module_efficiency*100:.1f}",
+            orientation=orient_desc,
+            tracking=tracking_labels.get(solar_config.tracking, solar_config.tracking),
+            year=solar_config.year, grid=solar_config.grid_resolution,
+            type=install_labels.get(solar_config.installation, solar_config.installation),
+            source=ds_labels.get(solar_config.data_source, solar_config.data_source),
+            method=method_labels.get(mcda_config.method, mcda_config.method),
+            criteria=", ".join(enabled_criteria),
+        ))
         self._btn_run.setEnabled(True)
         self._summary = None
 
@@ -868,14 +885,7 @@ class SolarPVAnalysisStep(QWidget):
                 QMessageBox.critical(
                     self,
                     tr("wizard_solar_pv.cds_api_title"),
-                    "ERA5 irradiance data download requires a Copernicus Climate "
-                    "Data Store account.\n\n"
-                    "1. Register at: https://cds.climate.copernicus.eu/\n"
-                    "2. Go to your profile page and copy your API key\n"
-                    "3. Create the file ~/.cdsapirc with:\n\n"
-                    "   url: https://cds.climate.copernicus.eu/api\n"
-                    "   key: YOUR_UID:YOUR_API_KEY\n\n"
-                    "Then retry the analysis.",
+                    tr("wizard_solar_pv.cds_api_msg"),
                 )
                 return
 
@@ -915,17 +925,16 @@ class SolarPVAnalysisStep(QWidget):
         self._summary = summary
         self._progress.setValue(100)
         self._btn_cancel.setEnabled(False)
-        self._log.append(
-            f"\nAnalysis complete!\n"
-            f"Total grid cells: {summary.total_cells}\n"
-            f"Feasible cells: {summary.feasible_cells}\n"
-            f"CF range: {summary.cf_min:.3f} \u2013 {summary.cf_max:.3f}\n"
-            f"Avg GHI: {summary.ghi_avg:.0f} kWh/m\u00b2/yr\n"
-            f"MCDA score range: {summary.mcda_score_min:.3f} \u2013 "
-            f"{summary.mcda_score_max:.3f}"
-        )
+        self._log.append(tr(
+            "wizard_solar_pv.analysis_complete",
+            total=summary.total_cells, feasible=summary.feasible_cells,
+            cf_min=f"{summary.cf_min:.3f}", cf_max=f"{summary.cf_max:.3f}",
+            ghi=f"{summary.ghi_avg:.0f}",
+            mcda_min=f"{summary.mcda_score_min:.3f}",
+            mcda_max=f"{summary.mcda_score_max:.3f}",
+        ))
         if summary.computed_weights:
-            self._log.append("\nComputed weights:")
+            self._log.append(tr("wizard_solar_pv.computed_weights"))
             for name, w in summary.computed_weights.items():
                 self._log.append(f"  {name}: {w:.3f}")
         self.analysisFinished.emit()
@@ -934,7 +943,7 @@ class SolarPVAnalysisStep(QWidget):
         self._progress.setValue(0)
         self._btn_run.setEnabled(True)
         self._btn_cancel.setEnabled(False)
-        self._log.append(f"ERROR: {msg}")
+        self._log.append(tr("wizard_solar_pv.analysis_error", msg=msg))
         QMessageBox.critical(
             self, tr("wizard_solar_pv.analysis_error_title"), msg
         )
@@ -1079,7 +1088,7 @@ class SolarPVResultsStep(QWidget):
                 f"{summary.cf_max:.3f} ({summary.cf_max*100:.1f}%)"
             )
             self._lbl_ghi.setText(
-                f"{summary.ghi_avg:.0f} kWh/m\u00b2/yr"
+                tr("wizard_solar_pv.ghi_value", v=f"{summary.ghi_avg:.0f}")
             )
             self._lbl_mcda_range.setText(
                 f"{summary.mcda_score_min:.3f} \u2013 "
@@ -1093,7 +1102,7 @@ class SolarPVResultsStep(QWidget):
                 self._lbl_cf_min, self._lbl_cf_avg, self._lbl_cf_max,
                 self._lbl_ghi, self._lbl_mcda_range, self._lbl_capacity,
             ):
-                lbl.setText("N/A")
+                lbl.setText(tr("wizard_solar_pv.not_available"))
 
         # Show computed weights
         if summary.computed_weights:
@@ -1143,9 +1152,7 @@ class SolarPVResultsStep(QWidget):
             gdf["capacity_factor"] >= self._solar_config.min_capacity_factor
         ]
         if feasible.empty:
-            self._zones_info.setText(
-                "No feasible sites for zone generation."
-            )
+            self._zones_info.setText(tr("wizard_solar_pv.no_feasible_msg"))
             return
 
         min_mcda = float(feasible["mcda_score"].quantile(0.5))
@@ -1160,26 +1167,20 @@ class SolarPVResultsStep(QWidget):
         )
 
         if self._zones_gdf.empty:
-            self._zones_info.setText(
-                "No development zones generated.\n"
-                "Try lowering the capacity factor threshold."
-            )
+            self._zones_info.setText(tr("wizard_solar_pv.no_zones_msg"))
             self._btn_export_zones.setEnabled(False)
             return
 
         # Display zone info
-        lines = [
-            f"Generated {len(self._zones_gdf)} development zone(s):\n"
-        ]
+        lines = [tr("wizard_solar_pv.zones_generated", n=len(self._zones_gdf))]
         for _, zone in self._zones_gdf.iterrows():
-            lines.append(
-                f"  {zone['zone_id']}: "
-                f"{zone['area_km2']:.1f} km\u00b2, "
-                f"{zone['num_sites']} sites, "
-                f"avg CF {zone['avg_cf']:.3f}, "
-                f"avg MCDA {zone['avg_mcda']:.3f}, "
-                f"{zone['total_capacity_mw']:.1f} MW"
-            )
+            lines.append(tr(
+                "wizard_solar_pv.zone_detail",
+                id=zone["zone_id"], area=f"{zone['area_km2']:.1f}",
+                sites=zone["num_sites"], cf=f"{zone['avg_cf']:.3f}",
+                mcda=f"{zone['avg_mcda']:.3f}",
+                capacity=f"{zone['total_capacity_mw']:.1f}",
+            ))
         self._zones_info.setText("\n".join(lines))
 
         self._btn_export_zones.setEnabled(True)
@@ -1238,18 +1239,17 @@ class SolarPVResultsStep(QWidget):
                 added += 1
             except Exception as exc:
                 self._zones_info.append(
-                    f"Error adding {zone_id}: {exc}"
+                    tr("wizard_solar_pv.zone_add_error", zone=zone_id, e=exc)
                 )
 
         # Clear temporary overlay since real zones are now in the model
         self._map_widget.clear_solar_pv_dev_zones()
 
         if added > 0:
-            self._zones_info.append(
-                f"\n{added} solar PV development zone(s) added to the system."
-            )
+            self._zones_info.append(tr("wizard_solar_pv.zones_added", n=added))
             self._btn_gen_zones.setEnabled(False)
-            self._btn_gen_zones.setText(f"{added} zone(s) added")
+            self._btn_gen_zones.setText(
+                tr("wizard_solar_pv.zones_added_short", n=added))
 
     def _export_csv(self):
         if self._summary is None or self._summary.results_gdf is None:
@@ -1258,7 +1258,7 @@ class SolarPVResultsStep(QWidget):
             self,
             tr("wizard_solar_pv.export_solar_title"),
             "solar_pv_results.csv",
-            "CSV Files (*.csv)",
+            tr("wizard_solar_pv.csv_files_filter"),
         )
         if path:
             df = self._summary.results_gdf.drop(
@@ -1266,7 +1266,8 @@ class SolarPVResultsStep(QWidget):
             ).copy()
             df.to_csv(path, index=False)
             QMessageBox.information(
-                self, "Exported", f"Results exported to:\n{path}"
+                self, tr("wizard_solar_pv.export_title"),
+                tr("wizard_solar_pv.export_msg", path=path),
             )
 
     def _export_zones_geojson(self):
@@ -1276,12 +1277,13 @@ class SolarPVResultsStep(QWidget):
             self,
             tr("wizard_solar_pv.export_dev_zones_title"),
             "solar_pv_dev_zones.geojson",
-            "GeoJSON Files (*.geojson)",
+            tr("wizard_solar_pv.geojson_files_filter"),
         )
         if path:
             self._zones_gdf.to_file(path, driver="GeoJSON")
             QMessageBox.information(
-                self, "Exported", f"Development zones exported to:\n{path}"
+                self, tr("wizard_solar_pv.export_title"),
+                tr("wizard_solar_pv.export_zones_msg", path=path),
             )
 
     def is_valid(self) -> bool:

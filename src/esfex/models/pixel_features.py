@@ -18,7 +18,7 @@ Outputs from build_features_for_point():
       log_pop_density: float,   # ln(pop_density_pixel) [hab/km²]
       urbanization: float,      # GHSL SMOD class (10-30), continuous
       latitude, longitude: float,
-      temperature: np.ndarray,  # 8760 hourly values [°C]
+      temperature: np.ndarray,  # 8760 hourly values [°C], local civil time
       hdd: np.ndarray,          # 8760 values
       cdd: np.ndarray,          # 8760 values
       missing: list[str],
@@ -66,9 +66,10 @@ def _sample_point(ds, lat: float, lon: float) -> Optional[float]:
 
 
 def sample_gdp_total(lat: float, lon: float, year: int) -> Optional[float]:
+    from esfex.data_assets import ensure
     for yr_try in [year, year - 1, year + 1, year - 2, year + 2]:
         path = GDP_DIR / f"GDP{yr_try}.tif"
-        if path.exists():
+        if ensure(path):
             ds = _open_raster(str(path))
             val = _sample_point(ds, lat, lon)
             if val is not None and val > 0:
@@ -82,13 +83,27 @@ def sample_pop_density(lat: float, lon: float, year: int) -> Optional[float]:
             continue
         for epoch in [2000, 2005, 2010, 2015, 2020]:
             if abs(epoch - yr_try) <= 2:
-                path = POP_DENSITY_HIST_DIR / f"gpw_v4_population_density_rev11_{epoch}_30_sec_{epoch}.tif"
-                if path.exists():
+                path = _gpw_path(epoch, lat, lon)
+                if path is not None:
                     ds = _open_raster(str(path))
                     val = _sample_point(ds, lat, lon)
                     if val is not None and val > 0:
                         return val
     return None
+
+
+def _gpw_path(epoch: int, lat: float, lon: float):
+    """GPW v4 density raster holding (lat, lon) for ``epoch``: the global
+    file of a local dataset when there is one, else its 30° tile, downloaded
+    on first use (see esfex.data_assets). None when neither is available
+    (no tile is published for open ocean)."""
+    from esfex.data_assets import ensure, gpw_tile_name
+    full = POP_DENSITY_HIST_DIR / f"gpw_v4_population_density_rev11_{epoch}_30_sec_{epoch}.tif"
+    if full.exists():
+        return full
+    name = gpw_tile_name(epoch, lat, lon)
+    tile = POP_DENSITY_HIST_DIR / "tiles" / name
+    return tile if ensure(tile) else None
 
 
 def sample_ghsl_smod(lat: float, lon: float, year: int) -> Optional[float]:
@@ -110,22 +125,14 @@ def load_temperature(
     iso3: str, lat: float, lon: float, year: int,
     zone: Optional[str] = None,
 ) -> Optional[np.ndarray]:
-    """Load ERA5 hourly temperature for a country-year.
+    """ERA5 hourly temperature of a country-year (or zone-year), 8760 h on
+    the local civil time of (*lat*, *lon*) like its demand.
 
-    If ``zone`` is given, look up ``era5_{zone}_{year}.npy`` first and
-    fall back to the national file. This allows zonal training samples
-    to carry temperature at the zone centroid, while keeping backwards
-    compatibility for country-level entries.
+    The series' parquet (``{ISO3}_{year}.parquet`` or
+    ``{ISO3}_{zone}_{year}.parquet``) holds it already on that clock. Without
+    one, the UTC ERA5 cache (``era5_utc_{zone}_{year}.npy``, then
+    ``era5_utc_{year}.npy``) is put on the local time of (*lat*, *lon*).
     """
-    candidates = []
-    if zone:
-        candidates.append(ERA5_CACHE / iso3 / f"era5_{zone}_{year}.npy")
-    candidates.append(ERA5_CACHE / iso3 / f"era5_{year}.npy")
-    for era5 in candidates:
-        if era5.exists():
-            arr = np.load(era5)
-            if len(arr) >= 8760:
-                return arr[:8760].astype(np.float64)
     pq_name = (f"{iso3}_{zone}_{year}.parquet" if zone
                else f"{iso3}_{year}.parquet")
     pq = DEMAND_DATASET_DIR / iso3 / pq_name
@@ -136,7 +143,59 @@ def load_temperature(
             t = df['temperature_c'].values.astype(np.float64)
             if not np.isnan(t).all():
                 return t[:8760]
+    candidates = []
+    if zone:
+        candidates.append(ERA5_CACHE / iso3 / f"era5_utc_{zone}_{year}.npy")
+    candidates.append(ERA5_CACHE / iso3 / f"era5_utc_{year}.npy")
+    for era5 in candidates:
+        if era5.exists():
+            from esfex.models.demand_real_data import series_time_zone
+            from esfex.utils.model_clock import utc_year_on_local_time
+            try:
+                return utc_year_on_local_time(
+                    np.load(era5), series_time_zone(lat, lon), year)
+            except ValueError:
+                continue
     return None
+
+
+def static_features_for_point(
+    lat: float, lon: float, year: int,
+) -> tuple[float, float, float, list[str]]:
+    """The static features at (*lat*, *lon*) for *year*:
+    ``(log_gdp_per_cap, log_pop_density, urbanization, missing)``.
+
+    ``log_gdp_per_cap`` and ``log_pop_density`` are NaN when their raster has
+    no value there; ``urbanization`` is 10 (rural) without the GHSL SMOD
+    raster. ``missing`` names what could not be sampled. The training dataset
+    and the inference of the national shape model (``demand_ml``) both use it.
+    """
+    missing: list[str] = []
+
+    gdp_total = sample_gdp_total(lat, lon, year)
+    pop_dens = sample_pop_density(lat, lon, year)
+    if gdp_total is None:
+        missing.append('gdp_total')
+    if pop_dens is None:
+        missing.append('pop_density')
+
+    if gdp_total is not None and pop_dens is not None and pop_dens > 0.1:
+        pixel_km2 = (0.25 ** 2) * np.cos(np.radians(lat)) * 111.0 ** 2
+        pop_count = pop_dens * pixel_km2
+        log_gdp = float(np.log(max(gdp_total / pop_count, 1.0))) if pop_count > 1 else np.nan
+        if np.isnan(log_gdp):
+            missing.append('gdp_per_cap_division')
+    else:
+        log_gdp = np.nan
+
+    log_pop_density = float(np.log(max(pop_dens, 0.01))) if pop_dens is not None else np.nan
+
+    urbanization = sample_ghsl_smod(lat, lon, year)
+    if urbanization is None:
+        urbanization = 10.0
+        missing.append('urbanization')
+
+    return log_gdp, log_pop_density, urbanization, missing
 
 
 @dataclass
@@ -175,30 +234,8 @@ def build_features_for_point(
         effect on static raster sampling — the lat/lon already encode the
         zone's geographic location.
     """
-    missing: list[str] = []
-
-    gdp_total = sample_gdp_total(lat, lon, year)
-    pop_dens = sample_pop_density(lat, lon, year)
-    if gdp_total is None:
-        missing.append('gdp_total')
-    if pop_dens is None:
-        missing.append('pop_density')
-
-    if gdp_total is not None and pop_dens is not None and pop_dens > 0.1:
-        pixel_km2 = (0.25 ** 2) * np.cos(np.radians(lat)) * 111.0 ** 2
-        pop_count = pop_dens * pixel_km2
-        log_gdp = float(np.log(max(gdp_total / pop_count, 1.0))) if pop_count > 1 else np.nan
-        if np.isnan(log_gdp):
-            missing.append('gdp_per_cap_division')
-    else:
-        log_gdp = np.nan
-
-    log_pop_density = float(np.log(max(pop_dens, 0.01))) if pop_dens is not None else np.nan
-
-    urbanization = sample_ghsl_smod(lat, lon, year)
-    if urbanization is None:
-        urbanization = 10.0
-        missing.append('urbanization')
+    log_gdp, log_pop_density, urbanization, missing = static_features_for_point(
+        lat, lon, year)
 
     temp = load_temperature(iso3, lat, lon, year, zone=zone)
     if temp is None:

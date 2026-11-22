@@ -50,6 +50,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from esfex.visualization.i18n import tr
+from esfex.visualization.workflows.risk_charts import (
+    component_label,
+    damage_state_label,
+    hazard_label,
+)
+
 if TYPE_CHECKING:
     from esfex.visualization.workflows.risk_wizard import RiskWorkbenchState
 
@@ -118,6 +125,57 @@ _HAZARD_TYPES = [
 
 # Default return period options
 _RETURN_PERIODS = [50, 100, 250, 475, 500, 1000, 2500]
+
+
+def _node_label(idx) -> str:
+    return tr("risk_panels.node_n", n=idx)
+
+
+def _hazard_unit_label(hazard_type: str, unit: str) -> str:
+    """Heatmap column label: hazard name with its IM unit."""
+    return tr("risk_panels.hazard_with_unit", hazard=hazard_label(hazard_type),
+              unit=unit)
+
+
+def _colon(name: str) -> str:
+    """Field label for a symbol or acronym (``"LOLP"`` → "LOLP:", French "LOLP :")."""
+    return tr("risk_panels.label_colon", label=name)
+
+
+def _report_line(label: str, value, indent: int = 2, width: int = 22) -> str:
+    """One aligned ``label   value`` line of a plain-text report."""
+    return " " * indent + f"{label:<{width}} {value}"
+
+
+# RiskConfig combination methods and risk measures, in combo order
+_METHODS = ("independent", "copula", "mcda")
+_MEASURES = ("expected", "cvar", "minimax_regret")
+
+
+def _method_label(method: str) -> str:
+    """Display name of a risk.combination_method value."""
+    return {
+        "independent": tr("risk_panels.method_independent"),
+        "copula": tr("risk_panels.method_copula"),
+        "mcda": "MCDA",
+    }.get(method, method)
+
+
+def _measure_label(measure: str) -> str:
+    """Display name of a risk.risk_measure value."""
+    return {
+        "expected": tr("risk_panels.measure_expected"),
+        "cvar": "CVaR",
+        "minimax_regret": tr("risk_panels.measure_minimax_regret"),
+    }.get(measure, measure)
+
+
+# Sensitivity-sweep parameter names (from the risk model) → translation keys
+_SWEEP_PARAM_KEYS = {
+    "Fragility \u03b2 (\u00d70.7 \u2013 \u00d71.3)": "risk_panels.sweep_fragility_beta",
+    "Hazard IM (\u00d70.8 \u2013 \u00d71.2)": "risk_panels.sweep_hazard_im",
+    "Combination Method": "risk_panels.sweep_combination_method",
+}
 
 
 # =====================================================================
@@ -212,7 +270,7 @@ class _ScenarioWorker(QThread):
 
 
 # =====================================================================
-# Panel 1: Site & Screening
+# Hazard data panel (once the 'Site & Screening' step)
 # =====================================================================
 
 
@@ -242,15 +300,10 @@ class SiteScreeningPanel(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel(
-            "<h3>Site Overview & Hazard Screening</h3>"
-            "<p>Shows detected system nodes and a categorical hazard screening "
-            "derived from the fetched intensity data. The screening levels "
-            "update automatically when hazard data is fetched.</p>"
-        ))
+        layout.addWidget(QLabel(tr("risk_panels.site_intro")))
 
         # Node list
-        grp_nodes = QGroupBox("Detected Nodes")
+        grp_nodes = QGroupBox(tr("risk_panels.detected_nodes"))
         nl = QVBoxLayout(grp_nodes)
         self._node_list = QListWidget()
         nl.addWidget(self._node_list)
@@ -258,7 +311,7 @@ class SiteScreeningPanel(QWidget):
 
         # Screening controls
         row = QHBoxLayout()
-        self._btn_screen = QPushButton("Run Hazard Screening")
+        self._btn_screen = QPushButton(tr("risk_panels.run_screening"))
         self._btn_screen.setStyleSheet(_action_btn_style())
         self._btn_screen.clicked.connect(self._run_screening)
         row.addWidget(self._btn_screen)
@@ -281,7 +334,8 @@ class SiteScreeningPanel(QWidget):
         if not self._state:
             return
         for i, (lat, lon) in enumerate(self._state.node_coordinates):
-            self._node_list.addItem(f"Node {i}: ({lat:.4f}, {lon:.4f})")
+            self._node_list.addItem(tr(
+                "risk_panels.node_coords", n=i, lat=f"{lat:.4f}", lon=f"{lon:.4f}"))
 
     def _run_screening(self):
         """Derive screening view from existing hazard_maps in shared state.
@@ -291,8 +345,8 @@ class SiteScreeningPanel(QWidget):
         view is always consistent with the data used in risk assessment.
         """
         if not self._state or not self._state.node_coordinates:
-            QMessageBox.warning(self, "No Nodes",
-                                "No node coordinates detected. Load a system first.")
+            QMessageBox.warning(self, tr("risk_panels.no_nodes_title"),
+                                tr("risk_panels.no_nodes_load_system"))
             return
 
         # Use hazard maps already fetched (single source of truth)
@@ -300,11 +354,8 @@ class SiteScreeningPanel(QWidget):
                      if h.hazard_type != "screening"]
         if not real_maps:
             QMessageBox.information(
-                self, "No Hazard Data",
-                "No hazard intensity data available yet.\n\n"
-                "Switch to the Hazard Data tab and click "
-                "'Fetch Selected Hazards' to download data from "
-                "USGS, IBTrACS, NOAA, NASA FIRMS, and other sources.",
+                self, tr("risk_panels.no_hazard_data_title"),
+                tr("risk_panels.no_hazard_data_msg"),
             )
             return
 
@@ -327,7 +378,7 @@ class SiteScreeningPanel(QWidget):
         }
 
         n_nodes = len(self._state.node_coordinates)
-        node_labels = [f"Node {i}" for i in range(n_nodes)]
+        node_labels = [_node_label(i) for i in range(n_nodes)]
 
         hazard_levels: dict[str, list[float]] = {}
         for haz_type in _HAZARD_TYPES:
@@ -335,7 +386,7 @@ class SiteScreeningPanel(QWidget):
                 (h for h in hazard_maps if h.hazard_type == haz_type), None
             )
             unit = _IM_UNITS.get(haz_type, "")
-            label = f"{haz_type.replace('_', ' ').title()} ({unit})"
+            label = _hazard_unit_label(haz_type, unit)
             values = []
             for idx in range(n_nodes):
                 if hmap is None or idx not in hmap.node_intensities:
@@ -347,15 +398,15 @@ class SiteScreeningPanel(QWidget):
 
         self._chart.update_chart(
             node_labels, hazard_levels,
-            title="Hazard Intensity Measures (max return period)",
+            title=tr("risk_panels.him_max_rp"),
             normalize_columns=True,
-            colorbar_label="Relative Intensity (per hazard type)",
+            colorbar_label=tr("risk_panels.relative_intensity_per_type"),
         )
 
     def _on_worker_error(self, msg):
         self._progress.setVisible(False)
         self._btn_screen.setEnabled(True)
-        QMessageBox.critical(self, "Screening Error", msg)
+        QMessageBox.critical(self, tr("risk_panels.screening_error"), msg)
 
 
 # =====================================================================
@@ -382,13 +433,7 @@ class HazardDataPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            "<h3>Hazard Data Manager</h3>"
-            "<p>Fetch and manage hazard intensity data from multiple sources. "
-            "Supports seismic (USGS/GEM), cyclone (IBTrACS/STORM), "
-            "flood (WRI Aqueduct), tsunami (NOAA), wildfire (NASA FIRMS), "
-            "volcanic (Smithsonian GVP), and sea level rise (NASA AR6).</p>"
-        ))
+        layout.addWidget(QLabel(tr("risk_panels.hazard_data_intro")))
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -398,21 +443,21 @@ class HazardDataPanel(QWidget):
         left_lay.setContentsMargins(0, 0, 0, 0)
 
         # Hazard types (multi-select)
-        grp_hazards = QGroupBox("Hazard Types")
+        grp_hazards = QGroupBox(tr("risk_panels.hazard_types"))
         haz_lay = QVBoxLayout(grp_hazards)
         self._hazard_checks: dict[str, QCheckBox] = {}
         for haz in _HAZARD_TYPES:
-            cb = QCheckBox(haz.replace("_", " ").title())
+            cb = QCheckBox(hazard_label(haz))
             cb.setChecked(True)  # All hazards enabled by default
             self._hazard_checks[haz] = cb
             haz_lay.addWidget(cb)
         sel_row = QHBoxLayout()
-        btn_sel_all = QPushButton("All")
+        btn_sel_all = QPushButton(tr("risk_panels.all"))
         btn_sel_all.clicked.connect(
             lambda: [cb.setChecked(True) for cb in self._hazard_checks.values()]
         )
         sel_row.addWidget(btn_sel_all)
-        btn_clear = QPushButton("Clear")
+        btn_clear = QPushButton(tr("risk_panels.clear"))
         btn_clear.clicked.connect(
             lambda: [cb.setChecked(False) for cb in self._hazard_checks.values()]
         )
@@ -422,7 +467,7 @@ class HazardDataPanel(QWidget):
         left_lay.addWidget(grp_hazards)
 
         # Return periods
-        grp_rp = QGroupBox("Return Periods (years)")
+        grp_rp = QGroupBox(tr("risk_panels.return_periods_years"))
         rp_lay = QVBoxLayout(grp_rp)
         self._rp_checks: dict[int, QCheckBox] = {}
         for rp in _RETURN_PERIODS:
@@ -433,7 +478,7 @@ class HazardDataPanel(QWidget):
         left_lay.addWidget(grp_rp)
 
         # Fetch button + progress
-        self._btn_fetch = QPushButton("Fetch Selected Hazards")
+        self._btn_fetch = QPushButton(tr("risk_panels.fetch_selected"))
         self._btn_fetch.setStyleSheet(_action_btn_style())
         self._btn_fetch.clicked.connect(self._run_fetch)
         left_lay.addWidget(self._btn_fetch)
@@ -447,13 +492,14 @@ class HazardDataPanel(QWidget):
         left_lay.addWidget(self._lbl_status)
 
         # Results table
-        grp_results = QGroupBox("Fetched Hazard Data")
+        grp_results = QGroupBox(tr("risk_panels.fetched_hazard_data"))
         res_lay = QVBoxLayout(grp_results)
         self._results_table = QTableWidget()
         self._results_table.setColumnCount(4)
-        self._results_table.setHorizontalHeaderLabels(
-            ["Hazard", "Source", "IM", "Nodes"]
-        )
+        self._results_table.setHorizontalHeaderLabels([
+            tr("risk_panels.col_hazard"), tr("risk_panels.col_source"),
+            "IM", tr("risk_panels.col_nodes"),
+        ])
         self._results_table.horizontalHeader().setStretchLastSection(True)
         res_lay.addWidget(self._results_table)
         left_lay.addWidget(grp_results, 1)
@@ -473,18 +519,18 @@ class HazardDataPanel(QWidget):
         exc_lay = QVBoxLayout(exc_widget)
         exc_lay.setContentsMargins(0, 0, 0, 0)
         self._combo_exc_hazard = QComboBox()
-        self._combo_exc_hazard.addItem("(no data)")
+        self._combo_exc_hazard.addItem(tr("risk_panels.no_data_item"))
         self._combo_exc_hazard.currentIndexChanged.connect(
             self._on_exceedance_hazard_changed
         )
         exc_lay.addWidget(self._combo_exc_hazard)
         self._exceedance_chart = IMExceedanceChart()
         exc_lay.addWidget(self._exceedance_chart, 1)
-        self._chart_tabs.addTab(exc_widget, "IM Exceedance")
+        self._chart_tabs.addTab(exc_widget, tr("risk_panels.tab_im_exceedance"))
 
         # Tab 2: Node Comparison (all-hazard heatmap)
         self._node_chart = HazardScreeningChart()
-        self._chart_tabs.addTab(self._node_chart, "Node Comparison")
+        self._chart_tabs.addTab(self._node_chart, tr("risk_panels.tab_node_comparison"))
 
         splitter.addWidget(self._chart_tabs)
         splitter.setSizes([400, 600])
@@ -506,20 +552,20 @@ class HazardDataPanel(QWidget):
     def _run_fetch(self):
         """Start batch fetch for all selected hazard types."""
         if not self._state or not self._state.node_coordinates:
-            QMessageBox.warning(self, "No Nodes",
-                                "No node coordinates available. Check Site & Screening tab.")
+            QMessageBox.warning(self, tr("risk_panels.no_nodes_title"),
+                                tr("risk_panels.no_node_coords_available"))
             return
 
         selected = self._get_selected_hazard_types()
         if not selected:
-            QMessageBox.warning(self, "No Hazards",
-                                "Select at least one hazard type.")
+            QMessageBox.warning(self, tr("risk_panels.no_hazards_title"),
+                                tr("risk_panels.no_hazards_msg"))
             return
 
         return_periods = self._get_selected_return_periods()
         if not return_periods:
-            QMessageBox.warning(self, "No Return Periods",
-                                "Select at least one return period.")
+            QMessageBox.warning(self, tr("risk_panels.no_rp_title"),
+                                tr("risk_panels.no_rp_msg"))
             return
 
         self._fetch_queue = list(selected)
@@ -540,18 +586,19 @@ class HazardDataPanel(QWidget):
             # All done
             self._progress.setVisible(False)
             self._btn_fetch.setEnabled(True)
-            self._lbl_status.setText(
-                f"Completed: {self._fetch_done_count}/{self._fetch_total} hazards fetched."
-            )
+            self._lbl_status.setText(tr(
+                "risk_panels.fetch_completed",
+                done=self._fetch_done_count, total=self._fetch_total,
+            ))
             self._sync_exceedance_combo()
             self._update_node_comparison()
             return
 
         hazard_type = self._fetch_queue.pop(0)
-        self._lbl_status.setText(
-            f"Fetching {hazard_type.replace('_', ' ')} "
-            f"({self._fetch_done_count + 1}/{self._fetch_total})..."
-        )
+        self._lbl_status.setText(tr(
+            "risk_panels.fetching_hazard", hazard=hazard_label(hazard_type),
+            n=self._fetch_done_count + 1, total=self._fetch_total,
+        ))
 
         from esfex.models.hazard_assessment import create_fetcher
         fetcher = create_fetcher(hazard_type, source="")
@@ -586,7 +633,7 @@ class HazardDataPanel(QWidget):
     def _on_batch_error(self, msg):
         self._fetch_done_count += 1
         logger.warning("Hazard fetch failed (continuing batch): %s", msg)
-        self._lbl_status.setText(f"Warning: {msg} — continuing...")
+        self._lbl_status.setText(tr("risk_panels.fetch_warning_continuing", msg=msg))
         self._fetch_next()
 
     def _refresh_results_table(self):
@@ -596,7 +643,7 @@ class HazardDataPanel(QWidget):
         self._results_table.setRowCount(len(maps))
         for r, hmap in enumerate(maps):
             self._results_table.setItem(r, 0, QTableWidgetItem(
-                hmap.hazard_type.replace("_", " ").title()))
+                hazard_label(hmap.hazard_type)))
             self._results_table.setItem(r, 1, QTableWidgetItem(hmap.source))
             self._results_table.setItem(r, 2, QTableWidgetItem(
                 f"{hmap.intensity_measure} ({hmap.units})"))
@@ -612,18 +659,18 @@ class HazardDataPanel(QWidget):
         self._combo_exc_hazard.blockSignals(True)
         self._combo_exc_hazard.clear()
         if not self._state:
-            self._combo_exc_hazard.addItem("(no data)")
+            self._combo_exc_hazard.addItem(tr("risk_panels.no_data_item"))
             self._combo_exc_hazard.blockSignals(False)
             return
         added = False
         for hmap in self._state.hazard_maps:
             if hmap.hazard_type == "screening":
                 continue
-            label = hmap.hazard_type.replace("_", " ").title()
+            label = hazard_label(hmap.hazard_type)
             self._combo_exc_hazard.addItem(label, hmap.hazard_type)
             added = True
         if not added:
-            self._combo_exc_hazard.addItem("(no data)")
+            self._combo_exc_hazard.addItem(tr("risk_panels.no_data_item"))
         self._combo_exc_hazard.blockSignals(False)
         # Draw the first entry
         self._on_exceedance_hazard_changed(0)
@@ -643,7 +690,7 @@ class HazardDataPanel(QWidget):
             return
         node_curves: dict[str, dict[int, float]] = {}
         for idx, rp_im in hmap.node_intensities.items():
-            node_curves[f"Node {idx}"] = rp_im
+            node_curves[_node_label(idx)] = rp_im
         units = getattr(hmap, "units", "")
         self._exceedance_chart.update_chart(node_curves, hmap.hazard_type, units)
 
@@ -672,14 +719,14 @@ class HazardDataPanel(QWidget):
         for hmap in maps:
             all_nodes.update(hmap.node_intensities.keys())
         sorted_nodes = sorted(all_nodes)
-        node_labels = [f"Node {idx}" for idx in sorted_nodes]
+        node_labels = [_node_label(idx) for idx in sorted_nodes]
 
         hazard_levels: dict[str, list[float]] = {}
         for hmap in maps:
             rps = getattr(hmap, "return_periods", [])
             ref_rp = max(rps) if rps else 0
             unit = _IM_UNITS.get(hmap.hazard_type, hmap.units)
-            label = f"{hmap.hazard_type.replace('_', ' ').title()} ({unit})"
+            label = _hazard_unit_label(hmap.hazard_type, unit)
             values = []
             for ni in sorted_nodes:
                 ni_data = hmap.node_intensities.get(ni, {})
@@ -688,15 +735,29 @@ class HazardDataPanel(QWidget):
 
         self._node_chart.update_chart(
             node_labels, hazard_levels,
-            title="Hazard Intensity Measures by Node (max return period)",
+            title=tr("risk_panels.him_by_node_max_rp"),
             normalize_columns=True,
-            colorbar_label="Relative Intensity (per hazard type)",
+            colorbar_label=tr("risk_panels.relative_intensity_per_type"),
         )
 
 
 # =====================================================================
 # Panel 3: Fragility Library Editor
 # =====================================================================
+
+
+def _fragility_intro_text() -> str:
+    """The library editor's intro, with the built-in curves counted and their
+    main sources named from the library itself (a hard-coded "49 curves"
+    went stale as the library grew)."""
+    from collections import Counter
+
+    from esfex.models.hazard_assessment import FragilityLibrary
+    curves = FragilityLibrary().get_all_curves()
+    sources = Counter(c.source for c in curves
+                      if c.source and c.source != "expert-judgment")
+    names = ", ".join(s for s, _ in sources.most_common(3))
+    return tr("risk_panels.fragility_intro", count=len(curves), sources=names)
 
 
 class FragilityLibraryPanel(QWidget):
@@ -716,12 +777,7 @@ class FragilityLibraryPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            "<h3>Fragility Library Editor</h3>"
-            "<p>Browse and edit lognormal fragility curves. "
-            "49 built-in curves from NHESS-2024 and PNNL-33587. "
-            "Edit parameters to see live CDF updates.</p>"
-        ))
+        layout.addWidget(QLabel(_fragility_intro_text()))
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -732,15 +788,15 @@ class FragilityLibraryPanel(QWidget):
 
         # Filters
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("Component:"))
+        filter_row.addWidget(QLabel(tr("risk_panels.component_label")))
         self._combo_comp = QComboBox()
-        self._combo_comp.addItem("All")
+        self._combo_comp.addItem(tr("risk_panels.all"))
         self._combo_comp.currentIndexChanged.connect(self._refresh_table)
         filter_row.addWidget(self._combo_comp)
 
-        filter_row.addWidget(QLabel("Hazard:"))
+        filter_row.addWidget(QLabel(tr("risk_panels.hazard_label")))
         self._combo_haz = QComboBox()
-        self._combo_haz.addItem("All")
+        self._combo_haz.addItem(tr("risk_panels.all"))
         self._combo_haz.currentIndexChanged.connect(self._refresh_table)
         filter_row.addWidget(self._combo_haz)
         filter_row.addStretch()
@@ -749,9 +805,11 @@ class FragilityLibraryPanel(QWidget):
         # Curve table
         self._table = QTableWidget()
         self._table.setColumnCount(6)
-        self._table.setHorizontalHeaderLabels(
-            ["Component", "Hazard", "Damage State", "\u03b8 (median)", "\u03b2", "Source"]
-        )
+        self._table.setHorizontalHeaderLabels([
+            tr("risk_panels.col_component"), tr("risk_panels.col_hazard"),
+            tr("risk_panels.col_damage_state"), tr("risk_panels.col_theta_median"),
+            "\u03b2", tr("risk_panels.col_source"),
+        ])
         self._table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
         )
@@ -764,29 +822,29 @@ class FragilityLibraryPanel(QWidget):
 
         # Buttons
         btn_row = QHBoxLayout()
-        btn_add = QPushButton("Add Curve")
+        btn_add = QPushButton(tr("risk_panels.add_curve"))
         btn_add.clicked.connect(self._add_curve)
         btn_row.addWidget(btn_add)
 
-        btn_remove = QPushButton("Remove")
+        btn_remove = QPushButton(tr("common.remove"))
         btn_remove.clicked.connect(self._remove_curve)
         btn_row.addWidget(btn_remove)
 
-        btn_clone = QPushButton("Clone")
+        btn_clone = QPushButton(tr("risk_panels.clone"))
         btn_clone.clicked.connect(self._clone_curve)
         btn_row.addWidget(btn_clone)
 
-        btn_reset = QPushButton("Reset Defaults")
+        btn_reset = QPushButton(tr("risk_panels.reset_defaults"))
         btn_reset.clicked.connect(self._reset_defaults)
         btn_row.addWidget(btn_reset)
 
         btn_row.addStretch()
 
-        btn_export = QPushButton("Export CSV")
+        btn_export = QPushButton(tr("risk_panels.export_csv"))
         btn_export.clicked.connect(self._export_csv)
         btn_row.addWidget(btn_export)
 
-        btn_import = QPushButton("Import CSV")
+        btn_import = QPushButton(tr("risk_panels.import_csv"))
         btn_import.clicked.connect(self._import_csv)
         btn_row.addWidget(btn_import)
 
@@ -803,14 +861,14 @@ class FragilityLibraryPanel(QWidget):
         )
         self._chart_stack = QTabWidget()
         self._overview_chart = HazardScreeningChart()
-        self._chart_stack.addTab(self._overview_chart, "Overview")
+        self._chart_stack.addTab(self._overview_chart, tr("risk_panels.tab_overview"))
         self._chart = FragilityCurveChart()
-        self._chart_stack.addTab(self._chart, "Curves")
+        self._chart_stack.addTab(self._chart, tr("risk_panels.tab_curves"))
         right_lay.addWidget(self._chart_stack, 1)
 
         # IM value evaluator
         eval_row = QHBoxLayout()
-        eval_row.addWidget(QLabel("Evaluate at IM ="))
+        eval_row.addWidget(QLabel(tr("risk_panels.evaluate_at_im")))
         self._spin_im = QDoubleSpinBox()
         self._spin_im.setRange(0.01, 100.0)
         self._spin_im.setValue(1.0)
@@ -818,7 +876,7 @@ class FragilityLibraryPanel(QWidget):
         self._spin_im.setDecimals(2)
         self._spin_im.valueChanged.connect(self._evaluate_im)
         eval_row.addWidget(self._spin_im)
-        self._lbl_prob = QLabel("P(damage) = —")
+        self._lbl_prob = QLabel(tr("risk_panels.p_damage_none"))
         self._lbl_prob.setStyleSheet("font-weight: bold;")
         eval_row.addWidget(self._lbl_prob)
         eval_row.addStretch()
@@ -837,16 +895,16 @@ class FragilityLibraryPanel(QWidget):
         # Populate filter combos
         self._combo_comp.blockSignals(True)
         self._combo_comp.clear()
-        self._combo_comp.addItem("All")
+        self._combo_comp.addItem(tr("risk_panels.all"))
         for ct in sorted(lib.component_types):
-            self._combo_comp.addItem(ct.replace("_", " ").title(), ct)
+            self._combo_comp.addItem(component_label(ct), ct)
         self._combo_comp.blockSignals(False)
 
         self._combo_haz.blockSignals(True)
         self._combo_haz.clear()
-        self._combo_haz.addItem("All")
+        self._combo_haz.addItem(tr("risk_panels.all"))
         for ht in sorted(lib.hazard_types):
-            self._combo_haz.addItem(ht.replace("_", " ").title(), ht)
+            self._combo_haz.addItem(hazard_label(ht), ht)
         self._combo_haz.blockSignals(False)
 
         self._refresh_table()
@@ -878,10 +936,11 @@ class FragilityLibraryPanel(QWidget):
         self._table.setRowCount(len(filtered))
         for r, curve in enumerate(filtered):
             self._table.setItem(r, 0, QTableWidgetItem(
-                curve.component_type.replace("_", " ").title()))
+                component_label(curve.component_type)))
             self._table.setItem(r, 1, QTableWidgetItem(
-                curve.hazard_type.replace("_", " ").title()))
-            self._table.setItem(r, 2, QTableWidgetItem(curve.damage_state))
+                hazard_label(curve.hazard_type)))
+            self._table.setItem(r, 2, QTableWidgetItem(
+                damage_state_label(curve.damage_state)))
 
             # Editable median
             item_med = QTableWidgetItem(f"{curve.im_median:.3f}")
@@ -953,15 +1012,16 @@ class FragilityLibraryPanel(QWidget):
             chart_data = []
             for c in related:
                 chart_data.append({
-                    "label": f"{c.damage_state} (\u03b8={c.im_median:.2f}, \u03b2={c.beta:.2f})",
+                    "label": f"{damage_state_label(c.damage_state)} "
+                             f"(\u03b8={c.im_median:.2f}, \u03b2={c.beta:.2f})",
                     "im_median": c.im_median,
                     "beta": c.beta,
                     "beta_epistemic": c.beta_epistemic,
                     "color": ds_colors.get(c.damage_state, "#7f8c8d"),
                 })
             title = (
-                f"{curve.component_type.replace('_', ' ').title()} — "
-                f"{curve.hazard_type.replace('_', ' ').title()}"
+                f"{component_label(curve.component_type)} — "
+                f"{hazard_label(curve.hazard_type)}"
             )
             self._chart.update_chart(chart_data, title=title)
             self._chart_stack.setCurrentWidget(self._chart)
@@ -992,7 +1052,7 @@ class FragilityLibraryPanel(QWidget):
         if haz_filter:
             haz_types = [haz_filter]
 
-        comp_labels = [c.replace("_", " ").title() for c in comp_types]
+        comp_labels = [component_label(c) for c in comp_types]
 
         _IM_UNITS = {
             "earthquake": "g", "cyclone": "m/s", "flood": "m",
@@ -1003,7 +1063,7 @@ class FragilityLibraryPanel(QWidget):
         hazard_values: dict[str, list[float]] = {}
         for haz in haz_types:
             unit = _IM_UNITS.get(haz, "")
-            label = f"{haz.replace('_', ' ').title()} ({unit})"
+            label = _hazard_unit_label(haz, unit)
             values = []
             for comp in comp_types:
                 p = lib.get_complete_damage_probability
@@ -1031,15 +1091,15 @@ class FragilityLibraryPanel(QWidget):
 
         self._overview_chart.update_chart(
             comp_labels, inverted,
-            title="Component Fragility (higher = more vulnerable)",
-            colorbar_label="Fragility (0 = least vulnerable, 1 = most vulnerable)",
+            title=tr("risk_panels.component_fragility_title"),
+            colorbar_label=tr("risk_panels.fragility_colorbar"),
         )
         self._chart_stack.setCurrentWidget(self._overview_chart)
 
     def _evaluate_im(self):
         """Evaluate P(damage) at the current IM spinbox value."""
         if not self._filtered_curves:
-            self._lbl_prob.setText("P(damage) = —")
+            self._lbl_prob.setText(tr("risk_panels.p_damage_none"))
             return
         row = self._table.currentRow()
         if row < 0 or row >= len(self._filtered_curves):
@@ -1048,7 +1108,8 @@ class FragilityLibraryPanel(QWidget):
         im = self._spin_im.value()
         prob = curve.evaluate(im)
         self._lbl_prob.setText(
-            f"P({curve.damage_state} | IM={im:.2f}) = {prob:.4f}"
+            tr("risk_panels.p_damage_at_im", state=damage_state_label(curve.damage_state),
+               im=f"{im:.2f}", prob=f"{prob:.4f}")
         )
 
     def _add_curve(self):
@@ -1114,8 +1175,8 @@ class FragilityLibraryPanel(QWidget):
         if not self._state:
             return
         reply = QMessageBox.question(
-            self, "Reset Fragility Library",
-            "Reset all curves to built-in defaults? Custom curves will be lost.",
+            self, tr("risk_panels.reset_library_title"),
+            tr("risk_panels.reset_library_msg"),
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
@@ -1128,8 +1189,8 @@ class FragilityLibraryPanel(QWidget):
         if not self._state:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Fragility Curves", "fragility_library.csv",
-            "CSV Files (*.csv)")
+            self, tr("risk_panels.export_fragility_title"), "fragility_library.csv",
+            tr("risk_panels.filter_csv"))
         if not path:
             return
         lib = self._state.fragility_library
@@ -1146,8 +1207,8 @@ class FragilityLibraryPanel(QWidget):
         if not self._state:
             return
         path, _ = QFileDialog.getOpenFileName(
-            self, "Import Fragility Curves", "",
-            "CSV Files (*.csv)")
+            self, tr("risk_panels.import_fragility_title"), "",
+            tr("risk_panels.filter_csv"))
         if not path:
             return
         from esfex.models.hazard_assessment import FragilityCurve
@@ -1171,7 +1232,7 @@ class FragilityLibraryPanel(QWidget):
             self._state.fragility_changed.emit()
             self._refresh_table()
         except Exception as e:
-            QMessageBox.critical(self, "Import Error", str(e))
+            QMessageBox.critical(self, tr("risk_panels.import_error"), str(e))
 
 
 # =====================================================================
@@ -1193,40 +1254,51 @@ class RiskDashboardPanel(QWidget):
         self._worker: _RiskAssessmentWorker | None = None
         self._build_ui()
 
+    @staticmethod
+    def _select_data(combo: QComboBox, value: str) -> None:
+        """Select the item whose data is *value* (the first item if none)."""
+        idx = combo.findData(value)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+
     def set_state(self, state: RiskWorkbenchState) -> None:
         self._state = state
+        # Show the state's settings (the project's saved risk.* values).
+        self._select_data(self._combo_method, state.combination_method)
+        self._select_data(self._combo_measure, state.risk_measure)
+        self._spin_alpha.setValue(state.cvar_alpha)
+        self._spin_lambda.setValue(state.cvar_lambda)
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            "<h3>Risk Dashboard</h3>"
-            "<p>Run composite risk assessment combining all fetched hazard data "
-            "with the fragility library. Tune CVaR parameters and combination "
-            "method to explore risk sensitivity.</p>"
-        ))
+        layout.addWidget(QLabel(tr("risk_panels.dashboard_intro")))
 
         # ── Top controls row ──
         controls = QHBoxLayout()
 
-        controls.addWidget(QLabel("Combination:"))
+        # Item data = RiskConfig value
+        controls.addWidget(QLabel(tr("risk_panels.combination_label")))
         self._combo_method = QComboBox()
-        self._combo_method.addItems(["Independent", "Copula", "MCDA"])
+        for method in _METHODS:
+            self._combo_method.addItem(_method_label(method), method)
         controls.addWidget(self._combo_method)
 
-        controls.addWidget(QLabel("Risk Measure:"))
+        controls.addWidget(QLabel(tr("risk_panels.risk_measure_label")))
         self._combo_measure = QComboBox()
-        self._combo_measure.addItems(["Expected", "CVaR", "Minimax Regret"])
+        for measure in _MEASURES:
+            self._combo_measure.addItem(_measure_label(measure), measure)
         controls.addWidget(self._combo_measure)
 
-        controls.addWidget(QLabel("CVaR \u03b1:"))
+        controls.addWidget(QLabel(_colon("CVaR \u03b1")))
         self._spin_alpha = QDoubleSpinBox()
-        self._spin_alpha.setRange(0.80, 0.99)
+        # risk.cvar_alpha is in (0, 1): a saved 0.5 or 0.995 used to be
+        # clamped to 0.80–0.99 here and saved back changed
+        self._spin_alpha.setDecimals(3)
+        self._spin_alpha.setRange(0.001, 0.999)
         self._spin_alpha.setValue(0.95)
         self._spin_alpha.setSingleStep(0.01)
-        self._spin_alpha.setDecimals(2)
         controls.addWidget(self._spin_alpha)
 
-        controls.addWidget(QLabel("CVaR \u03bb:"))
+        controls.addWidget(QLabel(_colon("CVaR \u03bb")))
         self._spin_lambda = QDoubleSpinBox()
         self._spin_lambda.setRange(0.0, 1.0)
         self._spin_lambda.setValue(0.5)
@@ -1234,7 +1306,7 @@ class RiskDashboardPanel(QWidget):
         self._spin_lambda.setDecimals(2)
         controls.addWidget(self._spin_lambda)
 
-        self._btn_assess = QPushButton("Assess Risk")
+        self._btn_assess = QPushButton(tr("risk_panels.assess_risk"))
         self._btn_assess.setStyleSheet(_danger_btn_style())
         self._btn_assess.clicked.connect(self._run_assessment)
         controls.addWidget(self._btn_assess)
@@ -1256,13 +1328,13 @@ class RiskDashboardPanel(QWidget):
         left_lay.setContentsMargins(0, 0, 0, 0)
 
         # Node selection checkboxes
-        grp_nodes = QGroupBox("Nodes to Analyze")
+        grp_nodes = QGroupBox(tr("risk_panels.nodes_to_analyze"))
         node_lay = QVBoxLayout(grp_nodes)
         node_btn_row = QHBoxLayout()
-        btn_all = QPushButton("All")
+        btn_all = QPushButton(tr("risk_panels.all"))
         btn_all.clicked.connect(self._select_all_nodes)
         node_btn_row.addWidget(btn_all)
-        btn_none = QPushButton("None")
+        btn_none = QPushButton(tr("risk_panels.none"))
         btn_none.clicked.connect(self._select_no_nodes)
         node_btn_row.addWidget(btn_none)
         node_btn_row.addStretch()
@@ -1283,9 +1355,11 @@ class RiskDashboardPanel(QWidget):
         # Risk results table
         self._risk_table = QTableWidget()
         self._risk_table.setColumnCount(5)
-        self._risk_table.setHorizontalHeaderLabels(
-            ["Node", "Composite Risk", "EAL ($/yr)", "Dominant Hazard", "ALARP Class"]
-        )
+        self._risk_table.setHorizontalHeaderLabels([
+            tr("risk_panels.col_node"), tr("risk_panels.col_composite_risk"),
+            tr("risk_panels.col_eal_usd_yr"), tr("risk_panels.col_dominant_hazard"),
+            tr("risk_panels.col_alarp_class"),
+        ])
         self._risk_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
         )
@@ -1306,41 +1380,42 @@ class RiskDashboardPanel(QWidget):
             HazardScreeningChart,
         )
         self._heatmap = RiskHeatmapChart()
-        self._chart_tabs.addTab(self._heatmap, "Failure Probability")
+        self._chart_tabs.addTab(self._heatmap, tr("risk_panels.tab_failure_probability"))
 
         self._eal_chart = EALBarChart()
-        self._chart_tabs.addTab(self._eal_chart, "EAL by Node")
+        self._chart_tabs.addTab(self._eal_chart, tr("risk_panels.tab_eal_by_node"))
 
         # IM Exceedance with hazard selector
         exc_widget = QWidget()
         exc_lay = QVBoxLayout(exc_widget)
         exc_lay.setContentsMargins(0, 0, 0, 0)
         self._combo_exc_hazard = QComboBox()
-        self._combo_exc_hazard.addItem("(no data)")
+        self._combo_exc_hazard.addItem(tr("risk_panels.no_data_item"))
         self._combo_exc_hazard.currentIndexChanged.connect(
             self._on_exceedance_hazard_changed
         )
         exc_lay.addWidget(self._combo_exc_hazard)
         self._exceedance_chart = IMExceedanceChart()
         exc_lay.addWidget(self._exceedance_chart, 1)
-        self._chart_tabs.addTab(exc_widget, "IM Exceedance")
+        self._chart_tabs.addTab(exc_widget, tr("risk_panels.tab_im_exceedance"))
 
         # Hazard IM comparison heatmap
         self._im_heatmap = HazardScreeningChart()
-        self._chart_tabs.addTab(self._im_heatmap, "Hazard IMs")
+        self._chart_tabs.addTab(self._im_heatmap, tr("risk_panels.tab_hazard_ims"))
 
         self._tornado = SensitivityTornadoChart()
-        self._chart_tabs.addTab(self._tornado, "Sensitivity")
+        self._chart_tabs.addTab(self._tornado, tr("risk_panels.tab_sensitivity"))
 
         self._resilience_chart = ResiliencePerformanceChart()
-        self._chart_tabs.addTab(self._resilience_chart, "Resilience Curve")
+        self._chart_tabs.addTab(self._resilience_chart,
+                                tr("risk_panels.tab_resilience_curve"))
 
 
         # Node detail text
         self._detail_text = QTextEdit()
         self._detail_text.setReadOnly(True)
         self._detail_text.setStyleSheet(_mono_text_style())
-        self._chart_tabs.addTab(self._detail_text, "Node Detail")
+        self._chart_tabs.addTab(self._detail_text, tr("risk_panels.tab_node_detail"))
         self._chart_tabs.currentChanged.connect(self._on_chart_tab_changed)
 
         splitter.addWidget(self._chart_tabs)
@@ -1364,7 +1439,7 @@ class RiskDashboardPanel(QWidget):
         if not self._state:
             return
         for idx in range(len(self._state.node_coordinates)):
-            name = self._state.node_names.get(idx, f"Node {idx}")
+            name = self._state.node_names.get(idx, _node_label(idx))
             enabled = self._state.node_enabled.get(idx, True)
             cb = QCheckBox(name)
             cb.setChecked(enabled)
@@ -1409,19 +1484,14 @@ class RiskDashboardPanel(QWidget):
         if not self._state:
             return
         if not self._state.node_coordinates:
-            QMessageBox.warning(self, "No Nodes",
-                                "No node coordinates detected. Check Site & Screening tab.")
+            QMessageBox.warning(self, tr("risk_panels.no_nodes_title"),
+                                tr("risk_panels.no_node_coords_detected"))
             return
 
         # Update state parameters from controls
-        method_map = {"Independent": "independent", "Copula": "copula", "MCDA": "mcda"}
-        self._state.combination_method = method_map.get(
-            self._combo_method.currentText(), "independent"
-        )
-        measure_map = {"Expected": "expected", "CVaR": "cvar", "Minimax Regret": "minimax_regret"}
-        self._state.risk_measure = measure_map.get(
-            self._combo_measure.currentText(), "expected"
-        )
+        self._state.combination_method = (
+            self._combo_method.currentData() or "independent")
+        self._state.risk_measure = self._combo_measure.currentData() or "expected"
         self._state.cvar_alpha = self._spin_alpha.value()
         self._state.cvar_lambda = self._spin_lambda.value()
 
@@ -1496,8 +1566,8 @@ class RiskDashboardPanel(QWidget):
         # Filter to enabled nodes only
         enabled = self._get_enabled_node_indices()
         if not enabled:
-            QMessageBox.warning(self, "No Nodes Selected",
-                                "Select at least one node to analyze.")
+            QMessageBox.warning(self, tr("risk_panels.no_nodes_selected_title"),
+                                tr("risk_panels.no_nodes_selected_msg"))
             self._progress.setVisible(False)
             self._btn_assess.setEnabled(True)
             return
@@ -1568,7 +1638,8 @@ class RiskDashboardPanel(QWidget):
                     self._state.component_values or None,
                 )
                 self._tornado.update_chart(
-                    sweep["param_names"],
+                    [tr(_SWEEP_PARAM_KEYS[n]) if n in _SWEEP_PARAM_KEYS else n
+                     for n in sweep["param_names"]],
                     sweep["low_values"],
                     sweep["high_values"],
                     sweep["base_value"],
@@ -1662,7 +1733,7 @@ class RiskDashboardPanel(QWidget):
 
         node_curves: dict[str, dict[int, float]] = {}
         for sn in sorted(sys_rp_ims.keys()):
-            label = sys_names.get(sn, f"Node {sn}")
+            label = sys_names.get(sn, _node_label(sn))
             node_curves[label] = sys_rp_ims[sn]
 
         units = getattr(hmap, "units", "")
@@ -1678,10 +1749,10 @@ class RiskDashboardPanel(QWidget):
         self._combo_exc_hazard.blockSignals(True)
         self._combo_exc_hazard.clear()
         for hmap in maps:
-            label = hmap.hazard_type.replace("_", " ").title()
+            label = hazard_label(hmap.hazard_type)
             self._combo_exc_hazard.addItem(label, hmap.hazard_type)
         if not maps:
-            self._combo_exc_hazard.addItem("(no data)")
+            self._combo_exc_hazard.addItem(tr("risk_panels.no_data_item"))
         self._combo_exc_hazard.blockSignals(False)
         if maps:
             self._on_exceedance_hazard_changed(0)
@@ -1708,14 +1779,14 @@ class RiskDashboardPanel(QWidget):
             sys_node_coords[sn].append(ci)
 
         sorted_sys_nodes = sorted(sys_node_coords.keys())
-        node_labels = [sys_names.get(n, f"Node {n}") for n in sorted_sys_nodes]
+        node_labels = [sys_names.get(n, _node_label(n)) for n in sorted_sys_nodes]
 
         hazard_levels: dict[str, list[float]] = {}
         for hmap in maps:
             rps = getattr(hmap, "return_periods", [])
             ref_rp = max(rps) if rps else 0
             unit = _IM_UNITS.get(hmap.hazard_type, hmap.units)
-            label = f"{hmap.hazard_type.replace('_', ' ').title()} ({unit})"
+            label = _hazard_unit_label(hmap.hazard_type, unit)
             values = []
             for sn in sorted_sys_nodes:
                 max_im = 0.0
@@ -1727,15 +1798,15 @@ class RiskDashboardPanel(QWidget):
 
         self._im_heatmap.update_chart(
             node_labels, hazard_levels,
-            title="Hazard Intensity Measures (max return period)",
+            title=tr("risk_panels.him_max_rp"),
             normalize_columns=True,
-            colorbar_label="Relative Intensity (per hazard type)",
+            colorbar_label=tr("risk_panels.relative_intensity_per_type"),
         )
 
     def _on_assessment_error(self, msg):
         self._progress.setVisible(False)
         self._btn_assess.setEnabled(True)
-        QMessageBox.critical(self, "Assessment Error", msg)
+        QMessageBox.critical(self, tr("risk_panels.assessment_error"), msg)
 
     def _populate_results(self, profiles):
         """Fill risk table and charts from per-element risk profiles.
@@ -1792,13 +1863,21 @@ class RiskDashboardPanel(QWidget):
                            _ALARP_ORDER.index(worst_ev.classification)):
                     worst_ev = ev
 
-            node_name = sys_names.get(sys_node, f"Node {sys_node}")
+            node_name = sys_names.get(sys_node, _node_label(sys_node))
             self._risk_table.setItem(r, 0, QTableWidgetItem(node_name))
             self._risk_table.setItem(r, 1, QTableWidgetItem(f"{max_risk:.4f}"))
             self._risk_table.setItem(r, 2, QTableWidgetItem(f"${total_eal:,.0f}"))
             self._risk_table.setItem(r, 3, QTableWidgetItem(
-                dominant_haz.replace("_", " ").title()))
-            cls_label = worst_ev.classification.replace("_", " ").title() if worst_ev else "—"
+                hazard_label(dominant_haz)))
+            cls_label = "—"
+            if worst_ev:
+                cls_label = {
+                    "negligible": tr("risk_panels.alarp_negligible"),
+                    "tolerable_low": tr("risk_panels.alarp_tolerable_low"),
+                    "tolerable_high": tr("risk_panels.alarp_tolerable_high"),
+                    "intolerable": tr("risk_panels.alarp_intolerable"),
+                }.get(worst_ev.classification,
+                      worst_ev.classification.replace("_", " ").title())
             self._risk_table.setItem(r, 4, QTableWidgetItem(cls_label))
 
             if worst_ev:
@@ -1813,7 +1892,7 @@ class RiskDashboardPanel(QWidget):
             self._aggregated_node_profiles.append((sys_node, plist))
 
         # Charts use system node labels
-        node_labels = [sys_names.get(n, f"Node {n}") for n in sorted_sys_nodes]
+        node_labels = [sys_names.get(n, _node_label(n)) for n in sorted_sys_nodes]
 
         # Heatmap: max failure probability per hazard per system node
         all_hazards = set()
@@ -1869,37 +1948,48 @@ class RiskDashboardPanel(QWidget):
         sys_node, plist = self._aggregated_node_profiles[row]
         sys_name = ""
         if self._state:
-            sys_name = self._state.system_node_names.get(sys_node, f"Node {sys_node}")
+            sys_name = self._state.system_node_names.get(sys_node, _node_label(sys_node))
 
         lines = [
-            f"{sys_name} — Risk Profile ({len(plist)} element(s))",
+            tr("risk_panels.detail_header", name=sys_name, count=len(plist)),
             "=" * 60,
         ]
 
         # Aggregated summary
         max_risk = max(p.composite_risk for p in plist)
         total_eal = sum(p.expected_annual_loss for p in plist)
-        lines.append(f"Max Composite Risk:   {max_risk:.4f}")
-        lines.append(f"Total EAL:            ${total_eal:,.0f}/yr")
+        lines.append(_report_line(tr("risk_panels.detail_max_composite_risk"),
+                                  f"{max_risk:.4f}", indent=0, width=21))
+        lines.append(_report_line(tr("risk_panels.detail_total_eal"),
+                                  tr("risk_panels.usd_per_year", value=f"{total_eal:,.0f}"),
+                                  indent=0, width=21))
         lines.append("")
 
         # Per-element detail
         for p in plist:
             lat, lon = p.coordinates
-            lines.append(f"--- Location ({lat:.4f}, {lon:.4f}) ---")
-            lines.append(f"  Composite Risk:     {p.composite_risk:.4f}")
-            lines.append(f"  EAL:                ${p.expected_annual_loss:,.0f}/yr")
-            lines.append(f"  Dominant Hazard:    {p.dominant_hazard}")
+            lines.append(tr("risk_panels.detail_location",
+                            lat=f"{lat:.4f}", lon=f"{lon:.4f}"))
+            lines.append(_report_line(tr("risk_panels.detail_composite_risk"),
+                                      f"{p.composite_risk:.4f}", width=19))
+            lines.append(_report_line(
+                _colon("EAL"), tr("risk_panels.usd_per_year",
+                           value=f"{p.expected_annual_loss:,.0f}"), width=19))
+            lines.append(_report_line(tr("risk_panels.detail_dominant_hazard"),
+                                      hazard_label(p.dominant_hazard), width=19))
 
-            lines.append("  Hazard Intensities:")
+            lines.append("  " + tr("risk_panels.detail_hazard_intensities"))
             for haz, rp_im in p.hazard_intensities.items():
                 for rp, im in sorted(rp_im.items()):
-                    lines.append(f"    {haz}: RP={rp}yr → IM={im:.3f}")
+                    lines.append("    " + tr("risk_panels.detail_rp_im",
+                                                   hazard=hazard_label(haz), rp=rp,
+                                                   im=f"{im:.3f}"))
 
-            lines.append("  Failure Probabilities:")
+            lines.append("  " + tr("risk_panels.detail_failure_probabilities"))
             for comp, probs in p.component_failure_probs.items():
                 for haz, prob in probs.items():
-                    lines.append(f"    {comp}/{haz}: P={prob:.4f}")
+                    lines.append(f"    {component_label(comp)}/{hazard_label(haz)}: "
+                                 f"P={prob:.4f}")
             lines.append("")
 
         self._detail_text.setText("\n".join(lines))
@@ -1923,11 +2013,7 @@ class ClimateDemandsPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            "<h3>Climate Scenarios & Demand Adjustment</h3>"
-            "<p>Configure SSP climate pathways and preview their impact on "
-            "renewable availability and electricity demand via HDD/CDD.</p>"
-        ))
+        layout.addWidget(QLabel(tr("risk_panels.climate_intro")))
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -1937,7 +2023,7 @@ class ClimateDemandsPanel(QWidget):
         left_lay.setContentsMargins(0, 0, 0, 0)
 
         # SSP pathway checkboxes
-        grp_ssp = QGroupBox("SSP Pathways")
+        grp_ssp = QGroupBox(tr("risk_panels.ssp_pathways"))
         ssp_lay = QVBoxLayout(grp_ssp)
         self._ssp_checks: dict[str, QCheckBox] = {}
         for ssp in ["SSP1-2.6", "SSP2-4.5", "SSP3-7.0", "SSP5-8.5"]:
@@ -1948,7 +2034,7 @@ class ClimateDemandsPanel(QWidget):
         left_lay.addWidget(grp_ssp)
 
         # Year horizons
-        grp_year = QGroupBox("Year Horizons")
+        grp_year = QGroupBox(tr("risk_panels.year_horizons"))
         year_lay = QVBoxLayout(grp_year)
         self._year_checks: dict[int, QCheckBox] = {}
         for yr in [2030, 2040, 2050, 2060, 2080, 2100]:
@@ -1959,42 +2045,38 @@ class ClimateDemandsPanel(QWidget):
         left_lay.addWidget(grp_year)
 
         # Demand parameters
-        grp_demand = QGroupBox("Demand Parameters")
+        grp_demand = QGroupBox(tr("risk_panels.demand_parameters"))
         demand_form = QFormLayout(grp_demand)
 
         self._spin_base_temp = QDoubleSpinBox()
         self._spin_base_temp.setRange(10.0, 30.0)
-        self._spin_base_temp.setValue(18.0)
+        self._spin_base_temp.setValue(24.0)   # RiskConfig defaults
         self._spin_base_temp.setSuffix(" \u00b0C")
-        demand_form.addRow("Base Temperature:", self._spin_base_temp)
+        demand_form.addRow(tr("risk_panels.base_temperature"), self._spin_base_temp)
 
         self._spin_heat = QDoubleSpinBox()
         self._spin_heat.setRange(0.0, 20.0)
-        self._spin_heat.setValue(1.5)
+        self._spin_heat.setValue(0.5)
         self._spin_heat.setDecimals(1)
         self._spin_heat.setSuffix(" %/\u00b0C")
-        demand_form.addRow("Heating Sensitivity:", self._spin_heat)
+        demand_form.addRow(tr("risk_panels.heating_sensitivity"), self._spin_heat)
 
         self._spin_cool = QDoubleSpinBox()
         self._spin_cool.setRange(0.0, 20.0)
         self._spin_cool.setValue(2.5)
         self._spin_cool.setDecimals(1)
         self._spin_cool.setSuffix(" %/\u00b0C")
-        demand_form.addRow("Cooling Sensitivity:", self._spin_cool)
+        demand_form.addRow(tr("risk_panels.cooling_sensitivity"), self._spin_cool)
 
         left_lay.addWidget(grp_demand)
 
-        lbl_info = QLabel(
-            "Demand increase per 1\u00b0C warming (cooling) or "
-            "cooling (heating). Typical: 2\u20134 %/\u00b0C cooling, "
-            "1\u20132 %/\u00b0C heating."
-        )
+        lbl_info = QLabel(tr("risk_panels.demand_sensitivity_info"))
         lbl_info.setWordWrap(True)
         lbl_info.setStyleSheet(_secondary_text_style())
         left_lay.addWidget(lbl_info)
 
         # Generate button
-        self._btn_generate = QPushButton("Generate Climate Scenarios")
+        self._btn_generate = QPushButton(tr("risk_panels.generate_climate"))
         self._btn_generate.setStyleSheet(_success_btn_style())
         self._btn_generate.clicked.connect(self._generate_scenarios)
         left_lay.addWidget(self._btn_generate)
@@ -2013,10 +2095,10 @@ class ClimateDemandsPanel(QWidget):
             DemandAdjustmentChart,
         )
         self._climate_chart = ClimateScenarioChart()
-        self._chart_tabs.addTab(self._climate_chart, "\u0394T / GHI / Wind")
+        self._chart_tabs.addTab(self._climate_chart, tr("risk_panels.tab_dt_ghi_wind"))
 
         self._demand_chart = DemandAdjustmentChart()
-        self._chart_tabs.addTab(self._demand_chart, "Demand Adjustment")
+        self._chart_tabs.addTab(self._demand_chart, tr("risk_panels.tab_demand_adjustment"))
 
         splitter.addWidget(self._chart_tabs)
         splitter.setSizes([350, 650])
@@ -2032,8 +2114,8 @@ class ClimateDemandsPanel(QWidget):
 
         ssp_selected = [ssp for ssp, cb in self._ssp_checks.items() if cb.isChecked()]
         if not ssp_selected:
-            QMessageBox.warning(self, "No SSP Selected",
-                                "Select at least one SSP pathway.")
+            QMessageBox.warning(self, tr("risk_panels.no_ssp_title"),
+                                tr("risk_panels.no_ssp_msg"))
             return
 
         year_selected = [yr for yr, cb in self._year_checks.items() if cb.isChecked()]
@@ -2048,7 +2130,7 @@ class ClimateDemandsPanel(QWidget):
         self._state.climate_scenarios = scenarios
         self._state.scenarios_changed.emit()
 
-        self._lbl_status.setText(f"Generated {len(scenarios)} climate scenarios.")
+        self._lbl_status.setText(tr("risk_panels.climate_generated", count=len(scenarios)))
 
         # Update climate chart
         self._climate_chart.update_chart(scenarios)
@@ -2096,39 +2178,37 @@ class ScenarioTreePanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            "<h3>Scenario Tree</h3>"
-            "<p>Generate and manage discrete hazard scenarios for the stochastic "
-            "optimizer. Edit probabilities, add manual scenarios, or reduce "
-            "the tree using forward reduction.</p>"
-        ))
+        layout.addWidget(QLabel(tr("risk_panels.scenario_tree_intro")))
 
         # ── Top controls ──
         controls = QHBoxLayout()
 
-        controls.addWidget(QLabel("Sampling:"))
+        controls.addWidget(QLabel(tr("risk_panels.sampling_label")))
         self._combo_method = QComboBox()
-        self._combo_method.addItems(["Importance", "LHS", "Enumeration"])
+        # Item data = ScenarioGenerator method
+        self._combo_method.addItem(tr("risk_panels.sampling_importance"), "importance")
+        self._combo_method.addItem("LHS", "lhs")
+        self._combo_method.addItem(tr("risk_panels.sampling_enumeration"), "enumeration")
         controls.addWidget(self._combo_method)
 
-        controls.addWidget(QLabel("N scenarios:"))
+        controls.addWidget(QLabel(tr("risk_panels.n_scenarios_label")))
         self._spin_n = QSpinBox()
         self._spin_n.setRange(3, 50)
         self._spin_n.setValue(10)
         controls.addWidget(self._spin_n)
 
-        controls.addWidget(QLabel("Max total:"))
+        controls.addWidget(QLabel(tr("risk_panels.max_total_label")))
         self._spin_max = QSpinBox()
         self._spin_max.setRange(5, 100)
         self._spin_max.setValue(20)
         controls.addWidget(self._spin_max)
 
-        self._btn_generate = QPushButton("Generate Scenarios")
+        self._btn_generate = QPushButton(tr("risk_panels.generate_scenarios"))
         self._btn_generate.setStyleSheet(_warning_btn_style())
         self._btn_generate.clicked.connect(self._generate_scenarios)
         controls.addWidget(self._btn_generate)
 
-        self._btn_reduce = QPushButton("Reduce Tree")
+        self._btn_reduce = QPushButton(tr("risk_panels.reduce_tree"))
         self._btn_reduce.clicked.connect(self._reduce_tree)
         controls.addWidget(self._btn_reduce)
 
@@ -2150,9 +2230,12 @@ class ScenarioTreePanel(QWidget):
 
         self._scenario_table = QTableWidget()
         self._scenario_table.setColumnCount(7)
-        self._scenario_table.setHorizontalHeaderLabels(
-            ["Name", "Type", "Probability", "Hazard", "Nodes", "Max Damage", "Recovery (h)"]
-        )
+        self._scenario_table.setHorizontalHeaderLabels([
+            tr("risk_panels.col_name"), tr("risk_panels.col_type"),
+            tr("risk_panels.col_probability"), tr("risk_panels.col_hazard"),
+            tr("risk_panels.col_nodes"), tr("risk_panels.col_max_damage"),
+            tr("risk_panels.col_recovery_h"),
+        ])
         self._scenario_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
         )
@@ -2161,14 +2244,14 @@ class ScenarioTreePanel(QWidget):
 
         # Table buttons
         btn_row = QHBoxLayout()
-        btn_add = QPushButton("Add Scenario")
+        btn_add = QPushButton(tr("risk_panels.add_scenario"))
         btn_add.clicked.connect(self._add_manual_scenario)
         btn_row.addWidget(btn_add)
-        btn_del = QPushButton("Delete Selected")
+        btn_del = QPushButton(tr("risk_panels.delete_selected"))
         btn_del.clicked.connect(self._delete_scenario)
         btn_row.addWidget(btn_del)
         btn_row.addStretch()
-        self._lbl_prob_sum = QLabel("Sum P = 0.0000")
+        self._lbl_prob_sum = QLabel(tr("risk_panels.hazard_prob_sum", value="0.0000"))
         self._lbl_prob_sum.setStyleSheet("font-weight: bold;")
         btn_row.addWidget(self._lbl_prob_sum)
         left_lay.addLayout(btn_row)
@@ -2183,10 +2266,10 @@ class ScenarioTreePanel(QWidget):
             ProbabilityPieChart,
         )
         self._tree_chart = ScenarioTreeChart()
-        self._chart_tabs.addTab(self._tree_chart, "Scenario Tree")
+        self._chart_tabs.addTab(self._tree_chart, tr("risk_panels.tab_scenario_tree"))
 
         self._pie_chart = ProbabilityPieChart()
-        self._chart_tabs.addTab(self._pie_chart, "Probabilities")
+        self._chart_tabs.addTab(self._pie_chart, tr("risk_panels.tab_probabilities"))
 
         splitter.addWidget(self._chart_tabs)
         splitter.setSizes([500, 500])
@@ -2200,12 +2283,11 @@ class ScenarioTreePanel(QWidget):
         if not self._state:
             return
         if not self._state.risk_profiles:
-            QMessageBox.warning(self, "No Risk Profiles",
-                                "Run risk assessment first in the Risk Dashboard tab.")
+            QMessageBox.warning(self, tr("risk_panels.no_risk_profiles_title"),
+                                tr("risk_panels.no_risk_profiles_msg"))
             return
 
-        method_map = {"Importance": "importance", "LHS": "lhs", "Enumeration": "enumeration"}
-        method = method_map.get(self._combo_method.currentText(), "importance")
+        method = self._combo_method.currentData() or "importance"
 
         # Use real generator/battery maps from system extraction
         generator_map = self._state.generator_map
@@ -2245,7 +2327,7 @@ class ScenarioTreePanel(QWidget):
     def _on_scenario_error(self, msg):
         self._progress.setVisible(False)
         self._btn_generate.setEnabled(True)
-        QMessageBox.critical(self, "Scenario Error", msg)
+        QMessageBox.critical(self, tr("risk_panels.scenario_error"), msg)
 
     def _reduce_tree(self):
         """Apply forward reduction to scenario tree."""
@@ -2279,18 +2361,21 @@ class ScenarioTreePanel(QWidget):
 
         for r, (stype, sc) in enumerate(all_scenarios):
             self._scenario_table.setItem(r, 0, QTableWidgetItem(sc.get("name", "")))
-            self._scenario_table.setItem(r, 1, QTableWidgetItem(stype))
+            self._scenario_table.setItem(r, 1, QTableWidgetItem(
+                tr("risk_panels.scenario_type_climate") if stype == "climate"
+                else tr("risk_panels.scenario_type_hazard")))
 
             # Editable probability
             prob_item = QTableWidgetItem(f"{sc.get('probability', 0):.6f}")
             prob_item.setFlags(prob_item.flags() | Qt.ItemFlag.ItemIsEditable)
             self._scenario_table.setItem(r, 2, prob_item)
 
+            haz = sc.get("hazard_type")
             self._scenario_table.setItem(r, 3, QTableWidgetItem(
-                sc.get("hazard_type", sc.get("ssp_pathway", ""))))
+                hazard_label(haz) if haz else sc.get("ssp_pathway", "")))
             nodes = sc.get("affected_nodes", [])
             self._scenario_table.setItem(r, 4, QTableWidgetItem(
-                str(len(nodes)) if nodes else "all"))
+                str(len(nodes)) if nodes else tr("risk_panels.all_nodes_cell")))
             dmg = sc.get("damage_fraction", {})
             max_dmg = max(dmg.values()) if dmg else 0.0
             self._scenario_table.setItem(r, 5, QTableWidgetItem(f"{max_dmg:.2%}"))
@@ -2323,7 +2408,7 @@ class ScenarioTreePanel(QWidget):
         from esfex.visualization.theme import current_theme
         c = current_theme().colors
         color = c.status_success if abs(total - 1.0) < 0.01 else c.status_error
-        self._lbl_prob_sum.setText(f"Hazard \u03a3P = {total:.4f}")
+        self._lbl_prob_sum.setText(tr("risk_panels.hazard_prob_sum", value=f"{total:.4f}"))
         self._lbl_prob_sum.setStyleSheet(f"font-weight: bold; color: {color};")
 
     def _add_manual_scenario(self):
@@ -2400,11 +2485,7 @@ class ExportApplyPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            "<h3>Export & Apply</h3>"
-            "<p>Review the complete risk analysis configuration and export "
-            "results or apply to the system configuration.</p>"
-        ))
+        layout.addWidget(QLabel(tr("risk_panels.export_intro")))
 
         # Summary text
         self._summary = QTextEdit()
@@ -2415,19 +2496,19 @@ class ExportApplyPanel(QWidget):
         # Buttons
         btn_row = QHBoxLayout()
 
-        btn_csv = QPushButton("Export EAL Table (CSV)")
+        btn_csv = QPushButton(tr("risk_panels.export_eal_csv"))
         btn_csv.clicked.connect(self._export_csv)
         btn_row.addWidget(btn_csv)
 
-        btn_json = QPushButton("Export Full State (JSON)")
+        btn_json = QPushButton(tr("risk_panels.export_state_json"))
         btn_json.clicked.connect(self._export_json)
         btn_row.addWidget(btn_json)
 
-        btn_yaml = QPushButton("Export Config (YAML)")
+        btn_yaml = QPushButton(tr("risk_panels.export_config_yaml"))
         btn_yaml.clicked.connect(self._export_yaml)
         btn_row.addWidget(btn_yaml)
 
-        btn_report = QPushButton("ISO Report (HTML)")
+        btn_report = QPushButton(tr("risk_panels.iso_report_html"))
         btn_report.setStyleSheet(_action_btn_style())
         btn_report.clicked.connect(self._export_iso_report)
         btn_row.addWidget(btn_report)
@@ -2443,53 +2524,60 @@ class ExportApplyPanel(QWidget):
         if not self._state:
             return
         s = self._state
+        line = _report_line
+
+        def usd_yr(v):
+            return tr("risk_panels.usd_per_year", value=f"{v:,.0f}")
+
         lines = [
             "=" * 60,
-            "  RISK & RESILIENCE ANALYSIS — SUMMARY",
+            "  " + tr("risk_panels.sum_title"),
             "=" * 60,
             "",
-            "--- SITE ---",
-            f"  Nodes detected:        {len(s.node_coordinates)}",
-            f"  Hazard maps loaded:    {len(s.hazard_maps)}",
+            tr("risk_panels.sum_section_site"),
+            line(tr("risk_panels.sum_nodes_detected"), len(s.node_coordinates)),
+            line(tr("risk_panels.sum_hazard_maps"), len(s.hazard_maps)),
             "",
-            "--- RISK PARAMETERS ---",
-            f"  Combination method:    {s.combination_method}",
-            f"  Risk measure:          {s.risk_measure}",
-            f"  CVaR \u03b1:                {s.cvar_alpha:.2f}",
-            f"  CVaR \u03bb:                {s.cvar_lambda:.2f}",
+            tr("risk_panels.sum_section_params"),
+            line(tr("risk_panels.sum_combination_method"),
+                 _method_label(s.combination_method)),
+            line(tr("risk_panels.sum_risk_measure"),
+                 _measure_label(s.risk_measure)),
+            line(_colon("CVaR \u03b1"), f"{s.cvar_alpha:.2f}"),
+            line(_colon("CVaR \u03bb"), f"{s.cvar_lambda:.2f}"),
             "",
-            "--- FRAGILITY LIBRARY ---",
-            f"  Total curves:          {len(s.fragility_library.get_all_curves())}",
-            f"  Component types:       {len(s.fragility_library.component_types)}",
-            f"  Hazard types covered:  {len(s.fragility_library.hazard_types)}",
+            tr("risk_panels.sum_section_fragility"),
+            line(tr("risk_panels.sum_total_curves"), len(s.fragility_library.get_all_curves())),
+            line(tr("risk_panels.sum_component_types"), len(s.fragility_library.component_types)),
+            line(tr("risk_panels.sum_hazard_types"), len(s.fragility_library.hazard_types)),
             "",
-            "--- RISK PROFILES ---",
-            f"  Assessed nodes:        {len(s.risk_profiles)}",
+            tr("risk_panels.sum_section_profiles"),
+            line(tr("risk_panels.sum_assessed_nodes"), len(s.risk_profiles)),
         ]
 
         if s.risk_profiles:
             risks = [p.composite_risk for p in s.risk_profiles]
             eals = [p.expected_annual_loss for p in s.risk_profiles]
             lines.extend([
-                f"  Composite risk range:  {min(risks):.4f} — {max(risks):.4f}",
-                f"  Total EAL:             ${sum(eals):,.0f}/yr",
-                f"  Mean EAL per node:     ${np.mean(eals):,.0f}/yr",
+                line(tr("risk_panels.sum_risk_range"), f"{min(risks):.4f} — {max(risks):.4f}"),
+                line(tr("risk_panels.sum_total_eal"), usd_yr(sum(eals))),
+                line(tr("risk_panels.sum_mean_eal"), usd_yr(np.mean(eals))),
             ])
 
         lines.extend([
             "",
-            "--- SCENARIOS ---",
-            f"  Climate scenarios:     {len(s.climate_scenarios)}",
-            f"  Hazard scenarios:      {len(s.hazard_scenarios)}",
+            tr("risk_panels.sum_section_scenarios"),
+            line(tr("risk_panels.sum_climate_scenarios"), len(s.climate_scenarios)),
+            line(tr("risk_panels.sum_hazard_scenarios"), len(s.hazard_scenarios)),
         ])
 
         if s.climate_scenarios:
             names = [sc.get("name", "") for sc in s.climate_scenarios]
-            lines.append(f"  SSP pathways:          {', '.join(names)}")
+            lines.append(line(tr("risk_panels.sum_ssp_pathways"), ", ".join(names)))
 
         if s.hazard_scenarios:
             prob_sum = sum(sc.get("probability", 0) for sc in s.hazard_scenarios)
-            lines.append(f"  Hazard prob sum:       {prob_sum:.4f}")
+            lines.append(line(tr("risk_panels.sum_hazard_prob_sum"), f"{prob_sum:.4f}"))
 
         # Risk evaluation
         evaluations = getattr(s, "risk_evaluations", [])
@@ -2497,9 +2585,9 @@ class ExportApplyPanel(QWidget):
             intolerable = sum(1 for e in evaluations if getattr(e, "action_required", False))
             lines.extend([
                 "",
-                "--- RISK EVALUATION (ISO 31000 §6.5) ---",
-                f"  Nodes evaluated:       {len(evaluations)}",
-                f"  Intolerable nodes:     {intolerable}",
+                tr("risk_panels.sum_section_evaluation"),
+                line(tr("risk_panels.sum_nodes_evaluated"), len(evaluations)),
+                line(tr("risk_panels.sum_intolerable_nodes"), intolerable),
             ])
 
         # Resilience metrics
@@ -2507,25 +2595,27 @@ class ExportApplyPanel(QWidget):
         if rm:
             lines.extend([
                 "",
-                "--- RESILIENCE (ISO 22372) ---",
-                f"  LOLP:                  {rm.lolp:.4f}",
-                f"  EENS:                  {rm.eens_mwh:,.1f} MWh/yr",
-                f"  Resilience Index (R):  {rm.resilience_index:.3f}",
-                f"  SART:                  {rm.sart_hours:.0f} hours",
-                f"  Anticipatory:          {rm.anticipatory_capacity:.2f}",
-                f"  Absorptive:            {rm.absorptive_capacity:.2f}",
-                f"  Adaptive:              {rm.adaptive_capacity:.2f}",
-                f"  Restorative:           {rm.restorative_capacity:.2f}",
+                tr("risk_panels.sum_section_resilience"),
+                line(_colon("LOLP"), f"{rm.lolp:.4f}"),
+                line(_colon("EENS"), tr("risk_panels.mwh_per_year", value=f"{rm.eens_mwh:,.1f}")),
+                line(tr("risk_panels.sum_resilience_index"), f"{rm.resilience_index:.3f}"),
+                line(_colon("SART"), tr("risk_panels.hours_value", value=f"{rm.sart_hours:.0f}")),
+                line(tr("risk_panels.sum_anticipatory"), f"{rm.anticipatory_capacity:.2f}"),
+                line(tr("risk_panels.sum_absorptive"), f"{rm.absorptive_capacity:.2f}"),
+                line(tr("risk_panels.sum_adaptive"), f"{rm.adaptive_capacity:.2f}"),
+                line(tr("risk_panels.sum_restorative"), f"{rm.restorative_capacity:.2f}"),
             ])
 
         self._summary.setText("\n".join(lines))
 
     def _export_csv(self):
         if not self._state or not self._state.risk_profiles:
-            QMessageBox.warning(self, "No Data", "Run risk assessment first.")
+            QMessageBox.warning(self, tr("risk_panels.no_data_title"),
+                                tr("risk_panels.run_assessment_first"))
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export EAL Table", "risk_eal.csv", "CSV Files (*.csv)")
+            self, tr("risk_panels.export_eal_title"), "risk_eal.csv",
+            tr("risk_panels.filter_csv"))
         if not path:
             return
         with open(path, "w", newline="") as f:
@@ -2542,7 +2632,8 @@ class ExportApplyPanel(QWidget):
         if not self._state:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Full State", "risk_state.json", "JSON Files (*.json)")
+            self, tr("risk_panels.export_state_title"), "risk_state.json",
+            tr("risk_panels.filter_json"))
         if not path:
             return
         s = self._state
@@ -2582,7 +2673,8 @@ class ExportApplyPanel(QWidget):
         if not self._state:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Export Config YAML", "risk_config.yaml", "YAML Files (*.yaml)")
+            self, tr("risk_panels.export_yaml_title"), "risk_config.yaml",
+            tr("risk_panels.filter_yaml"))
         if not path:
             return
         s = self._state
@@ -2615,13 +2707,12 @@ class ExportApplyPanel(QWidget):
             len(self._all_states),
         )
         if not self._state:
-            QMessageBox.warning(self, "Apply",
-                                "No risk analysis state. Run the assessment first.")
+            QMessageBox.warning(self, tr("common.apply"),
+                                tr("risk_panels.apply_no_state"))
             return
         if not self._model:
-            QMessageBox.warning(self, "Apply",
-                                "No GUI model available. The workbench must be "
-                                "opened from the main editor window.")
+            QMessageBox.warning(self, tr("common.apply"),
+                                tr("risk_panels.apply_no_model"))
             return
 
         s = self._state
@@ -2725,13 +2816,10 @@ class ExportApplyPanel(QWidget):
 
         n_coeffs = len(gs.risk_coefficients) if hasattr(gs, "risk_coefficients") else 0
         QMessageBox.information(
-            self, "Applied",
-            f"Risk configuration applied.\n\n"
-            f"  Risk coefficients: {n_coeffs} elements\n"
-            f"  Climate scenarios: {len(s.climate_scenarios)}\n"
-            f"  Hazard scenarios: {len(s.hazard_scenarios)}\n"
-            f"  Risk measure: {s.risk_measure}\n\n"
-            f"Risk results are now visible on the map.",
+            self, tr("risk_panels.applied_title"),
+            tr("risk_panels.applied_msg", n_coeffs=n_coeffs,
+               n_climate=len(s.climate_scenarios), n_hazard=len(s.hazard_scenarios),
+               measure=_measure_label(s.risk_measure)),
         )
 
     def _export_iso_report(self):
@@ -2739,7 +2827,8 @@ class ExportApplyPanel(QWidget):
         if not self._state:
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save ISO Report", "risk_report.html", "HTML Files (*.html)")
+            self, tr("risk_panels.save_iso_report_title"), "risk_report.html",
+            tr("risk_panels.filter_html"))
         if not path:
             return
 
@@ -2776,8 +2865,8 @@ class ExportApplyPanel(QWidget):
         with open(path, "w", encoding="utf-8") as f:
             f.write(html)
         QMessageBox.information(
-            self, "Report Generated",
-            f"ISO 31000 report saved to:\n{path}",
+            self, tr("risk_panels.report_generated_title"),
+            tr("risk_panels.report_saved_msg", path=path),
         )
 
 
@@ -2840,21 +2929,16 @@ class RiskAnalysisPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            "<h3>Step 2: Risk Analysis</h3>"
-            "<p>Compute composite risk indices, expected annual loss (EAL), "
-            "and per-element risk coefficients. The Fragility Library tab "
-            "allows reviewing the damage curves used in the assessment.</p>"
-        ))
+        layout.addWidget(QLabel(tr("risk_panels.step_risk_intro")))
 
         self._tabs = QTabWidget()
         self._tabs.currentChanged.connect(self._on_inner_tab_changed)
 
         self._dashboard = RiskDashboardPanel()
-        self._tabs.addTab(self._dashboard, "Risk Dashboard")
+        self._tabs.addTab(self._dashboard, tr("risk_panels.tab_risk_dashboard"))
 
         self._fragility = FragilityLibraryPanel()
-        self._tabs.addTab(self._fragility, "Fragility Library")
+        self._tabs.addTab(self._fragility, tr("risk_panels.tab_fragility_library"))
 
         layout.addWidget(self._tabs, 1)
 
@@ -2895,21 +2979,16 @@ class ScenariosPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            "<h3>Step 3: Scenarios</h3>"
-            "<p>Configure climate projections (SSP pathways, demand adjustment) "
-            "and disaster scenarios (per-hazard damage fractions). These "
-            "scenarios drive the stochastic optimization.</p>"
-        ))
+        layout.addWidget(QLabel(tr("risk_panels.step_scenarios_intro")))
 
         self._tabs = QTabWidget()
         self._tabs.currentChanged.connect(self._on_inner_tab_changed)
 
         self._climate = ClimateDemandsPanel()
-        self._tabs.addTab(self._climate, "Climate & Demand")
+        self._tabs.addTab(self._climate, tr("risk_panels.tab_climate_demand"))
 
         self._scenarios = ScenarioTreePanel()
-        self._tabs.addTab(self._scenarios, "Hazard Scenarios")
+        self._tabs.addTab(self._scenarios, tr("risk_panels.tab_hazard_scenarios"))
 
         layout.addWidget(self._tabs, 1)
 
@@ -2950,13 +3029,7 @@ class ResultsExportPanel(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            "<h3>Step 4: Results & Export</h3>"
-            "<p>Review the complete risk analysis summary. Export results "
-            "as CSV, JSON, YAML, or ISO 31000 HTML report. Click Apply "
-            "in the bottom bar to write risk coefficients and scenarios "
-            "to the system configuration.</p>"
-        ))
+        layout.addWidget(QLabel(tr("risk_panels.step_results_intro")))
 
         self._export_panel = ExportApplyPanel()
         layout.addWidget(self._export_panel, 1)

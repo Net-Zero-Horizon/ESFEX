@@ -13,6 +13,8 @@ from PySide6.QtCore import QProcess, Qt, Signal
 from PySide6.QtGui import QAction, QKeyEvent, QTextCursor
 from PySide6.QtWidgets import QPlainTextEdit
 
+from esfex.visualization.i18n import tr
+
 _ANSI_RE = re.compile(r"\x1b\[[\d;]*[A-Za-z]|\x1b\][\d;]*\x07?")
 
 
@@ -50,12 +52,7 @@ class PythonConsole(QPlainTextEdit):
         self._process: QProcess | None = None
 
         # Write banner
-        banner = (
-            "Python Console - ESFEX Studio\n"
-            "Available: model, state, config, window, esfex, np\n"
-            "Type esfex.help() for scripting API reference.\n"
-        )
-        self.appendPlainText(banner)
+        self.appendPlainText(tr("python_console.banner") + "\n")
         self._write_prompt()
 
     # ------------------------------------------------------------------
@@ -111,8 +108,7 @@ class PythonConsole(QPlainTextEdit):
             env: Extra environment variables to set for the subprocess.
         """
         if self._process is not None and self._process.state() != QProcess.ProcessState.NotRunning:
-            self.appendPlainText("[error] A subprocess is already running. "
-                                "Use Ctrl+C to cancel it first.\n")
+            self.appendPlainText(tr("python_console.process_running") + "\n")
             return
 
         self.appendPlainText(f"\n--- {label} ---")
@@ -388,7 +384,7 @@ class PythonConsole(QPlainTextEdit):
     def contextMenuEvent(self, event):
         menu = self.createStandardContextMenu()
         menu.addSeparator()
-        clear_action = QAction("Clear console", self)
+        clear_action = QAction(tr("python_console.clear"), self)
         clear_action.triggered.connect(self.clear_console)
         menu.addAction(clear_action)
         menu.exec(event.globalPos())

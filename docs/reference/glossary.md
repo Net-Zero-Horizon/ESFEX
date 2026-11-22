@@ -3,7 +3,7 @@
 ## A
 
 **Adjacency Matrix**
-:   A symmetric $N \times N$ matrix where entry $(i,j)$ represents the transmission capacity (MW) between nodes $i$ and $j$. Zero entries indicate no direct connection. Stored flattened in the YAML configuration as `nodes_connections`.
+:   A symmetric \(N \times N\) matrix where entry \((i,j)\) represents the transmission capacity (MW) between nodes \(i\) and \(j\). Zero entries indicate no direct connection. Stored flattened in the YAML configuration as `nodes_connections`.
 
 **Availability Profile**
 :   A time series of capacity factors (0 to 1) for a generator, representing the fraction of rated power available at each hour. Derived from weather data for renewables (solar irradiance, wind speed).
@@ -26,13 +26,13 @@
 :   Long-term optimization determining what generation, storage, and transmission capacity to build, when to build it, and when to retire existing assets. In ESFEX, this is the Master Problem.
 
 **Capacity Factor (CF)**
-:   The ratio of actual energy output to maximum possible output: $CF = E_{actual} / (P_{rated} \times T)$. Values range from 0 to 1.
+:   The ratio of actual energy output to maximum possible output: \(CF = E_{actual} / (P_{rated} \times T)\). Values range from 0 to 1.
 
 **CostCurveBlock**
-:   A single segment in a piecewise-linear cost curve, defined by a power output fraction (0 to 1 of $P_{max}$) and a marginal cost ($/MWh). Multiple blocks form a stepwise non-decreasing offer curve. Used internally after `normalize_cost_curve()` converts any curve type (flat, linear, stepwise, exponential) to a uniform block representation.
+:   A single segment in a piecewise-linear cost curve, defined by a power output fraction (0 to 1 of \(P_{max}\)) and a marginal cost ($/MWh). Multiple blocks form a stepwise non-decreasing offer curve. Used internally after `normalize_cost_curve()` converts any curve type (flat, linear, stepwise, exponential) to a uniform block representation.
 
 **Curtailment**
-:   Deliberate reduction of renewable energy output below available capacity. ESFEX can limit curtailment to a configurable fraction (`max_curtailment_ratio`) of total renewable generation.
+:   Deliberate reduction of renewable energy output below available capacity. In the master problem, each system's curtailment over the year is limited to a fraction (`penalties.max_curtailment_ratio`) of its renewable generation over the year; the operational dispatch charges `curtailment_cost` per MWh instead.
 
 ---
 
@@ -108,10 +108,10 @@
 ## L
 
 **LCOE (Levelized Cost of Energy)**
-:   The average cost per unit of energy produced over a generator's lifetime, including capital, fuel, and O&M costs: $LCOE = \frac{\text{Total Lifetime Cost}}{\text{Total Lifetime Generation}}$
+:   The average cost per unit of energy produced over a generator's lifetime, including capital, fuel, and O&M costs: \(LCOE = \frac{\text{Total Lifetime Cost}}{\text{Total Lifetime Generation}}\)
 
 **Loss of Load (LOL)**
-:   Unserved energy demand. Penalized via `LOSS_DEMAND_TRHESHOLD` ($/MWh) to ensure it only occurs when physically unavoidable. The penalty value is user-configurable.
+:   Unserved energy demand, bounded at each bus by the demand on that bus. Penalized at `penalties.loss_of_load` ($/MWh, default 10,000,000) so it only occurs when supply or transmission is insufficient.
 
 ---
 
@@ -127,7 +127,7 @@
 :   Structured evaluation of alternatives against multiple criteria. Used in the GUI's analysis wizards for renewable energy site selection.
 
 **MGA (Modeling to Generate Alternatives)**
-:   Explores the near-optimal solution space by generating $K$ structurally diverse alternatives within a user-defined cost slack (e.g., 5% above optimum). ESFEX uses the classical Hop-Skip-Jump (HSJ) formulation [**[8]**](bibliography.md#ref8): each alternative is found by maximising a single diversity objective that penalises investment variables seen in previous alternatives. Configuration: `master_problem.mga.method = "mga"`, `num_alternatives`, `slack_fraction`. **Distinct from [SPORES](#sporesspatially-explicit-practically-optimal-results-exploration)**, which replaces the single diversity objective with a *menu* of distinct objectives (one per alternative).
+:   Explores the near-optimal solution space by generating \(K\) structurally diverse alternatives within a user-defined cost slack (e.g., 5% above optimum). ESFEX uses the classical Hop-Skip-Jump (HSJ) formulation [**[8]**](bibliography.md#ref8): each alternative is found by maximising a single diversity objective that penalises investment variables seen in previous alternatives. Configuration: `master_problem.mga.method = "mga"`, `num_alternatives`, `slack_fraction`. **Distinct from [SPORES](#s)**, which replaces the single diversity objective with a *menu* of distinct objectives (one per alternative).
 
 ---
 
@@ -140,7 +140,7 @@
 :   A geographic location in the power system network. Each node has demand, connected generators, batteries, and fuel infrastructure. Nodes are connected by transmission lines.
 
 **NPV (Net Present Value)**
-:   The sum of discounted future costs: $NPV = \sum_{y} \frac{C_y}{(1+r)^y}$ where $C_y$ is the cost in year $y$ and $r$ is the discount rate.
+:   The sum of discounted future costs: \(NPV = \sum_{y} \frac{C_y}{(1+r)^y}\) where \(C_y\) is the cost in year \(y\) and \(r\) is the discount rate.
 
 **NTC (Net Transfer Capacity)**
 :   Maximum power (MW) reliably transferable between two areas through interconnecting transmission lines. Replaced in ESFEX by a DC-OPF formulation with physical power flow and losses.
@@ -169,20 +169,20 @@
 :   The fuel supply chain modeling subsystem, including fuel imports, storage, transport, and non-electric demand.
 
 **PTDF (Power Transfer Distribution Factor)**
-:   A matrix of sensitivity coefficients describing how power flow on each transmission line changes in response to a unit injection at each node. Used in the DC power flow formulation to convert nodal injections to line flows: $f_l = \sum_n PTDF_{l,n} \cdot P_n$. Computed from the network admittance matrix and topology.
+:   A matrix of sensitivity coefficients describing how power flow on each transmission line changes in response to a unit injection at each node. Used in the DC power flow formulation to convert nodal injections to line flows: \(f_l = \sum_n PTDF_{l,n} \cdot P_n\). Computed from the network admittance matrix and topology.
 
 **PWL (Piecewise Linear)**
-:   Approximation of nonlinear functions using linear segments. In ESFEX, used for transmission loss modeling ($I^2R$ losses) and generator/battery cost curves (output blocks with non-decreasing marginal costs).
+:   Approximation of nonlinear functions using linear segments. In ESFEX, used for transmission loss modeling (\(I^2R\) losses) and generator/battery cost curves (output blocks with non-decreasing marginal costs).
 
 ---
 
 ## R
 
 **Representative Day**
-:   A selected peak-demand day used in the Master Problem to validate operational feasibility of investment decisions.
+:   A selected peak-demand day used in the Master Problem to validate operational feasibility of investment decisions. The days are chosen once, from the horizon-mean demand, and every planning year models the same calendar days.
 
 **RE Penetration**
-:   The fraction of total electricity generation from renewable sources: $RE = \frac{\sum RE\_generation}{\sum total\_generation}$
+:   The fraction of total electricity generation from renewable sources: \(RE = \frac{\sum RE\_generation}{\sum total\_generation}\)
 
 **Rolling Horizon**
 :   Decomposition of the annual dispatch problem into overlapping time windows. Window size (`rolling_horizon_hours`) and overlap (`overlap_hours`) are user-configurable. Boundary conditions (battery SOC, generator status) pass between windows for continuity.
@@ -192,16 +192,16 @@
 ## S
 
 **S-Curve (Logistic Growth)**
-:   The adoption model for EV fleet growth: $N(t) = N_0 \times \frac{M}{1 + (M-1) \cdot e^{-k(t-t_0)}}$ where $M$ is the maximum adoption multiplier and $k$ is the growth rate.
+:   The adoption model for EV fleet growth: \(N(t) = N_0 \times \frac{M}{1 + (M-1) \cdot e^{-k(t-t_0)}}\) where \(M\) is the maximum adoption multiplier and \(k\) is the growth rate.
 
 **SOC (State of Charge)**
-:   The current energy level of a battery as a fraction or absolute value of its total capacity. Bounded by minimum (depth of discharge) and maximum limits. Subject to a cyclic constraint in ESFEX: final SOC at the end of each optimization window must match the initial SOC, preventing the battery from acting as a net energy source or sink.
+:   The current energy level of a battery as a fraction or absolute value of its total capacity. Bounded by minimum (depth of discharge) and maximum limits. In the operational dispatch the SOC is carried over from one rolling-horizon window to the next, and the last window of each year has a soft floor on the final SOC; there is no per-window cyclic constraint.
 
 **Sobol Indices**
-:   Global sensitivity analysis metrics. First-order ($S_1$) measures individual parameter influence. Total-order ($S_T$) includes interactions. Second-order ($S_2$) measures pairwise interactions.
+:   Global sensitivity analysis metrics. First-order (\(S_1\)) measures individual parameter influence. Total-order (\(S_T\)) includes interactions. Second-order (\(S_2\)) measures pairwise interactions.
 
 **SPORES (Spatially-explicit Practically Optimal Results Exploration)**
-:   A method for generating diverse near-optimal alternatives in energy system models, introduced by Lombardi et al. (2020) [**[7]**](bibliography.md#ref7) for the Calliope framework. SPORES differs from classical [MGA](#mgamodeling-to-generate-alternatives) by replacing the single diversity objective with a *menu* of objectives — each alternative is the LP solution to a different objective under the same cost-slack constraint $Z \leq (1+\varepsilon) C^*$. ESFEX ships four canonical SPORES objectives: $\min$ total build (smallest portfolio), max technology equity (min-max over per-tech totals), max regional equity (min-max over per-node totals — the *spatially explicit* objective at the heart of the SPORES name), and max evolutionary distance (L1 distance from the cost-optimal plan). Configuration: `master_problem.mga.method = "spores"`, `objectives = [...]`. The number of alternatives equals `len(objectives)`; `num_alternatives` is ignored.
+:   A method for generating diverse near-optimal alternatives in energy system models, introduced by Lombardi et al. (2020) [**[7]**](bibliography.md#ref7) for the Calliope framework. SPORES differs from classical [MGA](#m) by replacing the single diversity objective with a *menu* of objectives — each alternative is the LP solution to a different objective under the same cost-slack constraint \(Z \leq (1+\varepsilon) C^*\). ESFEX ships four canonical SPORES objectives: \(\min\) total build (smallest portfolio), max technology equity (min-max over per-tech totals), max regional equity (min-max over per-node totals — the *spatially explicit* objective at the heart of the SPORES name), and max evolutionary distance (L1 distance from the cost-optimal plan). Configuration: `master_problem.mga.method = "spores"`, `objectives = [...]`. The number of alternatives equals `len(objectives)`; `num_alternatives` is ignored.
 
 **Sysimage**
 :   Precompiled Julia system image (`.so`/`.dll`) bundling ESFEX Julia code and dependencies. Eliminates JIT compilation overhead, reducing startup from minutes to seconds. Created with `PackageCompiler.jl`.

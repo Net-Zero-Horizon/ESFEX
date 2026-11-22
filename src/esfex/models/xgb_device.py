@@ -83,7 +83,8 @@ def resolve_device(n_rows: int | None = None) -> str:
     return "cuda" if cuda_available() else "cpu"
 
 
-def predict(booster, features, *, feature_names=None, n_rows=None) -> np.ndarray:
+def predict(booster, features, *, feature_names=None, n_rows=None,
+            base_margin=None) -> np.ndarray:
     """Run ``booster`` inference on the GPU when worthwhile, else the CPU.
 
     Parameters
@@ -99,6 +100,9 @@ def predict(booster, features, *, feature_names=None, n_rows=None) -> np.ndarray
     n_rows
         Override the row count used for the size threshold (defaults to
         ``features.shape[0]``).
+    base_margin
+        Starting margin of each row (one value per row), e.g. the level of a
+        two-round model; None starts from the booster's base score.
 
     Returns
     -------
@@ -108,13 +112,15 @@ def predict(booster, features, *, feature_names=None, n_rows=None) -> np.ndarray
     import xgboost as xgb
 
     arr = np.ascontiguousarray(features, dtype=np.float32)
+    if base_margin is not None:
+        base_margin = np.ascontiguousarray(base_margin, dtype=np.float32)
     rows = arr.shape[0] if n_rows is None else n_rows
     device = resolve_device(rows)
 
     if device == "cuda":
         try:
             booster.set_param({"device": "cuda"})
-            return np.asarray(booster.inplace_predict(arr))
+            return np.asarray(booster.inplace_predict(arr, base_margin=base_margin))
         except Exception as exc:
             logger.warning(
                 "XGBoost GPU inference failed (%s) — falling back to CPU.", exc)
@@ -128,5 +134,5 @@ def predict(booster, features, *, feature_names=None, n_rows=None) -> np.ndarray
         except Exception:
             pass
 
-    dm = xgb.DMatrix(arr, feature_names=feature_names)
+    dm = xgb.DMatrix(arr, feature_names=feature_names, base_margin=base_margin)
     return np.asarray(booster.predict(dm))

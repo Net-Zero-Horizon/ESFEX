@@ -671,26 +671,30 @@ def test_get_julia_module_paths_handles_exception(mgr, sandbox):
 
 
 def test_register_cli_commands(mgr, sandbox):
-    calls = []
+    import typer
 
-    class FakeApp:
-        def add_typer(self, sub_app, name):
-            calls.append((sub_app, name))
+    sub1, sub2 = typer.Typer(), typer.Typer()
+    sub1.command("a")(lambda: None)
+    sub2.command("b")(lambda: None)
 
     class P(ESFEXPlugin):
         meta = PluginMeta(name="cliplug", version="1.0")
 
         def get_cli_commands(self):
-            return ["subapp1", "subapp2"]
+            return [sub1, sub2]
 
     ctx = PluginContext(config=None, plugin_dir=sandbox, data_dir=sandbox)
     mgr._plugins = [P(ctx)]
-    app = FakeApp()
+    app = typer.Typer()
     mgr.register_cli_commands(app)
-    assert calls == [("subapp1", "cliplug"), ("subapp2", "cliplug")]
+    # Both apps are merged into one group named after the plugin
+    group = typer.main.get_command(app).commands["cliplug"]
+    assert sorted(group.commands) == ["a", "b"]
 
 
 def test_register_cli_commands_exception_isolated(mgr, sandbox):
+    import typer
+
     class P(ESFEXPlugin):
         meta = PluginMeta(name="cliplug", version="1.0")
 
@@ -699,7 +703,9 @@ def test_register_cli_commands_exception_isolated(mgr, sandbox):
 
     ctx = PluginContext(config=None, plugin_dir=sandbox, data_dir=sandbox)
     mgr._plugins = [P(ctx)]
-    mgr.register_cli_commands(object())  # should not raise
+    app = typer.Typer()
+    mgr.register_cli_commands(app)  # should not raise
+    assert app.registered_groups == []
 
 
 # ── GUI registration ─────────────────────────────────────────────────────
@@ -738,12 +744,13 @@ def test_register_gui_extensions_full(mgr, sandbox):
     map_seen = []
 
     class W:
-        _tree = tree
-        _props = props
-        _model = "MODEL"
+        # MainWindow attribute names
+        element_tree = tree
+        properties_panel = props
+        model = "MODEL"
         _results_panel = results
-        _toolbar = "TOOLBAR"
-        _map = "MAP"
+        toolbar = "TOOLBAR"
+        map_widget = "MAP"
 
         def menuBar(self):
             return "MENUBAR"
@@ -812,7 +819,7 @@ def test_register_gui_extensions_missing_window_attrs(mgr, sandbox):
 
 def test_register_gui_extensions_isolates_failures(mgr, sandbox):
     class W:
-        _tree = _TreePanel()
+        element_tree = _TreePanel()
 
     class P(ESFEXPlugin):
         meta = PluginMeta(name="gui", version="1.0")

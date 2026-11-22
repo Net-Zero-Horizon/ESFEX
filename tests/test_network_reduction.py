@@ -618,3 +618,123 @@ def test_expansion_identity_when_no_reduction():
     flows = np.array([10.0, -5.0, 7.5])
     expanded_f = ResultExpander(rm).expand_line_flows(flows)
     np.testing.assert_allclose(expanded_f, flows)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Buses that host generators or batteries
+# ════════════════════════════════════════════════════════════════════════
+
+def _gen(**anchor):
+    import sys
+    sys.path.insert(0, "tests")
+    from test_runner import _make_generator
+
+    return _make_generator("G", "Non-renewable", "Gas", [100.0],
+                           ramp_up=[1.0], ramp_down=[1.0],
+                           degradation_rate=[0.0], **anchor)
+
+
+def _bat(**anchor):
+    import sys
+    sys.path.insert(0, "tests")
+    from test_zones import _make_battery
+
+    return _make_battery("B", 1).model_copy(update=anchor)
+
+
+@pytest.mark.parametrize("kind, anchor", [
+    ("generators", {"bus_id_per_node": {0: "bus_1"}}),
+    ("generators", {"bus_index": 1}),
+    ("batteries", {"bus_id_per_node": {0: "bus_1"}}),
+    ("batteries", {"bus_index": 1}),
+])
+def test_leaf_bus_hosting_a_unit_is_kept(kind, anchor):
+    """A connection bus with a unit on it is not a passive leaf: pruning
+    it would move the unit onto the load bus and drop the line limit."""
+    buses = _make_buses(["load", "connection"], [1.0, 0.0])
+    sys = _minimal_system(buses, [_make_line("L_AB", 0, 1, cap=20.0)])
+    unit = _gen(**anchor) if kind == "generators" else _bat(**anchor)
+    sys = sys.model_copy(update={kind: {"u": unit}})
+
+    reduced, rm = reduce_network(sys)
+
+    assert rm.n_reduced_buses == 2
+    assert rm.n_reduced_lines == 1
+
+
+def test_series_bus_hosting_a_unit_is_kept():
+    buses = _make_buses(["load", "connection", "load"], [0.5, 0.0, 0.5])
+    lines = [_make_line("L_AB", 0, 1), _make_line("L_BC", 1, 2)]
+    sys = _minimal_system(buses, lines).model_copy(
+        update={"generators": {"g": _gen(bus_id_per_node={0: "bus_1"})}})
+
+    reduced, rm = reduce_network(sys)
+
+    assert rm.n_reduced_buses == 3
+    assert not rm.pruned_buses
+
+
+def test_bus_index_follows_bus_renumbering():
+    """Pruning bus 0 shifts every later bus down by one; a unit anchored by
+    ``bus_index`` must keep pointing at its own bus."""
+    buses = _make_buses(["connection", "load", "load"], [0.0, 0.0, 1.0])
+    lines = [_make_line("L_X", 0, 2), _make_line("L_AB", 1, 2)]
+    sys = _minimal_system(buses, lines).model_copy(update={
+        "generators": {"g": _gen(bus_index=1)},
+        "batteries": {"b": _bat(bus_index=2)},
+    })
+
+    reduced, rm = reduce_network(sys)
+
+    assert 0 in rm.pruned_buses
+    assert reduced.buses[reduced.generators["g"].bus_index].bus_id == "bus_1"
+    assert reduced.buses[reduced.batteries["b"].bus_index].bus_id == "bus_2"
+    assert sys.generators["g"].bus_index == 1  # source config untouched
+
+
+@pytest.mark.julia
+@pytest.mark.parametrize("anchor", [{"bus_index": 1}, {"bus_id_per_node": {0: "bus_a"}}])
+def test_dispatch_matches_with_and_without_reduction(anchor):
+    """A cheap unit behind a 20 MW line must stay limited by that line when
+    the network is reduced."""
+    import sys as _sys
+    _sys.path.insert(0, "tests")
+    from test_runner import _make_esfex_config, _make_generator, _make_node_config
+
+    from esfex.bridge.adapters import PowerSystemAdapter
+    from esfex.config.schema import NetworkReductionConfig
+
+    def solve(enabled):
+        common = dict(ramp_up=[1.0], ramp_down=[1.0], degradation_rate=[0.0])
+        cheap = _make_generator("Cheap", "Non-renewable", "Gas", [100.0],
+                                fuel_cost=[1.0], **common, **anchor)
+        dear = _make_generator("Dear", "Non-renewable", "Diesel", [100.0],
+                               fuel_cost=[200.0], bus_id_per_node={0: "bus_b"}, **common)
+        sysc = SystemConfig(
+            name="r", nodes=_make_node_config(1),
+            generators={"cheap": cheap, "dear": dear},
+            buses=[BusConfig(bus_id="bus_x", parent_node=0, demand_fraction=0.0, role="connection"),
+                   BusConfig(bus_id="bus_a", parent_node=0, demand_fraction=0.0, role="connection"),
+                   BusConfig(bus_id="bus_b", parent_node=0, demand_fraction=1.0)],
+            transmission_lines_geo=[
+                TransmissionLineGeo(line_id="lx", from_node=0, to_node=0,
+                                    from_bus=0, to_bus=2, capacity_mw=200.0),
+                TransmissionLineGeo(line_id="lab", from_node=0, to_node=0,
+                                    from_bus=1, to_bus=2, capacity_mw=20.0),
+            ],
+        )
+        cfg = _make_esfex_config(sysc).model_copy(
+            update={"network_reduction": NetworkReductionConfig(enabled=enabled)})
+        ps = PowerSystemAdapter(
+            config=cfg, system_config=sysc, demand=np.full((3, 1), 50.0), hours=3,
+            num_nodes=1, year=2025, base_year=2025, mode="economic_dispatch",
+        )
+        ps.build_model()
+        assert ps.solve() == 1
+        assert enabled == (ps._reduction_map is not None
+                           and ps._reduction_map.n_reduced_buses == 2)
+        return np.asarray(ps.get_solution_values()["gen_output"])[:, 1:, :]
+
+    full, reduced = solve(False), solve(True)
+    assert full[0, 0, 0] == pytest.approx(20.0, abs=1e-6)  # cheap capped by the line
+    np.testing.assert_allclose(reduced, full, atol=1e-6)

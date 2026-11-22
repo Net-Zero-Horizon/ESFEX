@@ -90,6 +90,9 @@ def _identify_protected_buses(sys_config: "SystemConfig") -> set[int]:
     - Is the bus-side endpoint of a transmission line whose other
       endpoint is a generator or battery (explicit unit placement
       recorded in ``transmission_lines_geo``).
+    - Hosts a generator or battery through ``bus_index`` or
+      ``bus_id_per_node``. Removing it would move the unit to another bus
+      and drop the limit of the line that connects it.
     """
     buses = sys_config.buses or []
     protected: set[int] = set()
@@ -124,6 +127,14 @@ def _identify_protected_buses(sys_config: "SystemConfig") -> set[int]:
             add(getattr(line, "to_bus", None))
         if t_type in ("generator", "battery"):
             add(getattr(line, "from_bus", None))
+
+    # 4) Buses that host a generator or battery.
+    bus_id_to_idx = {b.bus_id: i for i, b in enumerate(buses)}
+    for units in (sys_config.generators, sys_config.batteries):
+        for unit in (units or {}).values():
+            add(getattr(unit, "bus_index", None))
+            for bus_id in (getattr(unit, "bus_id_per_node", None) or {}).values():
+                add(bus_id_to_idx.get(bus_id))
 
     return protected
 
@@ -169,10 +180,11 @@ def _build_graph(
     n_tf = len(transformers)
 
     # DC power flow defaults for deriving reactance from line length
-    # (mirrors converters.convert_transmission_line_data lines 526-532).
-    dc_cfg = getattr(sys_config, "dc_power_flow", None)
-    dc_react_per_km = float(getattr(dc_cfg, "reactance_per_km", 0.4)) if dc_cfg else 0.4
-    dc_base_z = float(getattr(dc_cfg, "base_impedance", 100.0)) if dc_cfg else 100.0
+    # (same rule as converters.convert_transmission_line_data).
+    from esfex.config.schema import DCPowerFlowConfig
+    from esfex.utils.per_unit import line_reactance_pu, system_s_base
+    dc_cfg = getattr(sys_config, "dc_power_flow", None) or DCPowerFlowConfig()
+    s_base = system_s_base(sys_config)
 
     for orig_idx, line in enumerate(lines):
         fb = getattr(line, "from_bus", None)
@@ -187,17 +199,10 @@ def _build_graph(
             skipped.append(line.line_id or f"line_{orig_idx}")
             continue
 
-        # Match Julia's reactance derivation exactly: per-line value if
-        # given, else derived from length_km, else minimal default 0.01.
+        # Match the bridge's reactance exactly: per-line value if given,
+        # else derived from length_km over its circuits, else 0.01.
         length = float(line.length_km) if line.length_km is not None else 0.0
-        x_raw = line.reactance_pu
-        if x_raw is None or float(x_raw) <= 0:
-            if length > 0 and dc_base_z > 0:
-                x_pu = (length * dc_react_per_km) / dc_base_z
-            else:
-                x_pu = 0.01
-        else:
-            x_pu = float(x_raw)
+        x_pu = line_reactance_pu(line, length, dc_cfg, s_base)
         r_pu = float(line.resistance_pu) if line.resistance_pu is not None else 0.0
         cap = float(line.capacity_mw) if line.capacity_mw is not None else 0.0
         n_circ = int(line.num_circuits or 1)
@@ -250,6 +255,15 @@ def _build_graph(
         )
 
     return graph, skipped, n_lines, n_tf
+
+
+def _merged_cost_per_mw_km(originals, length_km: float) -> float:
+    """``cost_per_mw_km`` of a merged line whose per-MWh flow cost
+    (``length × cost_per_mw_km``) is that of its originals: each carries
+    ``|flow_share|`` of the merged flow, so the costs add with those weights."""
+    from esfex.bridge.converters import line_flow_cost_per_mwh
+    per_mwh = sum(abs(share) * line_flow_cost_per_mwh(line) for line, share in originals)
+    return per_mwh / length_km if per_mwh > 0 and length_km > 0 else 0.0
 
 
 def _fixed_point_reduce(
@@ -434,6 +448,9 @@ def _build_reduced_system(
                 frequency_hz=_proto_attr("frequency_hz", 50.0),
                 current_type=_proto_attr("current_type", "AC"),
                 line_type=_proto_attr("line_type", None),
+                cost_per_mw_km=_merged_cost_per_mw_km(
+                    [(original_lines[oi], os) for oi, _, os in line_refs_raw],
+                    edge.length_km),
             )
         )
 
@@ -538,12 +555,26 @@ def _build_reduced_system(
         _remap(fc) for fc in (getattr(sys_config, "freq_converters", None) or [])
     ]
 
+    # Units anchored by ``bus_index`` follow their bus to its new index
+    # (``bus_id_per_node`` is by id and needs no change). Their buses are
+    # protected, so the index always survives.
+    def _remap_units(units):
+        out = {}
+        for key, unit in (units or {}).items():
+            bi = getattr(unit, "bus_index", None)
+            if bi is not None and 0 <= bi < len(original_to_reduced_bus):
+                unit = unit.model_copy(update={"bus_index": original_to_reduced_bus[bi]})
+            out[key] = unit
+        return out
+
     reduced_config = sys_config.model_copy(update={
         "buses": reduced_buses,
         "transmission_lines_geo": reduced_lines,
         "transformers": transformers_out,
         "acdc_converters": acdc,
         "freq_converters": freq,
+        "generators": _remap_units(sys_config.generators),
+        "batteries": _remap_units(sys_config.batteries),
     })
 
     # ── Assemble ReductionMap ──

@@ -63,21 +63,21 @@ function refresh() {
     bridge.get_data(rawJson => {
         let data = null;
         try { data = JSON.parse(rawJson); }
-        catch (e) { _ucClearPlot(); showStatus("Bad payload: " + e.message, true); return; }
+        catch (e) { _ucClearPlot(); showStatus(_t("web.common.bad_payload", { error: e.message }), true); return; }
         if (!data || data.error) {
-            _ucClearPlot(); showStatus(data && data.error ? data.error : "No data", false);
+            _ucClearPlot(); showStatus(data && data.error ? data.error : _t("web.common.no_data"), false);
             return;
         }
         if (!data.months || !data.months.length
             || !data.avg_nl_mw || !data.avg_nl_mw.length) {
-            _ucClearPlot(); showStatus("No data", false);
+            _ucClearPlot(); showStatus(_t("web.common.no_data"), false);
             return;
         }
         try {
             renderHeatmap(data);
             hideStatus();
         } catch (e) {
-            showStatus("Render error: " + e.message, true);
+            showStatus(_t("web.common.render_error", { error: e.message }), true);
             console.error(e);
         }
     });
@@ -105,8 +105,7 @@ function renderHeatmap(data) {
             thickness: 12, len: 0.85,
             x: 0.42, xanchor: "left",
         },
-        hovertemplate:
-            "<b>%{y} %{x}</b><br>Net Load: %{z:,.1f} MW<extra></extra>",
+        hovertemplate: _t("web.charts.net_load_heatmap.hover_net_load"),
     };
     const traceB = {
         type: "heatmap",
@@ -120,36 +119,30 @@ function renderHeatmap(data) {
             thickness: 12, len: 0.85,
             x: 1.0, xanchor: "left",
         },
-        hovertemplate:
-            "<b>%{y} %{x}</b><br>Ramp: %{z:,.1f} MW/h<extra></extra>",
+        hovertemplate: _t("web.charts.net_load_heatmap.hover_ramp"),
     };
 
     // Y axis label switches with mode: UC packs rows by day-of-horizon,
     // planning packs rows by month-of-year.
-    const yTitle = (data.mode === "uc") ? "<b>Day</b>" : "<b>Month</b>";
-    const title = (data.mode === "uc")
-        ? "Net Load Heatmap — UC Horizon (Year " + data.year + ")"
-        : "Net Load Heatmap — Year " + data.year;
+    const yTitle = "<b>" + ((data.mode === "uc")
+        ? _t("web.charts.net_load_heatmap.axis_day")
+        : _t("web.charts.net_load_heatmap.axis_month")) + "</b>";
     const layout = {
-        margin: { t: 80, r: 30, b: 70, l: 70 },
+        margin: { t: 50, r: 30, b: 70, l: 70 },
         showlegend: false,
         annotations: [
-            { text: "<b>" + title + "</b>",
-              x: 0.5, xref: "paper", xanchor: "center",
-              y: 1.12, yref: "paper", yanchor: "bottom",
-              showarrow: false, font: { size: 16 } },
-            { text: "<b>a) Avg Net Load (MW)</b>",
+            { text: "<b>" + _t("web.charts.net_load_heatmap.title_a") + "</b>",
               x: 0.20, xref: "paper", xanchor: "center",
               y: 1.02, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
-            { text: "<b>b) Avg Net Load Ramp (MW/h)</b>",
+            { text: "<b>" + _t("web.charts.net_load_heatmap.title_b") + "</b>",
               x: 0.75, xref: "paper", xanchor: "center",
               y: 1.02, yref: "paper", yanchor: "bottom",
               showarrow: false, font: { size: 13 } },
         ],
         xaxis: {
             domain: [0, 0.40], anchor: "y", type: "category",
-            tickangle: -45, title: "<b>Hour of Day</b>",
+            tickangle: -45, title: "<b>" + _t("web.charts.net_load_heatmap.axis_hour_of_day") + "</b>",
         },
         yaxis: {
             anchor: "x", type: "category",
@@ -157,7 +150,7 @@ function renderHeatmap(data) {
         },
         xaxis2: {
             domain: [0.55, 0.95], anchor: "y2", type: "category",
-            tickangle: -45, title: "<b>Hour of Day</b>",
+            tickangle: -45, title: "<b>" + _t("web.charts.net_load_heatmap.axis_hour_of_day") + "</b>",
         },
         yaxis2: {
             anchor: "x2", type: "category",

@@ -1,13 +1,13 @@
 # GUI Workflow
 ## Prerequisites
 
-Install ESFEX with GUI dependencies:
+Install ESFEX:
 
 ```bash
 pip install esfex
 ```
 
-This installs PySide6 and QWebEngine. Requires Python 3.10+ and a display of at least 1280x720 (1920x1080 recommended).
+This installs PySide6 and QtWebEngine. Requires Python 3.10+ and a display of at least 1280x720 (1920x1080 recommended).
 
 ---
 
@@ -19,334 +19,313 @@ esfex studio
 
 # Or edit an existing configuration
 esfex studio -c existing_system.yaml
-
-# Open and auto-center on a specific system
-esfex studio -c config.yaml --system "isla_juventud"
 ```
 
 The editor window has three main panels:
 
-- **Element Tree** (left, ~20% width) — hierarchical overview of all objects
-- **Map / SLD View** (center, ~55% width) — interactive Leaflet.js map for placing and connecting elements
-- **Properties Panel** (right, ~25% width) — editable form for the selected element
+- **Element Tree** (left) — hierarchical overview of all objects
+- **Map / SLD View** (center) — interactive Leaflet.js map for placing and connecting elements, and the single-line diagram
+- **Properties Panel** (right) — editable form for the selected element
 
-Below the map, a Python Console (left) and Script Editor (right) provide programmatic access to the data model.
+Below the map, a tab widget holds **Run Output** (simulation output) and **Python REPL** (interactive console), with the **Script Editor** to the right. See [Overview](../gui/overview.md) for a full tour.
 
 ---
 
 ## Step 2: Create a New System
 
-1. Click the **Add System** button in the toolbar (it remains disabled until clicked for the first time in a blank project).
-2. A name dialog appears. Enter a descriptive name, for example `Cuba_Western_Grid`. System names must be unique and should not contain spaces (use underscores instead).
-3. Click **OK**. The new system appears as a bold top-level node in the Element Tree, with empty categories underneath: Nodes, Generators, Batteries, Transmission Lines, and so on.
+1. Click **Add System** in the toolbar.
+2. Enter a name, for example `Cuba_Western_Grid`. System names must be unique; prefer underscores to spaces.
+3. Click **OK**. The new system appears as a bold top-level item in the Element Tree, with its categories underneath (Nodes, Generators, Energy Storage, Transmission Lines, and so on). It already contains one node, "Node 0".
 
-Drawing mode buttons become enabled once a system exists.
+Drawing mode buttons become enabled once a system exists. The new system is also added to Global Settings > Systems to Simulate.
 
 !!! tip "Multiple Systems"
-    You can create additional systems later for multi-system studies. Each system is independent and can be interconnected via inter-system links.
+    You can create more systems later for multi-system studies. They are solved together and can be connected with inter-system links (Step 12).
 
 ---
 
-## Step 3: Place Nodes on the Map
+## Step 3: Add Nodes and Their Demand
 
-Nodes represent substations, load centers, or any point where generation, load, or transmission converge.
+A node is a geographic region (a substation area or load center). It holds demand, reserves, and losses, and owns one or more buses. Nodes have no marker on the map.
 
-1. Click the **Node** button in the toolbar to enter node placement mode. The cursor changes to a crosshair.
-2. Click on the map at the location of your first substation or load center. A numbered marker appears (e.g., "Node 0").
-3. Continue clicking to place additional nodes. Each receives an auto-incremented index (Node 0, Node 1, Node 2, ...).
-4. When finished, press **Escape** or click the **Select** button to exit placement mode.
-
-Place three nodes for a three-bus system.
-
-### Configuring Node Properties
-
-Click any node marker on the map or in the Element Tree. The Properties Panel shows:
-
-- **Name**: Give the node a human-readable name (e.g., "Havana", "Cienfuegos", "Camaguey")
-- **Coordinates**: Latitude and longitude (auto-filled from where you clicked; editable for precision)
-- **Demand File**: Path to the demand data file (Excel or CSV) for this node. If demand is specified at the system level, individual node demand files are optional.
+1. Right-click **Nodes** under your system and select **Add Node**. Repeat until you have three nodes (Node 0, Node 1, Node 2).
+2. Click a node in the tree. In the **General** tab:
+    - **Name**: a readable name, e.g. "Havana".
+    - **Centroid (geographic reference)**: click **Place**, then click the map where the region is. Equipment and buses you place later are assigned to the node with the nearest centroid.
+3. In the **Demand** tab, click **Load CSV...** and choose the node's hourly demand file (CSV or Excel). For a file with several columns, the column number is the node index. All nodes must have the same number of hours. The **Forecast** button can generate a demand series instead.
 
 !!! tip "Map Navigation"
-    Double-click any node in the Element Tree to center the map on that node. Use the mouse scroll wheel to zoom. Click and drag to pan.
+    Double-click an element in the Element Tree to center the map on it. Use the scroll wheel to zoom and drag to pan.
 
 ---
 
-## Step 4: Add Generators to Nodes
+## Step 4: Place Buses
 
-Generators represent power plants — both existing units and investment candidates.
+Buses are the electrical connection points. Lines, transformers, and equipment connect to buses.
 
-1. Click the **Generator** button in the toolbar to enter generator placement mode.
-2. Click on the map near a node. The generator icon snaps automatically to the nearest node (magnetic snapping).
-3. The Properties Panel immediately shows the generator configuration form.
+1. Click **Bus** in the toolbar.
+2. Click the map at each substation, at least one per node. Each bus joins the node with the nearest centroid; check **Parent Node** in the bus form and change it if needed.
+3. In the bus form, set **Voltage (kV)** (new buses default to 220 kV), and set **Bus Type** to *slack* on one bus of the system (the others stay *PQ*).
+4. Press **Escape** to return to selection mode.
+
+**Role** (connection, load, or mixed) and **Demand Fraction** decide which buses carry the node's demand. When you save or run, ESFEX reassigns roles from the topology (buses with generation become *mixed*, the only bus of a node or a low-voltage bus becomes *load*) and spreads the node demand over its load and mixed buses if the fractions do not add up to 1.
+
+---
+
+## Step 5: Draw Transmission Lines
+
+1. Click **Line** in the toolbar.
+2. Click the **starting bus**. A dashed rubber-band line follows the cursor.
+3. Click on empty map space to add **waypoints** that route the line (along roads, around obstacles).
+4. Click the **destination bus** to finish the line.
+5. Press **Escape** during the trace to cancel it.
+
+Lines can start and end at buses, transformers, converters, or equipment; clicking a marker of an unsupported type does nothing.
+
+### Configuring Line Properties
+
+Click a line on the map or in the tree:
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| **From bus / To bus** | Line endpoints (editable) | bus_0 / bus_1 |
+| **Capacity (MW)** | Thermal transfer capacity | 100.0 |
+| **Voltage (kV)** | Nominal voltage | 220.0 |
+| **Length (km)** | Physical length (computed from the trace) | 200.0 |
+| **Reactance (pu)** | Per-unit reactance (DC power flow) | 0.05 |
+| **Resistance (pu)** | Per-unit resistance | 0.01 |
+| **Circuits** | Number of parallel circuits (the capacity and impedances above are for all of them together) | 1 |
+
+Draw three lines to connect the nodes:
+
+- Node 0 bus to Node 1 bus: 100 MW
+- Node 1 bus to Node 2 bus: 50 MW
+- Node 0 bus to Node 2 bus: 75 MW (optional)
+
+!!! tip "Parallel Lines"
+    You can draw several lines between the same pair of buses. Each keeps its own `line_id` and capacity.
+
+---
+
+## Step 6: Add Generators
+
+1. Click **Generator** in the toolbar.
+2. Click the map where the plant is. The generator is created at that point and connected automatically to the nearest high-voltage bus through a new low-voltage bus, a transformer, and short lines.
+3. The Properties Panel shows the generator form.
 
 ### Configuring Generator Properties
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| **Name** | Human-readable label | "Solar PV" |
-| **Type** | `Renewable` or `Non-renewable` | Renewable |
-| **Fuel** | Energy source (Solar, Wind, Diesel, Natural Gas, etc.) | Solar |
-| **Rated Power (MW)** | Existing installed capacity at this node | 50.0 |
-| **Investment Cost ($/MW)** | Per-MW cost for new capacity | 700000 |
-| **Max Investment (MW)** | Maximum new capacity allowed at this node | 200.0 |
-| **Fuel Cost ($/MWh)** | Variable fuel cost (0 for renewables) | 0.0 |
-| **Fixed Cost ($/MWh)** | Fixed O&M cost | 5.0 |
-| **Maintenance Cost ($/MWh)** | Variable O&M cost | 2.0 |
-| **Lifetime (years)** | Expected operational lifetime | 25 |
-| **Initial Age (years)** | Current age of existing unit | 0 |
-| **Efficiency at Rated** | Thermal efficiency at full load | 1.0 |
-| **Degradation Rate** | Annual capacity loss fraction | 0.005 |
-| **Availability Profile** | Path to CSV file with hourly capacity factors | solar_profile.csv |
+| **Name** | Readable label | "Solar PV" |
+| **Type** | Renewable or Non-renewable (new generators start as Renewable) | Renewable |
+| **Fuel** | Energy source | Solar |
+| **Technology** | Optional technology definition | (None) |
+| **Availability** | Hourly capacity-factor CSV (values 0–1) | solar_profile.csv |
+| **Rated Power (MW)** | Existing installed capacity (new generators start at 0) | 50.0 |
+| **Life Time (years)** | Expected operational lifetime | 25 |
+| **Initial Age (years)** | Current age of the unit | 0 |
+| **Min Power (pu)** | Minimum stable output as a fraction of rated power | 0.0 |
+| **Ramp Up / Ramp Down (pu/h)** | Ramp limit as a fraction of rated power per hour (1.0 = no practical limit) | 1.0 |
+| **Eff. at Rated (frac)** | Efficiency at full load | 1.0 |
+| **Fuel ($/MWh)** | Fuel cost (0 for renewables) | 0.0 |
+| **Fixed ($/MW·yr)** | Fixed O&M per MW of rated power per year, paid whether or not the unit runs | 20000.0 |
+| **Maintenance ($/MWh)** | Variable O&M cost | 2.0 |
 
-For a typical three-node island system, add:
+The generator form has no investment fields. New capacity is defined in the Investment Portfolio (Step 8). See [Element Forms](../gui/element-forms.md#generator) for all fields, including the cost curve options.
 
-- **Node 0**: Solar PV (50 MW existing, 200 MW max investment) + Diesel Generator (30 MW, no new investment)
-- **Node 1**: Wind (20 MW existing, 100 MW max investment) + Diesel Generator (20 MW)
-- **Node 2**: Diesel Generator (40 MW) + Gas Turbine (25 MW)
+For a three-node island system, add for example:
 
-Each new generator appears under the **Generators** category in the Element Tree.
+- **Node 0**: Solar PV (50 MW) + Diesel (30 MW)
+- **Node 1**: Wind (20 MW) + Diesel (20 MW)
+- **Node 2**: Diesel (40 MW) + Gas Turbine (25 MW)
 
-### Cost Curves (Advanced)
-
-For generators with non-linear cost characteristics, expand the **Cost Curve** section in the Properties Panel. You can choose from four curve types:
-
-- **Flat**: Constant marginal cost at all output levels
-- **Linear**: Price ramps from `price_at_zero` to `price_at_max`
-- **Stepwise**: Piecewise blocks (e.g., first 40% at $45/MWh, next 30% at $55/MWh, last 30% at $75/MWh)
-- **Exponential**: `price(P) = base_price * exp(scale_factor * P/P_max)`
+Each generator appears under **Generators** in the Element Tree.
 
 ---
 
-## Step 5: Add Batteries
+## Step 7: Add Storage
 
-Battery storage follows the same placement pattern as generators.
-
-1. Click the **Battery** button in the toolbar.
-2. Click near a node on the map. The battery icon snaps to the nearest node.
-3. Configure in the Properties Panel:
+1. Click **Storage** in the toolbar.
+2. Click the map. The battery is created and connected like a generator.
+3. Configure it in the Properties Panel:
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| **Name** | Human-readable label | "Li-Ion 4h" |
-| **Energy Capacity (MWh)** | Total storage capacity | 0 (no existing) |
-| **Max Charge Power (MW)** | Maximum charging rate | 0 |
-| **Max Discharge Power (MW)** | Maximum discharging rate | 0 |
-| **Charge Efficiency** | Round-trip charge efficiency | 0.95 |
-| **Discharge Efficiency** | Round-trip discharge efficiency | 0.95 |
-| **SOC Min / Max** | State of charge limits (fraction) | 0.10 / 0.95 |
-| **SOC Initial** | Starting state of charge | 0.50 |
-| **Invest Cost Power ($/MW)** | Cost for power capacity | 180000 |
-| **Invest Cost Energy ($/MWh)** | Cost for energy capacity | 120000 |
-| **Max Investment Power (MW)** | Maximum power investment | 100 |
-| **Max Investment Energy (MWh)** | Maximum energy investment | 400 |
-| **Min/Max Duration (hours)** | E/P ratio bounds | 2.0 / 8.0 |
-| **Lifetime (years)** | Expected lifetime | 15 |
+| **Name** | Readable label | "Li-Ion 4h" |
+| **Rated Power (MW)** | Existing power rating | 0 |
+| **Capacity (MWh)** | Existing energy capacity | 0 |
+| **Max Charge / Max Discharge (MW)** | Charging and discharging limits | 0 / 0 |
+| **Min / Max Duration (h)** | Energy-to-power ratio bounds | 2.0 / 8.0 |
+| **Charge Eff. / Discharge Eff. (frac)** | One-way efficiencies | 0.95 / 0.95 |
+| **SOC Initial (frac)** | State of charge at the start of each year | 0.50 |
+| **Max DoD (frac)** | Maximum depth of discharge | 0.90 |
+| **Life Time (years)** | Expected lifetime | 15 |
 
-!!! note "Battery SOC Cyclic Constraint"
-    ESFEX enforces `SOC(t_last) == SOC(t_initial)` at the end of each operational day. This prevents the optimizer from treating batteries as free energy sources.
+!!! note "Battery state of charge"
+    The state of charge is carried from one rolling-horizon window to the next. At the end of each year the battery must return to at least its initial state of charge (a soft constraint).
 
 ---
 
-## Step 6: Draw Transmission Lines with Polyline Traces
+## Step 8: Define Investment Candidates
 
-1. Click the **Line** button in the toolbar to enter line drawing mode.
-2. Click on the **starting node** (the source). A dashed rubber-band line appears from that node to your cursor.
-3. Click on the map at **intermediate waypoints** to route the line geographically (along roads, around obstacles, etc.). Each click adds a waypoint to the polyline.
-4. Click on the **destination node** to finish the line. The polyline trace is completed and appears as a solid line on the map.
-5. Press **Escape** at any time to cancel the current trace and discard all waypoints.
+Investment options live in the **Investment Portfolio**, not in the equipment forms.
 
-### Configuring Line Properties
+1. Right-click **Investment Portfolio** and select **Add Generator** (or **Add Battery**, **Add Transmission**, ...). A new entry is created with one row per node.
+2. In the entry form, set the **Name**, the **Type**, and optionally a **Technology** (define technologies under **Technologies** with right-click **Add Technology**).
+3. In the **Investment per Node** table, set the investment cost ($/MW) and the maximum new capacity (MW) for each node. Battery entries also have energy cost ($/MWh) and energy maximum (MWh) columns.
 
-Click a drawn line on the map or in the Element Tree:
-
-| Field | Description | Example |
-|-------|-------------|---------|
-| **Capacity (MW)** | Thermal transfer capacity | 100.0 |
-| **Reactance (p.u.)** | Per-unit reactance (for DC power flow) | 0.05 |
-| **Resistance (p.u.)** | Per-unit resistance | 0.01 |
-| **Length (km)** | Physical line length (auto-calculated from waypoints) | 200.0 |
-| **Voltage (kV)** | Nominal voltage level | 220.0 |
-
-Draw three lines to create a fully connected network:
-
-- Node 0 to Node 1: 100 MW capacity
-- Node 1 to Node 2: 50 MW capacity
-- Node 0 to Node 2: 75 MW capacity (optional direct link)
-
-!!! tip "Parallel Lines"
-    You can draw multiple lines between the same pair of nodes. The serializer automatically sums their capacities in the adjacency matrix. Each line retains its own `line_id` and individual capacity.
+Example: a Solar PV entry with 700,000 $/MW and a 200 MW limit at Node 0, and a Wind entry with a 100 MW limit at Node 1.
 
 ---
 
-## Step 7: Add Fuel Entry Points
+## Step 9: Add Fuel Sources
 
-Fuel entry points define where fuel enters the network (required for diesel, natural gas, etc.).
+Fuel sources define where fuel enters the network. They matter only when Global Settings > Primary Energy is on.
 
-1. Click the **Fuel Entry** button in the toolbar.
-2. Click near the node where fuel is imported (e.g., a port node).
-3. Configure in the Properties Panel:
-
-| Field | Description | Example |
-|-------|-------------|---------|
-| **Fuels** | List of fuel types available at this point | [diesel] |
-| **Max Import Rate** | Maximum fuel import rate (tonnes/period) | 500.0 |
-| **Import Cost** | Landed cost per tonne | 850.0 |
-
-Fuel entry points are only relevant when `enable_primary_energy: true`.
+1. Define the fuels under **Fuels** (right-click **Add Fuel**).
+2. Click **Fuel Source** in the toolbar and click the map at the import point (e.g., a port).
+3. In the form, add the fuels available at this point and set their import limits and costs. See [Element Forms](../gui/element-forms.md#fuel-source).
 
 ---
 
-## Step 8: Configure System-Level Settings
+## Step 10: Configure System Settings
 
-Click the system name in the Element Tree. The Properties Panel shows:
+Click the system name in the Element Tree. The form has three tabs.
 
-### General Settings
-
-| Field | Description | Example |
-|-------|-------------|---------|
-| **Demand File** | Path to system-wide demand data | demand.xlsx |
-| **Demand Scale** | Multiplier applied to all demand | 1.0 |
-| **Demand Growth** | Annual growth rate | 0.02 (2%) |
-| **Discount Rate** | For NPV calculations | 0.05 (5%) |
-
-### RE Targets
+### General
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| **Target RE Penetration** | Final-year RE fraction target | 0.80 (80%) |
-| **Initial RE Penetration** | Starting RE fraction (0 = auto-calculate) | 0.0 |
-| **Min Annual Increment** | Minimum yearly RE increase | 0.02 |
-| **Max Annual Increment** | Maximum yearly RE increase | 0.10 |
+| **Demand Scale (x)** | Multiplier applied to all demand | 1.0 |
+| **Discount Rate (frac)** | Discount rate for NPV | 0.05 |
+| **Target RE Penetration (frac)** | Final-year renewable share target | 0.80 |
+| **Min / Max Annual Increment (frac)** | Bounds on the yearly RE increase | 0.01 / 0.10 |
+| **Enable CO2 Budget** | Activate the CO2 budget (on by default) | on |
+| **CO2 Annual Budget (tonnes/year)** | Maximum CO2 emissions per year | 500000 |
+
+### Cost Limits
+
+Max Annual Investment, Budget Scope, Max Annual Operating Cost and Life Extension Cost Factor.
 
 ### Penalties
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| **Loss of Load** | VOLL in $/MW (must be very high) | 10000000.0 |
-| **Curtailment** | Cost of curtailing RE ($/MWh) | 100.0 |
-| **Max Curtailment Ratio** | Max fraction of RE that can be curtailed | 0.05 |
-| **CO2 Cost** | Carbon price ($/tCO2) | 10.0 |
+| **Loss of Load** | Value of lost load, $/MWh | 50000 |
+| **Curtailment Cost ($/MWh)** | Cost of curtailing renewable output | 10 |
+| **Max Curtailment Ratio** | Maximum fraction of renewable output that can be curtailed | 0.05 |
+| **CO2 Cost** | Carbon price, $/tCO2 | 10 |
 
-### CO2 Budget
-
-| Field | Description | Example |
-|-------|-------------|---------|
-| **Enabled** | Activate CO2 budget constraint | true |
-| **Annual Budget** | Maximum CO2 emissions per year (tonnes) | 500000.0 |
-
-### DC Power Flow (Advanced)
-
-| Field | Description | Example |
-|-------|-------------|---------|
-| **Enabled** | Use linearized power flow (vs. transport model) | true |
-| **Base Impedance** | System base impedance (Ohms) | 100.0 |
-| **Max Angle Difference** | Maximum voltage angle difference (degrees) | 30.0 |
+Criticality levels are multipliers on the loss-of-load value. See [Global & System Settings](../gui/global-settings.md#system-settings) for every field and its default. Power flow mode and slack bus are not system settings: the mode is in Global Settings, and the slack bus is chosen with Bus Type in the bus form.
 
 ---
 
-## Step 9: Configure Global Settings
+## Step 11: Configure Global Settings
 
-Click **Global Settings** at the top of the Element Tree. These apply across all systems:
+Click **Global Settings** at the top of the Element Tree. These apply to all systems. New projects take some defaults from **File > Preferences…** (resolution 6 h, overlap 24 h, primary energy off, time limit 3600 s, gap 0.001).
 
 ### Simulation
 
 | Field | Description | Options |
 |-------|-------------|---------|
-| **Mode** | Simulation type | `development` (LP) or `unit_commitment` (MIP) |
-| **Date Start** | Simulation start date | 01/01/2025 00:00 |
+| **Systems to Simulate** | Systems included in Validate and Run | checkboxes |
+| **Simulation Mode** | Simulation type | Development (LP) or Unit Commitment (MIP) |
+| **Start Date** | Simulation start date | 01/01/2025 00:00 |
+| **Primary Energy** | Model fuel supply | on / off |
 
 ### Solver
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| **Solver** | Optimization solver | highs, gurobi, cplex, cbc, glpk |
+| **Solver** | Optimization solver | highs, gurobi, cplex, scip, xpress, cbc, glpk |
 | **Threads** | Parallel solver threads | 4 |
-| **Time Limit** | Max solve time (seconds) | 3600 |
-| **MIP Gap** | Optimality gap for MIP | 0.01 |
+| **Time Limit (s)** | Maximum solve time | 3600 |
+| **Gap (frac)** | Optimality gap for MIP | 0.001 |
 
-### Temporal Resolution
+### Temporal
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| **Resolution (hours)** | Time step size | 1 |
-| **Rolling Horizon** | Enable rolling horizon dispatch | true |
-| **Window Size (hours)** | Rolling horizon window | 48 |
-| **Overlap (hours)** | Window overlap for continuity | 6 |
+| **Resolution (h)** | Time step, whole hours from 1 to 24 | 1 |
+| **Use Rolling Horizon** | Solve the year in windows | on |
+| **Rolling Horizon (h)** | Window size | 48 |
+| **Overlap (h)** | Look-ahead solved but not kept in each window | 24 |
 
 ### Master Problem
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| **Representative Days** | Days per year for operational validation | 5 |
-| **Min Day Separation** | Minimum days between representatives | 7 |
-| **MGA Enabled** | Near-optimal alternative exploration | false |
+| **Representative Days** | Days per year used by the master problem | 5 |
+| **Min Day Separation** | Minimum separation between representative days | 5 |
+| **Enable MGA** | Near-optimal alternative exploration | off |
 
 ### N-1 Security
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| **Enabled** | Activate contingency analysis | false |
-| **Transmission** | Transmission contingency | false |
-| **Generation** | Generation contingency | false |
+| **Enable N-1 Security** | Activate contingency constraints | off |
+| **Transmission** | Transmission contingencies | on |
+| **Generation** | Generation contingencies | on |
+
+See [Global & System Settings](../gui/global-settings.md) for the power flow, Master Problem, Risk & Resilience, and Visual Scaling options.
 
 ---
 
-## Step 10: Add More Systems (Multi-System Workflow)
+## Step 12: Add More Systems (Multi-System Workflow)
 
-1. Click **Add System** in the toolbar. Enter a name (e.g., "Isla_Juventud").
-2. Switch between systems by clicking their names in the Element Tree.
-3. Place nodes, generators, batteries, and lines following the same workflow.
+1. Click **Add System** in the toolbar and enter a name (e.g., "Isla_Juventud").
+2. Build it with the same steps. All systems are shown on the map at once; clicking an element of a system makes that system active.
 
 ### Connecting Systems with Inter-System Links
 
-1. Click **Inter-system Links** in the Element Tree.
-2. In the Properties Panel, configure the connection:
+1. Select **Line** in the toolbar.
+2. Click a bus in the first system, add waypoints along the cable route, and click a bus in the second system.
+3. Because the endpoints are in different systems, an inter-system link is created (100 MW by default). It appears under **Inter-system Links > Transmission Lines**.
+4. Click the link to edit it:
 
 | Field | Description | Example |
 |-------|-------------|---------|
-| **Systems** | Pair of systems to connect | [Cuba_Western_Grid, Isla_Juventud] |
-| **From Nodes** | Node indices in system A | [2] |
-| **To Nodes** | Node indices in system B | [0] |
 | **Capacity (MW)** | Existing interconnection capacity | 50.0 |
-| **Invest Cost ($/MW)** | Cost for capacity expansion | 500000.0 |
-| **Max Investment (MW)** | Maximum expansion | 200.0 |
+| **Length (km)** | Computed from the trace | 120.0 |
+| **Investment cost ($/MW)** | Cost for capacity expansion | 500000.0 |
+| **Max investment (MW)** | Maximum expansion | 200.0 |
+
+See [Inter-System Links](../gui/inter-system-links.md) for details and current limitations.
 
 ---
 
-## Step 11: Validate the Configuration
+## Step 13: Validate the Configuration
 
 1. Click **Validate** in the toolbar.
-2. The validation dialog runs checks across six categories:
-   - **Structural integrity**: Node count, index consistency
-   - **Electrical parameters**: Generator/battery parameter ranges, efficiency bounds
-   - **Demand data**: File existence, format, row count
-   - **Generation adequacy**: Sufficient capacity to meet peak demand
-   - **Fuel network**: Fuel entry points connected to generators that need them
-   - **Connectivity**: All nodes reachable, no isolated equipment
+2. The validation dialog has one checkbox per check category:
+    - **Structural** (nodes, lines)
+    - **Configuration** (keys of the opened YAML file that ESFEX ignores, and a `min_annual_increment` greater than `max_annual_increment`)
+    - **Electrical** (buses, equipment references)
+    - **Demand** (load data, coverage)
+    - **Generation** (adequacy, availability files)
+    - **Fuel Network** (supply chain integrity)
+    - **Connectivity** (isolated components)
+    - **Realism** (duplicate plants, reserve margin, deliverability of the peak demand through the line ratings)
+    - **Topology Audit** (GUI vs solver agreement), which also reports load islands with no reachable generation
 
-3. Results are grouped by severity:
-   - **Errors** (red) — must be fixed before running
-   - **Warnings** (yellow) — advisory, do not prevent simulation
-   - **Info** (blue) — informational messages
+    There are also a **Network Simplification** check (dead-end buses and unused fuel elements) and an optional **Network reduction (levels)** check, L1 to L4.
 
-4. Double-click any issue to navigate directly to the affected element on the map.
+3. Click **Run Validation**. Results are grouped by severity: errors, warnings, and info.
+4. Double-click an issue to go to the affected element.
 
-Fix all errors before proceeding. Common errors: mismatched array lengths (per-node arrays must have exactly `num_nodes` entries), missing demand files, and generators with zero rated power and zero max investment.
+Validation covers the systems in Systems to Simulate. Fix all errors; warnings do not block the run. When there are no errors, **Run** is enabled.
 
 ---
 
-## Step 12: Run the Simulation from the GUI
+## Step 14: Run the Simulation from the GUI
 
-1. Click **Run** in the toolbar. The Run button is only enabled after a successful validation.
-2. The Simulation Dialog opens with:
-   - A progress bar tracking year-by-year and window-by-window progress
-   - A live log viewer showing solver output
-   - Cancel and Close buttons
+1. Click **Run** in the toolbar. It is enabled only after a validation with no errors.
+2. The Studio writes the project to a temporary YAML file and runs `esfex run` in the **Run Output** tab, where the solver log appears. Results go to the `results` folder next to your saved configuration (an unsaved project writes to `~/.cache/esfex/studio_results`; the status bar says where).
+3. To stop the run, click **■ Stop** in the tab corner or press `Ctrl+C` in the Run Output tab. A second Stop force-kills the process.
+4. When the run finishes successfully, **Results** and **Sensitivity** are enabled. By default the results viewer opens automatically. The project remembers the results file: save the project, and the next time you open it the Studio offers to open those results.
 
-3. The simulation runs `esfex run` as a subprocess. Progress is parsed from log messages (e.g., "Year 2025 (1/25)", "Window 3/208").
-4. When complete, the dialog shows "Optimization completed successfully!" and the Close button becomes enabled.
-
-Alternatively, run from the CLI after exporting:
+Alternatively, save the configuration and run it from the command line:
 
 ```bash
 esfex run -c my_system.yaml --years 25 -v
@@ -354,43 +333,40 @@ esfex run -c my_system.yaml --years 25 -v
 
 ---
 
-## Step 13: View Results
+## Step 15: View Results
 
-1. Click **Results** in the toolbar. The Results panel opens with:
-   - **Summary table**: Total cost, RE penetration, emissions by year
-   - **Generation dispatch charts**: Stacked area charts showing hourly generation mix
-   - **Investment timeline**: Bar charts showing capacity additions by technology and year
-   - **Power flow maps**: Arrows on the map showing transmission flows (available in the Results layer)
+1. Click **Results** in the toolbar. The map switches to the Results layer and the results dialog opens, with charts grouped in Generation, Storage, Economics, System, UC Operations, Near-Optimal, and Custom.
+2. Use the **Map Results** panel on the map to choose the System, Year, and Variable to draw: capacity and generation mix pies, node values such as RE Penetration, Nodal Prices (LMP), and Load Shedding, and Power Flow lines.
+3. Click **Sensitivity** in the toolbar to open the sensitivity analysis dialog.
 
-2. Switch to the **Results** layer in the Layer dropdown to see power flow arrows, generation heatmaps, and load shedding indicators overlaid on the map.
-
-3. Click **Sensitivity** in the toolbar (available after simulation) to launch a Sobol sensitivity analysis on the solved model.
+**File > Load Results…** (`Ctrl+R`) opens a results file from an earlier run; the project then remembers that file.
 
 ### Accessing Results Programmatically
 
-Results are stored in HDF5 format. Use the Python Console:
+Results are written to HDF5 in the `results` folder (for a Studio run, the one next to the saved configuration). A file is named `<config name>_<ddmmyyyy>_<HHMM>.h5`; runs started from the Studio use a temporary config, so their files are named `esfex_run_<random>_<ddmmyyyy>_<HHMM>.h5`. In the Python REPL:
 
 ```python
+import glob
 import h5py
 
-with h5py.File("results/results_Cuba_Western_Grid.h5", "r") as f:
-    print(list(f["summary_results"].keys()))
-    costs = f["summary_results/total_cost"][:]
-    re_pen = f["summary_results/re_penetration"][:]
-    for y, (c, r) in enumerate(zip(costs, re_pen)):
-        print(f"Year {y+1}: Cost=${c:,.0f}, RE={r:.1%}")
+path = sorted(glob.glob("results/*.h5"))[-1]   # most recent run
+with h5py.File(path, "r") as f:
+    s = f["summary_results"]
+    for y, c, r in zip(s["year"][:], s["total_cost"][:], s["renewable_penetration"][:]):
+        print(f"{int(y)}: cost = ${c:,.0f}, RE = {r:.1%}")
 ```
 
 ---
 
-## Step 14: Save and Export
+## Step 16: Save
 
-| Action | Shortcut | Format | Includes |
-|--------|----------|--------|----------|
-| **Save** | `Ctrl+S` | YAML + GUI metadata | Visual layout, map positions, marker styles, editor state |
-| **Export** | `Ctrl+Shift+S` | Clean YAML | Only optimization-relevant data, suitable for `esfex run` |
+| Action | Shortcut | What it writes |
+|--------|----------|----------------|
+| **Save** | `Ctrl+S` | The configuration YAML at the current path (asks for a path the first time) |
+| **Export As…** | `Ctrl+Shift+S` | The same YAML at a new path, which becomes the current file |
+| **Export Project…** | -- | A `.esfexp` bundle with the YAML and copies of all referenced data files; optionally the results file (**Include results**, off by default) |
 
-The saved file can be reopened with full visual fidelity. The exported file is a minimal YAML the CLI can process directly.
+Save and Export As write the same file, including map positions, line waypoints, and marker styles. `esfex run` reads it directly. If the automatic pre-save validation finds errors, you are asked whether to save anyway.
 
 ---
 
@@ -398,28 +374,27 @@ The saved file can be reopened with full visual fidelity. The exported file is a
 
 | Shortcut | Action |
 |----------|--------|
-| `Escape` | Cancel drawing mode / deselect element |
-| `Delete` | Delete selected element |
-| `Ctrl+Z` | Undo last action |
-| `Ctrl+C` | Copy element properties |
-| `Ctrl+V` | Paste properties onto selected element |
-| `Ctrl+D` | Duplicate element |
-| `Ctrl+F` | Focus search box in Element Tree |
-| `Ctrl+O` | Open / Import YAML |
-| `Ctrl+S` | Save project |
-| `Ctrl+Shift+S` | Export clean YAML |
-| `Ctrl+N` | New blank project |
-| `Ctrl+,` | Open Preferences |
+| `Escape` | Cancel the current drawing mode |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / Redo |
+| `Ctrl+N` | New Scenario |
+| `Ctrl+O` | Import Configuration… |
+| `Ctrl+S` | Save |
+| `Ctrl+Shift+S` | Export As… |
+| `Ctrl+R` | Load Results… |
+| `Ctrl+,` | Preferences… |
+| `F1` | Documentation |
+
+Delete, Duplicate, Copy Attributes, and Paste Attributes have no shortcuts; use the right-click menu on the map or in the tree.
 
 ---
 
 ## Tips and Best Practices
 
-- **Drag nodes** to reposition them. Attached generators, batteries, fuel entries, and line endpoints move automatically.
-- **Double-click** any element in the Element Tree to center the map on it.
-- **Ctrl+Click** to select multiple elements for batch editing (e.g., set the same fuel cost for all diesel generators).
-- Use the **Appearance** section in property forms to customize marker colors, icon sizes, and line widths.
-- Switch visual themes under **File > Preferences > Theme**: Light (default), Dark, or Twilight.
-- Import geographic data (GeoJSON, Shapefile, KML) via **File > Import Geographic Data** to quickly populate nodes and lines from existing GIS datasets.
-- Use the **Python Console** for batch operations: `for g in state.generators: g.fuel_cost = [85.0] * len(g.fuel_cost)`.
-- Use **Dry Run** mode (`esfex run -c config.yaml --dry-run`) to validate and preview the simulation plan without solving.
+- **Drag** a bus or piece of equipment to move it. Lines attached to it follow.
+- **Double-click** an element in the Element Tree to center the map on it.
+- **Ctrl+Click** in the Element Tree to select several elements of one type for batch editing (e.g., set the same fuel cost for all diesel generators).
+- Use the **Appearance** group in property forms to customize marker colors, sizes, and line widths.
+- Change the theme under **File > Preferences… > General > Appearance > Theme** (Light, GitHub Light, VS Code Dark+, Dracula, One Dark Pro).
+- Import GIS data (GeoJSON, Shapefile, KML, KMZ, GeoPackage) with **File > Import Geo Asset…**, then right-click the asset under **Geo Assets** and select **Parse to System Elements...**. The data must be in WGS84. For building a grid from OpenStreetMap data, use **Workflows > Grid Builder…**.
+- Use the **Python REPL** for batch operations, for example: `for gid, g in model.state.generators.items(): model.update_generator(gid, fuel_cost=85.0)` (see [Scripting & Automation](../gui/scripting.md)).
+- Use `esfex run -c config.yaml --dry-run` to validate and preview the simulation plan without solving.

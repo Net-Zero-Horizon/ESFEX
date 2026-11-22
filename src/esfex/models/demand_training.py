@@ -1,18 +1,17 @@
 """Unified training pipeline for demand estimation models.
 
 Builds a single hourly dataset from real demand data (Parquet files),
-trains XGBoost or TFT using temporal cross-validation, and reports
-multi-resolution validation metrics.
+trains the XGBoost shape model using temporal cross-validation, and
+reports multi-resolution validation metrics.
 
 No synthetic data — models learn exclusively from real demand.
 
 Usage:
-    esfex train-demand-model [--engine xgboost|tft]
+    esfex train-demand-model [--cache-dir PATH] [--folds N] [--output PATH]
 """
 
 from __future__ import annotations
 
-import datetime
 import json
 import logging
 import math
@@ -23,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from esfex.paths import DEMAND_DATASET_DIR, MODELS_DIR
+from esfex.utils.temporal import year_row_dates
 
 logger = logging.getLogger(__name__)
 
@@ -46,15 +46,34 @@ FEATURE_COLS = [
     "latitude", "longitude",
     # Temperature lag/memory features (daily-resolution, broadcast to hours).
     # Training: computed from ERA5 hourly.
-    # Inference (ECVI): precomputed from CMIP6 3hr subdaily data.
     "temp_1d_lag", "temp_7d_mean", "temp_30d_mean", "temp_trend_7d",
     "temp_daily_max", "temp_daily_min", "temp_diurnal_range",
-    # Demand-shape autoregressive lags: DISABLED for ECVI-compatible model
-    # (no past demand available at grid pixels). The 32-feat parity variant
-    # ("demand_model_ar.xgb") keeps them for TFT comparison only.
-    # "shape_lag_1h", "shape_lag_24h", "shape_lag_168h",
+    # No demand-shape autoregressive lags: forward per-node generation has
+    # no past demand to seed them.
 ]
 TARGET_COL = "shape_factor"
+
+# ISO3 → country_id encoding of a dataset build. It is written next to the
+# dataset and, when a model is saved, next to that model (the file
+# demand_ml.load_country_map reads next to the model it loads).
+COUNTRY_MAP_FILENAME = "demand_xgb_country_map.json"
+
+
+def write_country_map(directory: Path, country_to_id: dict) -> Optional[Path]:
+    """Write *country_to_id* as ``directory/COUNTRY_MAP_FILENAME``.
+
+    Returns the path, or None (with a warning) when the directory cannot be
+    written.
+    """
+    path = Path(directory) / COUNTRY_MAP_FILENAME
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(country_to_id, f)
+    except OSError as exc:
+        logger.warning("Could not write the country map %s: %s", path, exc)
+        return None
+    return path
 
 
 # ── Holiday features ────────────────────────────────────────────────────────
@@ -95,18 +114,17 @@ def _holiday_features(iso3: str, year: int, hours: int = 8760,
         except (NotImplementedError, KeyError, AttributeError, TypeError):
             continue
 
+    # Each 24-row day is the real date of its rows (29 February skipped in
+    # an 8760-h year); distances count real days.
     n_days = hours // 24
-    jan1 = datetime.date(year, 1, 1)
+    days_arr = np.array([d.toordinal() for d in
+                         year_row_dates(year, n_days * 24)[::24].date])
     is_hday_day = np.zeros(n_days, dtype=np.float32)
     hol_offsets: list[int] = []
     if hol is not None:
-        for d in hol.keys():
-            offset = (d - jan1).days
-            hol_offsets.append(offset)
-            if 0 <= offset < n_days:
-                is_hday_day[offset] = 1.0
+        hol_offsets = [d.toordinal() for d in hol.keys()]
+        is_hday_day[np.isin(days_arr, hol_offsets)] = 1.0
 
-    days_arr = np.arange(n_days)
     if hol_offsets:
         hol_offsets_arr = np.array(sorted(set(hol_offsets)))
         diffs = hol_offsets_arr[None, :] - days_arr[:, None]
@@ -143,8 +161,7 @@ def _temperature_lag_features(temp_hourly: np.ndarray) -> dict[str, np.ndarray]:
         Hourly temperature in °C (typically n=8760).
 
     Returns dict with arrays of same length as ``temp_hourly``. Features live
-    at daily resolution (constant within each 24h block) so they match the
-    CMIP6 3hr-derived features used at ECVI inference time.
+    at daily resolution (constant within each 24h block).
     """
     n = len(temp_hourly)
     n_days = (n + 23) // 24
@@ -191,6 +208,83 @@ def _temperature_lag_features(temp_hourly: np.ndarray) -> dict[str, np.ndarray]:
     }
 
 
+def hourly_feature_columns(
+    iso3: str,
+    year: int,
+    latitude: float,
+    longitude: float,
+    temperature: np.ndarray,
+    *,
+    log_gdp_per_cap: float,
+    log_pop_density: float,
+    urbanization: float,
+    hdd: Optional[np.ndarray] = None,
+    cdd: Optional[np.ndarray] = None,
+    hdd_base: float = 18.0,
+    cdd_base: float = 24.0,
+) -> dict[str, Any]:
+    """Every column of ``FEATURE_COLS`` but ``country_id`` for one year of a
+    series at (*latitude*, *longitude*) in country *iso3*.
+
+    *temperature* is the year's hourly temperature (°C) on the local civil
+    time of the series, the clock of the calendar features (29 February
+    dropped). *hdd*/*cdd* default to the degree hours of *temperature*
+    below/above the bases. The static features are scalars; the others are
+    arrays of ``len(temperature)``. The training dataset
+    (:func:`build_unified_dataset`) and the inference features
+    (``demand_ml.build_hourly_features``) are both built here, so the model
+    sees at inference the features it was trained on.
+    """
+    temperature = np.asarray(temperature, dtype=np.float64)
+    n = len(temperature)
+    if hdd is None:
+        hdd = np.maximum(hdd_base - temperature, 0.0)
+    if cdd is None:
+        cdd = np.maximum(temperature - cdd_base, 0.0)
+
+    # Rows are local wall hours of the series' location, and so are the
+    # calendar features (the real date of each row, 29 February skipped).
+    stamps = year_row_dates(year, n)
+    hour_of_day = np.asarray(stamps.hour, dtype=np.int64)
+    dow = np.asarray(stamps.dayofweek, dtype=np.int64)
+    month = np.asarray(stamps.month, dtype=np.int64) - 1
+
+    h_sin, h_cos = _cyclical(hour_of_day.astype(float), 24.0)
+    d_sin, d_cos = _cyclical(dow.astype(float), 7.0)
+    m_sin, m_cos = _cyclical(month.astype(float), 12.0)
+
+    is_hday, d_next_hday, d_prev_hday = _holiday_features(iso3, year, hours=n)
+
+    return {
+        # Static pixel features (constant across the rows of the year)
+        "log_gdp_per_cap": log_gdp_per_cap,
+        "log_pop_density": log_pop_density,
+        "urbanization": urbanization,
+        # Time-varying thermal features
+        "temperature": temperature,
+        "hdd": np.asarray(hdd)[:n],
+        "cdd": np.asarray(cdd)[:n],
+        # Calendar features
+        "hour_of_day": hour_of_day,
+        "month": month,
+        "day_of_week": dow,
+        "hour_sin": h_sin,
+        "hour_cos": h_cos,
+        "dow_sin": d_sin,
+        "dow_cos": d_cos,
+        "month_sin": m_sin,
+        "month_cos": m_cos,
+        "is_weekend": (dow >= 5).astype(float),
+        "is_holiday": is_hday,
+        "days_to_next_holiday": d_next_hday,
+        "days_from_prev_holiday": d_prev_hday,
+        "latitude": latitude,
+        "longitude": longitude,
+        # Temperature lag features (daily-resolution, broadcast to hourly)
+        **_temperature_lag_features(temperature),
+    }
+
+
 def build_unified_dataset(
     dataset_dir: Path,
     hdd_base: float = 18.0,
@@ -215,6 +309,11 @@ def build_unified_dataset(
     Returns DataFrame with columns:
         group_id, year, time_idx, shape_factor,
         + all FEATURE_COLS (pixel-aware, 22 features as of 2026-04-16)
+
+    The ISO3 → ``country_id`` map is in ``df.attrs["country_to_id"]`` and is
+    written next to the dataset (``dataset_dir/demand_xgb_country_map.json``),
+    never into MODELS_DIR: the model trainer writes it next to the model it
+    saves.
     """
     from esfex.models.demand_dataset import (
         load_manifest, iter_manifest_entries)
@@ -324,68 +423,25 @@ def build_unified_dataset(
             hdd_base=hdd_base, cdd_base=cdd_base,
             zone=zone,
         )
-        temp = feats.temperature
-
+        # Parquet rows are local wall hours of the series' location
+        # (demand_dataset), and so are the calendar features; the
+        # temperature is that of the same instants.
         n = 8760
-        hours = np.arange(n)
-        hour_of_day = hours % 24
-        day_of_year = hours // 24
-
-        jan1 = datetime.date(yr, 1, 1)
-        dow = np.array([(jan1 + datetime.timedelta(days=int(d))).weekday()
-                         for d in day_of_year])
-
-        _month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-        month = np.zeros(n, dtype=int)
-        h = 0
-        for m, md in enumerate(_month_days):
-            month[h:h + md * 24] = m
-            h += md * 24
-
-        h_sin, h_cos = _cyclical(hour_of_day.astype(float), 24.0)
-        d_sin, d_cos = _cyclical(dow.astype(float), 7.0)
-        m_sin, m_cos = _cyclical(month.astype(float), 12.0)
-
-        is_hday, d_next_hday, d_prev_hday = _holiday_features(iso3, yr, hours=n)
-
-        # Temperature lag features (daily-res, broadcast to hourly)
-        lag_feats = _temperature_lag_features(feats.temperature[:n])
-
         row = pd.DataFrame({
             "group_id": (f"{iso3}_{zone}_{yr}" if zone else f"{iso3}_{yr}"),
             "country": iso3,
             "zone": zone if zone else "",
             "year": yr,
-            "time_idx": hours,
+            "time_idx": np.arange(n),
             TARGET_COL: shape,
             "demand_mw": demand[:n],
             "annual_mean_mw": annual_mean,
-            # Static pixel features (constant across the 8760 rows of this CY)
-            "log_gdp_per_cap": feats.log_gdp_per_cap,
-            "log_pop_density": feats.log_pop_density,
-            "urbanization": feats.urbanization,
-            # Time-varying thermal features
-            "temperature": feats.temperature[:n],
-            "hdd": feats.hdd[:n],
-            "cdd": feats.cdd[:n],
-            # Calendar features
-            "hour_of_day": hour_of_day,
-            "month": month,
-            "day_of_week": dow,
-            "hour_sin": h_sin,
-            "hour_cos": h_cos,
-            "dow_sin": d_sin,
-            "dow_cos": d_cos,
-            "month_sin": m_sin,
-            "month_cos": m_cos,
-            "is_weekend": (dow >= 5).astype(float),
-            "is_holiday": is_hday,
-            "days_to_next_holiday": d_next_hday,
-            "days_from_prev_holiday": d_prev_hday,
-            "latitude": lat,
-            "longitude": lon,
-            # Temperature lag features (daily-resolution, broadcast to hourly)
-            **lag_feats,
+            **hourly_feature_columns(
+                iso3, yr, lat, lon, feats.temperature[:n],
+                log_gdp_per_cap=feats.log_gdp_per_cap,
+                log_pop_density=feats.log_pop_density,
+                urbanization=feats.urbanization,
+                hdd=feats.hdd[:n], cdd=feats.cdd[:n]),
         })
         dfs.append(row)
 
@@ -400,10 +456,9 @@ def build_unified_dataset(
 
     # Impute static-feature NaNs. When the GDP or population raster misses a
     # zone/country (small islands, remote peninsulas) `build_features_for_point`
-    # returns NaN for log_gdp_per_cap / log_pop_density. TimeSeriesDataSet
-    # refuses to train on NaN; fill with per-country median, falling back to
-    # the global median. This keeps the sample and leaves the rest of its
-    # features intact.
+    # returns NaN for log_gdp_per_cap / log_pop_density. Fill with the
+    # per-country median, falling back to the global median. This keeps the
+    # sample and leaves the rest of its features intact.
     for col in ("log_gdp_per_cap", "log_pop_density", "urbanization"):
         if col not in full.columns:
             continue
@@ -433,20 +488,7 @@ def build_unified_dataset(
         if full[col].isna().any():
             full[col] = full[col].fillna(full[col].median(skipna=True))
 
-    # Demand-shape autoregressive lags (1h, 24h, 168h) within each group_id.
-    # Matches TFT's time_varying_unknown_real access to shape_factor in the
-    # encoder window. Fills NaN at the start of each group with the per-group
-    # median (so first 168h remain usable). Only usable for training-time
-    # model comparison — inference on arbitrary pixels has no past demand.
     full = full.sort_values(["group_id", "time_idx"]).reset_index(drop=True)
-    for lag_h, col in [(1, "shape_lag_1h"), (24, "shape_lag_24h"),
-                        (168, "shape_lag_168h")]:
-        full[col] = full.groupby("group_id")[TARGET_COL].shift(lag_h)
-        # Fallback for initial NaN: per-group median (reasonable since shape
-        # has mean ≈ 1.0 already)
-        grp_med = full.groupby("group_id")[TARGET_COL].transform("median")
-        full[col] = full[col].fillna(grp_med)
-        full[col] = full[col].astype(np.float32)
 
     # country_id: stable integer encoding of ISO3 (sorted alphabetically so
     # new countries get a unique id and can be mapped to -1/unknown at inference)
@@ -454,13 +496,10 @@ def build_unified_dataset(
     country_to_id = {c: i for i, c in enumerate(country_codes)}
     full["country_id"] = full["country"].map(country_to_id).astype(np.float32)
 
-    # Persist the mapping alongside the model so inference can encode new countries
-    import json as _json
-    from esfex.paths import MODELS_DIR
-    _country_map_path = MODELS_DIR / "demand_xgb_country_map.json"
-    _country_map_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(_country_map_path, "w") as _f:
-        _json.dump(country_to_id, _f)
+    # The map belongs to this dataset: keep it with the dataset and the frame.
+    # A model saved from it gets its own copy (train_xgboost), so building a
+    # dataset never replaces the map of a model already in MODELS_DIR.
+    write_country_map(dataset_dir, country_to_id)
 
     # Sample weighting: inverse of n_zones(country) clipped to [0.3, 1.0]
     # so that countries with many zones (e.g. USA 60+ BAs, CHN 31 provs) do
@@ -477,6 +516,7 @@ def build_unified_dataset(
         len(full), full["group_id"].nunique(), full["country"].nunique(),
         int((full["zone"] != "").sum()),
     )
+    full.attrs["country_to_id"] = dict(country_to_id)
     return full
 
 
@@ -637,8 +677,13 @@ def train_xgboost(
     output_path: Optional[Path] = None,
     n_cv_folds: int = 3,
     progress_cb: Optional[Callable[[int, str], None]] = None,
+    country_to_id: Optional[dict] = None,
 ) -> dict:
     """Train XGBoost on unified hourly dataset with temporal CV.
+
+    *country_to_id* is the dataset's ISO3 → ``country_id`` map (default:
+    ``df.attrs["country_to_id"]``, else rebuilt from the frame's columns); it
+    is saved next to the model as ``demand_xgb_country_map.json``.
 
     Returns dict with model, metrics, and CV results.
     """
@@ -691,7 +736,7 @@ def train_xgboost(
 
         # Save fold predictions for parity plots
         preds_dir = output_path.parent / "cv_predictions"
-        preds_dir.mkdir(exist_ok=True)
+        preds_dir.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
             preds_dir / f"xgboost_fold{fold_i}.npz",
             y_true=y_va, y_pred=y_pred,
@@ -728,6 +773,14 @@ def train_xgboost(
     emit(90, "Saving model...")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     final_booster.save_model(str(output_path))
+    if country_to_id is None:
+        country_to_id = df.attrs.get("country_to_id")
+    if country_to_id is None and {"country", "country_id"} <= set(df.columns):
+        country_to_id = {
+            str(c): int(i) for c, i in
+            df.groupby("country")["country_id"].first().items()}
+    if country_to_id is not None:
+        write_country_map(output_path.parent, country_to_id)
 
     metrics = {
         "engine": "xgboost",
@@ -755,20 +808,16 @@ def train_xgboost(
 
 
 def train_demand_model(
-    engine: str = "xgboost",
     dataset_dir: Optional[Path] = None,
     output_path: Optional[Path] = None,
     n_cv_folds: int = 3,
     exclude_country: Optional[str] = None,
     progress_cb: Optional[Callable[[int, str], None]] = None,
-    **kwargs,
 ) -> dict:
-    """Train demand model from the unified Parquet dataset.
+    """Train the XGBoost demand model from the unified Parquet dataset.
 
     Parameters
     ----------
-    engine : str
-        'xgboost' or 'tft'.
     dataset_dir : Path
         Path to Parquet dataset (from build-demand-dataset).
     output_path : Path
@@ -776,7 +825,8 @@ def train_demand_model(
     n_cv_folds : int
         Number of temporal CV folds.
     exclude_country : str, optional
-        ISO3 code to exclude (leave-one-country-out validation).
+        ISO3 code to exclude (leave-one-country-out validation). The dataset
+        is built once and the model trains on it without that country.
     """
     if dataset_dir is None:
         dataset_dir = DEMAND_DATASET_DIR
@@ -795,23 +845,17 @@ def train_demand_model(
     emit(40, f"Dataset: {len(df):,} rows, {df['country'].nunique()} countries, "
          f"{df['group_id'].nunique()} country-years")
 
+    # The full map, taken before the exclusion: the excluded country keeps its
+    # id, so it cannot be mistaken for another one at inference.
+    country_to_id = df.attrs.get("country_to_id")
+
     # Exclude country if requested
     if exclude_country:
         n_before = len(df)
         df = df[df["country"] != exclude_country].reset_index(drop=True)
         emit(42, f"Excluded {exclude_country}: {n_before - len(df):,} rows removed")
 
-    if engine == "xgboost":
-        if output_path is None:
-            output_path = MODELS_DIR / "demand_model.xgb"
-        return train_xgboost(df, output_path, n_cv_folds, progress_cb=emit)
-    elif engine == "tft":
-        emit(45, "Launching TFT training...")
-        from esfex.models.demand_tft import train_tft_model
-        return train_tft_model(
-            dataset_dir=dataset_dir,
-            progress_cb=emit,
-            **kwargs,
-        )
-    else:
-        raise ValueError(f"Unknown engine: {engine}")
+    if output_path is None:
+        output_path = MODELS_DIR / "demand_model.xgb"
+    return train_xgboost(df, output_path, n_cv_folds, progress_cb=emit,
+                         country_to_id=country_to_id)

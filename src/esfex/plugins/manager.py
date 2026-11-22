@@ -7,8 +7,8 @@ directories with ``plugin.json`` + ``__init__.py``.
 
 Scan order:
     1. ``~/.esfex/plugins/``
-    2. ``<project_dir>/.esfex/plugins/``
-    3. Directories in ``$ESFEX_PLUGIN_PATH`` (colon-separated)
+    2. ``<project_dir>/.esfex/plugins/``, only with ``include_project_dir=True``
+    3. Directories in ``$ESFEX_PLUGIN_PATH`` (``os.pathsep``-separated)
 
 Security hardening:
     - ZIP extraction validates every path against Zip Slip (CWE-22)
@@ -16,6 +16,8 @@ Security hardening:
     - ``git clone`` runs with hooks disabled to prevent pre-checkout RCE
     - Git URLs are restricted to ``https://`` and ``git://`` schemes
     - Installing over an existing plugin requires explicit confirmation
+    - Once a plugin has been installed or trusted, only plugins whose content
+      hash is on record are loaded (``trusted_hashes`` in ``plugins.json``)
 """
 
 from __future__ import annotations
@@ -84,14 +86,45 @@ def _validate_zip_paths(zf: zipfile.ZipFile, target_root: Path) -> None:
             )
 
 
+# Written by Python or git after install, not part of the plugin's source
+_UNHASHED_DIRS = frozenset({"__pycache__", ".git"})
+_UNHASHED_SUFFIXES = (".pyc", ".pyo")
+
+
 def _hash_directory(path: Path) -> str:
-    """Compute a SHA-256 digest of all files in *path* for audit logging."""
+    """SHA-256 digest of the plugin's files (trust allowlist and audit log).
+
+    Bytecode caches and git metadata are left out: importing the plugin
+    wrote ``__pycache__/``, which changed the hash on first use and got the
+    plugin skipped from the next start. Since cached bytecode is not hashed,
+    :meth:`PluginManager._load_plugin` never runs it.
+    """
     h = hashlib.sha256()
     for fpath in sorted(path.rglob("*")):
-        if fpath.is_file():
-            h.update(str(fpath.relative_to(path)).encode())
+        rel = fpath.relative_to(path)
+        if _UNHASHED_DIRS.intersection(rel.parts):
+            continue
+        if fpath.is_file() and not fpath.name.endswith(_UNHASHED_SUFFIXES):
+            h.update(str(rel).encode())
             h.update(fpath.read_bytes())
     return h.hexdigest()
+
+
+def _typer_command_names(app: Any) -> set[str]:
+    """Names of the commands and groups registered on a Typer *app*."""
+    from typer.main import get_command_name
+
+    names: set[str] = set()
+    for cmd in app.registered_commands:
+        if cmd.name:
+            names.add(cmd.name)
+        elif cmd.callback is not None:
+            names.add(get_command_name(cmd.callback.__name__))
+    for grp in app.registered_groups:
+        name = grp.name or getattr(grp.typer_instance.info, "name", None)
+        if name:
+            names.add(name)
+    return names
 
 
 def _read_state() -> dict[str, Any]:
@@ -291,8 +324,9 @@ class PluginManager:
                     logger.warning(
                         "Plugin %r at %s has hash %s which does not match "
                         "the trusted hash on record (%s). Skipping. "
-                        "Re-install via the GUI Plugins dialog to approve.",
-                        name, plugin_dir, current_hash, expected,
+                        "Trust it in the Plugin Manager or with "
+                        "'esfex plugin trust %s'.",
+                        name, plugin_dir, current_hash, expected, name,
                     )
                     continue
             plugin = self._load_plugin(name, plugin_dir, config, gui_mode)
@@ -366,9 +400,18 @@ class PluginManager:
                 logger.warning("Cannot create module spec for plugin %r", name)
                 return None
 
+            # Bytecode is not covered by the trusted hash: drop any cache and
+            # import from source only, so a planted .pyc cannot run.
+            for cache in plugin_dir.rglob("__pycache__"):
+                shutil.rmtree(cache, ignore_errors=True)
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
-            spec.loader.exec_module(module)
+            write_bytecode = sys.dont_write_bytecode
+            sys.dont_write_bytecode = True
+            try:
+                spec.loader.exec_module(module)
+            finally:
+                sys.dont_write_bytecode = write_bytecode
 
             factory = getattr(module, "create_plugin", None)
             if factory is None:
@@ -582,8 +625,8 @@ class PluginManager:
         if host not in _TRUSTED_GIT_HOSTS and not trust_host:
             raise ValueError(
                 f"Host {host!r} is not in the default trusted git hosts "
-                f"({sorted(_TRUSTED_GIT_HOSTS)}). Confirm via "
-                "trust_host=True if you know the source."
+                f"({sorted(_TRUSTED_GIT_HOSTS)}). If you trust the source, "
+                "pass trust_host=True (esfex plugin install --trust-host)."
             )
 
         _USER_PLUGINS_DIR.mkdir(parents=True, exist_ok=True)
@@ -652,6 +695,22 @@ class PluginManager:
         trusted[name] = plugin_hash
         _write_state(state)
 
+    def is_trusted(self, name: str) -> bool:
+        """Whether :meth:`load_all` would load *name* (allowlist check only).
+
+        True while no hash is on record (legacy mode, see :meth:`load_all`).
+        """
+        trusted = _read_state().get("trusted_hashes", {})
+        if not trusted:
+            return True
+        plugin_dir = self._discovered.get(name)
+        if plugin_dir is None or name not in trusted:
+            return False
+        try:
+            return _hash_directory(plugin_dir) == trusted[name]
+        except OSError:
+            return False
+
     def trust_plugin(self, name: str) -> None:
         """Public API: explicitly mark an already-installed plugin trusted.
 
@@ -711,6 +770,44 @@ class PluginManager:
                 )
         return results
 
+    # ── Configuration ─────────────────────────────────────────────────
+
+    def apply_config(self, config: Any) -> list[str]:
+        """Give a loaded configuration to every loaded plugin.
+
+        For each plugin, its ``plugins.<name>`` section (when present) is
+        validated against :meth:`ESFEXPlugin.get_config_schema`; the section
+        itself stays a dict. If it is valid, ``context.config`` is set to
+        *config* and :meth:`ESFEXPlugin.on_config_loaded` is called.
+
+        Returns one message per invalid section (those plugins don't get
+        ``on_config_loaded``); the caller decides whether that is fatal.
+        Exceptions raised by the plugin's own hooks are logged, as for the
+        other hooks.
+        """
+        sections = getattr(config, "plugins", None) or {}
+        errors: list[str] = []
+        for plugin in self._plugins:
+            name = plugin.meta.name
+            try:
+                schema = plugin.get_config_schema()
+            except Exception:
+                logger.exception("Plugin %r get_config_schema() failed", name)
+                schema = None
+            if schema is not None and name in sections:
+                try:
+                    schema.model_validate(sections[name] or {})
+                except Exception as exc:
+                    errors.append(f"plugins.{name}: {exc}")
+                    continue
+            if getattr(plugin, "context", None) is not None:
+                plugin.context.config = config
+            try:
+                plugin.on_config_loaded(config)
+            except Exception:
+                logger.exception("Plugin %r on_config_loaded() failed", name)
+        return errors
+
     # ── Julia registration ────────────────────────────────────────────
 
     def register_julia_modules(self) -> None:
@@ -750,15 +847,48 @@ class PluginManager:
     # ── CLI registration ──────────────────────────────────────────────
 
     def register_cli_commands(self, app: Any) -> None:
-        """Register plugin CLI sub-commands on the Typer *app*."""
+        """Mount each loaded plugin's CLI sub-commands as ``esfex <name> ...``.
+
+        The Typer apps from :meth:`ESFEXPlugin.get_cli_commands` go under one
+        group named after the plugin (several apps are merged into it). A
+        plugin whose name is already a command, or whose apps cannot be
+        built into a command, is skipped with a logged error, so one broken
+        plugin cannot stop the CLI from starting.
+        """
+        import typer
+
         for plugin in self._plugins:
+            name = plugin.meta.name
+            if name in _typer_command_names(app):
+                logger.error(
+                    "Plugin %r: CLI commands not registered, 'esfex %s' "
+                    "already exists", name, name,
+                )
+                continue
+            n_groups = len(app.registered_groups)
             try:
-                sub_apps = plugin.get_cli_commands()
+                sub_apps = list(plugin.get_cli_commands() or [])
+                if not sub_apps:
+                    continue
                 for sub_app in sub_apps:
-                    app.add_typer(sub_app, name=plugin.meta.name)
+                    if not isinstance(sub_app, typer.Typer):
+                        raise TypeError(
+                            f"get_cli_commands() returned {sub_app!r}, "
+                            "not a typer.Typer"
+                        )
+                if len(sub_apps) == 1:
+                    app.add_typer(sub_apps[0], name=name)
+                else:
+                    group = typer.Typer(name=name, help=plugin.meta.description)
+                    for sub_app in sub_apps:
+                        group.add_typer(sub_app)
+                    app.add_typer(group, name=name)
+                # Build now: a broken app would otherwise fail the whole CLI
+                typer.main.get_command(app)
             except Exception:
+                del app.registered_groups[n_groups:]
                 logger.exception(
-                    "Plugin %r get_cli_commands() failed", plugin.meta.name
+                    "Plugin %r: CLI commands could not be registered", name
                 )
 
     # ── GUI registration ──────────────────────────────────────────────
@@ -818,7 +948,7 @@ class PluginManager:
 
     def _register_tree_categories(self, plugin: ESFEXPlugin, window: Any) -> None:
         categories = plugin.get_tree_categories()
-        tree_panel = getattr(window, "_tree", None)
+        tree_panel = getattr(window, "element_tree", None)
         if tree_panel is None or not categories:
             return
         for cat in categories:
@@ -828,20 +958,25 @@ class PluginManager:
                 )
 
     def _register_forms(self, plugin: ESFEXPlugin, window: Any) -> None:
-        props = getattr(window, "_props", None)
+        props = getattr(window, "properties_panel", None)
         if props is None:
             return
-        model = getattr(window, "_model", None)
+        model = getattr(window, "model", None)
         forms = plugin.get_forms(model)
         for element_type, widget in forms:
             if hasattr(props, "register_form"):
                 props.register_form(element_type, widget)
 
     def _register_toolbar(self, plugin: ESFEXPlugin, window: Any) -> None:
-        toolbar = getattr(window, "_toolbar", None)
+        toolbar = getattr(window, "toolbar", None)
         if toolbar is None:
             return
-        plugin.get_toolbar_actions(toolbar, window)
+        actions = plugin.get_toolbar_actions(toolbar, window) or []
+        # The plugin may already have added them itself (documented example)
+        present = list(toolbar.actions()) if hasattr(toolbar, "actions") else []
+        for action in actions:
+            if action not in present:
+                toolbar.addAction(action)
 
     def _register_menu(self, plugin: ESFEXPlugin, window: Any) -> None:
         menu_bar = getattr(window, "menuBar", None)
@@ -860,7 +995,7 @@ class PluginManager:
                 results_panel.register_result_variable(*var_tuple)
 
     def _register_map_layers(self, plugin: ESFEXPlugin, window: Any) -> None:
-        map_widget = getattr(window, "_map", None)
+        map_widget = getattr(window, "map_widget", None)
         if map_widget is None:
             return
         plugin.get_map_layers(map_widget)

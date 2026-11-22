@@ -5,11 +5,10 @@ Provides functions to load demand data from files and create
 sectoral demand distributions.
 """
 
-import gc
 import logging
 import os
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -17,7 +16,12 @@ import h5py
 import numpy as np
 import pandas as pd
 
-from esfex.utils.temporal import HOURS_STD_YEAR
+from esfex.utils.temporal import (
+    HOURS_STD_YEAR,
+    drop_leap_days,
+    model_time_index,
+    parse_date_start,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,22 +40,52 @@ def _read_tabular(file_path: Path, **kwargs) -> pd.DataFrame:
     return pd.read_excel(file_path, header=None, **kwargs)
 
 
+def read_hourly_table(file_path: Union[str, Path]) -> np.ndarray:
+    """Read an hourly table (CSV or Excel) as a float array (rows = hours).
+
+    Data start in the first row. Leading rows with a non-numeric cell (a
+    header such as node names) are skipped, so files with or without a
+    header row give the same hours. A non-numeric cell below the header
+    raises ``ValueError``.
+    """
+    df = _read_tabular(Path(file_path))
+    numeric = df.apply(pd.to_numeric, errors="coerce")
+    text_cells = (numeric.isna() & df.notna()).to_numpy().any(axis=1)
+    first = 0
+    while first < len(df) and text_cells[first]:
+        first += 1
+    if first:
+        logger.debug(f"{file_path}: skipped {first} header row(s)")
+    bad = np.flatnonzero(text_cells[first:])
+    if bad.size:
+        raise ValueError(
+            f"{file_path}: non-numeric value in data row {first + int(bad[0]) + 1}"
+        )
+    return numeric.iloc[first:].to_numpy(dtype=float)
+
+
 def load_demand_data(
     file_path: Union[str, Path],
     date_start: str = "01/01/2025 00:00",
     year_to_load: Optional[int] = None,
 ) -> Tuple[np.ndarray, int, int, List[int], List[datetime]]:
     """
-    Load demand data from Excel file.
+    Load demand data from a CSV or Excel file, as a simulation run reads it.
+
+    The first data row is the hour at ``date_start``. Every year is an
+    8760-row block: Feb 29 rows are dropped (see
+    :func:`esfex.utils.temporal.drop_leap_days`) and the time labels skip
+    Feb 29.
 
     Parameters
     ----------
     file_path : str or Path
-        Path to demand Excel file
+        Path to the demand file (one row per hour, one column per node)
     date_start : str
         Start date and time in format "DD/MM/YYYY HH:MM"
     year_to_load : int, optional
-        If specified, loads only data for this year. If None, loads all data.
+        If specified, loads only that year: the 8760-row block number
+        ``year_to_load - year of date_start``. If None, loads all data.
 
     Returns
     -------
@@ -60,7 +94,7 @@ def load_demand_data(
         - demand_array: numpy array with shape (hours, num_nodes)
         - hours: number of hours
         - num_nodes: number of nodes
-        - years_list: list of years in the data
+        - years_list: model years covered by the data (one per 8760 rows)
         - time_index: list of datetime objects for each hour
     """
     file_path = Path(file_path)
@@ -68,76 +102,32 @@ def load_demand_data(
     if not file_path.exists():
         raise FileNotFoundError(f"Demand file not found: {file_path}")
 
+    start_date = parse_date_start(date_start)
+    demand = drop_leap_days(read_hourly_table(file_path), start_date)
+    total_hours, num_nodes = demand.shape
+    num_years = max(1, -(-total_hours // HOURS_STD_YEAR))
+    years_to_analyze = list(range(start_date.year, start_date.year + num_years))
+
     if year_to_load is None:
-        # Load all data
-        demand_df = _read_tabular(file_path)
-        demand = demand_df.values
-        hours, num_nodes = demand.shape
+        time_index = list(model_time_index(start_date, total_hours).to_pydatetime())
+        logger.info(f"Loaded demand: {total_hours} hours, {num_nodes} nodes")
+        return demand, total_hours, num_nodes, years_to_analyze, time_index
 
-        start_date = datetime.strptime(date_start, "%d/%m/%Y %H:%M")
-        end_date = start_date + timedelta(hours=(hours - 1))
+    if year_to_load not in years_to_analyze:
+        raise ValueError(
+            f"Year {year_to_load} not in demand data "
+            f"({years_to_analyze[0]}-{years_to_analyze[-1]})"
+        )
+    start_row = (year_to_load - start_date.year) * HOURS_STD_YEAR
+    demand = demand[start_row:start_row + HOURS_STD_YEAR]
+    hours = demand.shape[0]
+    time_index = list(
+        model_time_index(start_date, start_row + hours)[start_row:].to_pydatetime()
+    )
 
-        start_year = start_date.year
-        end_year = end_date.year
-        years_to_analyze = list(range(start_year, end_year + 1))
+    logger.info(f"Loaded demand for year {year_to_load}: {hours} hours, {num_nodes} nodes")
 
-        time_index = [start_date + timedelta(hours=i) for i in range(hours)]
-
-        logger.info(f"Loaded demand: {hours} hours, {num_nodes} nodes")
-
-        return demand, hours, num_nodes, years_to_analyze, time_index
-
-    else:
-        # Load only a specific year
-        start_date = datetime.strptime(date_start, "%d/%m/%Y %H:%M")
-
-        # Get basic info
-        demand_df_info = _read_tabular(file_path, nrows=2)
-        num_nodes = demand_df_info.shape[1]
-
-        # Calculate row range for the specific year
-        year_start = datetime(year_to_load, 1, 1, 0, 0)
-        year_end = datetime(year_to_load + 1, 1, 1, 0, 0)
-
-        hours_from_start = int((year_start - start_date).total_seconds() / 3600)
-        hours_in_year = int((year_end - year_start).total_seconds() / 3600)
-
-        start_row = max(0, hours_from_start)
-
-        # Get total rows
-        total_rows_df = _read_tabular(file_path, usecols=[0])
-        total_rows = len(total_rows_df)
-
-        total_hours = total_rows
-        end_date_full = start_date + timedelta(hours=total_hours)
-        years_to_analyze = list(range(start_date.year, end_date_full.year + 1))
-
-        end_row = min(start_row + hours_in_year, total_rows)
-        year_hours = end_row - start_row
-
-        # Load only the year's rows
-        if start_row > 0:
-            demand_df = _read_tabular(
-                file_path,
-                skiprows=range(1, start_row + 1),
-                nrows=year_hours
-            )
-        else:
-            demand_df = _read_tabular(file_path, nrows=year_hours)
-
-        demand = demand_df.values
-        hours = demand.shape[0]
-
-        time_index = [year_start + timedelta(hours=i) for i in range(hours)]
-
-        # Clean up
-        del total_rows_df
-        del demand_df_info
-        gc.collect()
-
-        logger.info(f"Loaded demand for year {year_to_load}: {hours} hours, {num_nodes} nodes")
-
-        return demand, hours, num_nodes, years_to_analyze, time_index
+    return demand, hours, num_nodes, years_to_analyze, time_index
 
 
 def create_sectoral_demand(
@@ -266,7 +256,12 @@ class DemandDataManager:
 
     def prepare_hdf5_storage(self) -> Path:
         """
-        Convert Excel file to HDF5 for efficient access.
+        Convert the demand file to HDF5 for efficient access.
+
+        Rows are read like :func:`load_demand_data` (header rows skipped,
+        Feb 29 dropped for hourly data) and indexed by model year: one
+        block of ``8760 / time_step`` rows per year from the year of
+        ``date_start``.
 
         Returns
         -------
@@ -275,14 +270,15 @@ class DemandDataManager:
         """
         logger.info("Converting demand from Excel to HDF5...")
 
-        # Read all Excel data
-        demand_df = _read_tabular(self.excel_path)
-        demand_array = demand_df.values
+        start_date = parse_date_start(self.date_start)
+        demand_array = read_hourly_table(self.excel_path)
+        if self.time_step == 1:
+            demand_array = drop_leap_days(demand_array, start_date)
         total_hours, num_nodes = demand_array.shape
-
-        # Calculate temporal metadata
-        start_date = datetime.strptime(self.date_start, "%d/%m/%Y %H:%M")
-        end_date = start_date + timedelta(hours=(total_hours - 1) * self.time_step)
+        # Model years are 8760-h blocks; labels skip Feb 29.
+        steps_per_year = HOURS_STD_YEAR // self.time_step
+        num_years = max(1, -(-total_hours // steps_per_year))
+        end_date = model_time_index(start_date, total_hours, self.time_step)[-1]
 
         # Create temporary HDF5 file
         temp_dir = tempfile.gettempdir()
@@ -303,33 +299,24 @@ class DemandDataManager:
             f.attrs["start_date"] = start_date.strftime("%Y-%m-%d %H:%M:%S")
             f.attrs["end_date"] = end_date.strftime("%Y-%m-%d %H:%M:%S")
             f.attrs["start_year"] = int(start_date.year)
-            f.attrs["end_year"] = int(end_date.year)
+            f.attrs["end_year"] = int(start_date.year + num_years - 1)
             f.attrs["time_step"] = int(self.time_step)
 
-            # Create year index for fast access
+            # Year index for fast access: one block of steps_per_year rows per year
             year_index = f.create_group("year_index")
-            current_year = start_date.year
-            year_start_idx = 0
-
-            for hour in range(total_hours):
-                hour_date = start_date + timedelta(hours=hour * self.time_step)
-                if hour_date.year != current_year or hour == total_hours - 1:
-                    year_end_idx = hour if hour_date.year != current_year else hour + 1
-                    year_index.create_dataset(
-                        str(current_year),
-                        data=[year_start_idx, year_end_idx]
-                    )
-                    if hour < total_hours - 1:
-                        current_year = hour_date.year
-                        year_start_idx = hour
+            for k in range(num_years):
+                year_index.create_dataset(
+                    str(start_date.year + k),
+                    data=[k * steps_per_year, min((k + 1) * steps_per_year, total_hours)],
+                )
 
         # Store metadata in memory
         self.metadata = {
             "total_hours": int(total_hours),
             "num_nodes": int(num_nodes),
             "start_date": start_date,
-            "end_date": end_date,
-            "years": list(range(start_date.year, end_date.year + 1))
+            "end_date": end_date.to_pydatetime(),
+            "years": list(range(start_date.year, start_date.year + num_years))
         }
 
         logger.info(f"HDF5 created: {self.hdf5_path}")
@@ -374,13 +361,11 @@ class DemandDataManager:
                 f.attrs["start_date"],
                 "%Y-%m-%d %H:%M:%S"
             )
-            year_start_date = start_date + timedelta(hours=start_idx * self.time_step)
             hours_in_year = end_idx - start_idx
-
-            time_index = [
-                year_start_date + timedelta(hours=i * self.time_step)
-                for i in range(hours_in_year)
-            ]
+            time_index = list(
+                model_time_index(start_date, end_idx, self.time_step)[start_idx:]
+                .to_pydatetime()
+            )
 
             num_nodes = int(f.attrs["num_nodes"])
 
@@ -427,13 +412,45 @@ def extract_year_profile(
         raise ValueError(f"Unsupported profile type: {type(full_profile)}")
 
 
+def _read_node_profile(
+    file_path: Path,
+    num_nodes: Optional[int],
+    date_start: Optional[str],
+) -> np.ndarray:
+    """Hourly profile of a CSV/Excel file as ``(hours, num_nodes)``.
+
+    Header rows are skipped and Feb 29 rows dropped (by the calendar from
+    ``date_start`` when given, and always for a file of exactly 8784 rows).
+    A single column is copied to every node; missing columns repeat the
+    last one; extra columns are dropped.
+    """
+    profile = drop_leap_days(
+        read_hourly_table(file_path),
+        parse_date_start(date_start) if date_start else None,
+    )
+    if num_nodes is not None and profile.shape[1] != num_nodes:
+        if profile.shape[1] == 1:
+            profile = np.tile(profile, (1, num_nodes))
+        elif profile.shape[1] < num_nodes:
+            padding = np.tile(profile[:, -1:], (1, num_nodes - profile.shape[1]))
+            profile = np.hstack([profile, padding])
+        else:
+            profile = profile[:, :num_nodes]
+    return profile
+
+
 def load_availability_profile(
     file_path: Union[str, Path],
     temporal_resolution_hours: int = 1,
     num_nodes: Optional[int] = None,
+    date_start: Optional[str] = None,
 ) -> np.ndarray:
     """
-    Load availability profile from Excel file.
+    Load availability profile from a CSV or Excel file.
+
+    Rows are hours (header rows are skipped). Feb 29 rows are dropped so
+    every year is 8760 rows: by the calendar from ``date_start`` when given,
+    and always for a file of exactly 8784 rows.
 
     Parameters
     ----------
@@ -443,6 +460,8 @@ def load_availability_profile(
         Temporal resolution for aggregation (1 = hourly, 6 = 6-hourly, etc.)
     num_nodes : int, optional
         Expected number of nodes. If provided, validates the file.
+    date_start : str, optional
+        Timestamp of the first row ("DD/MM/YYYY HH:MM"), used to find Feb 29.
 
     Returns
     -------
@@ -459,29 +478,9 @@ def load_availability_profile(
         return np.ones((hours, nodes))
 
     try:
-        df = _read_tabular(file_path)
-        availability = df.values.astype(float)
-
-        # Adjust columns to match num_nodes.
-        # Availability is a per-generator temporal profile, so a single-column
-        # file is the common case — broadcast it to all nodes.
-        if num_nodes is not None and availability.shape[1] != num_nodes:
-            if availability.shape[1] == 1:
-                # Single profile → replicate for every node
-                availability = np.tile(availability, (1, num_nodes))
-            elif availability.shape[1] < num_nodes:
-                # Partial columns → replicate the last column for missing nodes
-                padding = np.tile(
-                    availability[:, -1:],
-                    (1, num_nodes - availability.shape[1]),
-                )
-                availability = np.hstack([availability, padding])
-            else:
-                # More columns than nodes → truncate
-                availability = availability[:, :num_nodes]
-
-        # Clip to [0, 1]
-        availability = np.clip(availability, 0.0, 1.0)
+        # Availability is a per-generator capacity factor: a single-column
+        # file is the common case and is broadcast to all nodes.
+        availability = np.clip(_read_node_profile(file_path, num_nodes, date_start), 0.0, 1.0)
 
         # Apply temporal aggregation using MEAN (availability is a capacity factor)
         if temporal_resolution_hours > 1:
@@ -498,3 +497,70 @@ def load_availability_profile(
         hours = HOURS_STD_YEAR // temporal_resolution_hours
         nodes = num_nodes or 10
         return np.ones((hours, nodes))
+
+
+def load_run_availability(
+    config_dir: Union[str, Path],
+    availability_file: Union[str, Path],
+    num_nodes: int,
+    date_start: Optional[str],
+    owner: str = "Unit",
+) -> np.ndarray:
+    """Read a unit's ``availability_file`` the way a run does.
+
+    The path resolves like demand paths (an absolute path as is, a relative
+    one under *config_dir*, refusing ``../`` traversal); a path that escapes
+    or a missing file is an error naming *owner* (``"Generator 'pv'"``). The
+    profile is read hourly, Feb 29 dropped by the calendar of *date_start*
+    (the run's ``date_start``, "DD/MM/YYYY HH:MM"): the runner's preloaded
+    profiles and the dispatch's fallback both come from here, and the
+    dispatch slices the window and averages to its resolution afterwards.
+    """
+    from esfex.utils.paths import resolve_project_data_file
+
+    try:
+        path = resolve_project_data_file(config_dir, availability_file)
+    except ValueError as e:
+        raise ValueError(
+            f"{owner}: availability_file {str(availability_file)!r} resolves "
+            f"outside config directory {config_dir} (refusing path traversal)"
+        ) from e
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{owner}: availability_file {str(availability_file)!r} not found "
+            f"under {config_dir}"
+        )
+    return load_availability_profile(
+        path, temporal_resolution_hours=1, num_nodes=num_nodes, date_start=date_start)
+
+
+def load_inflow_profile(
+    file_path: Union[str, Path],
+    temporal_resolution_hours: int = 1,
+    num_nodes: Optional[int] = None,
+    date_start: Optional[str] = None,
+) -> np.ndarray:
+    """
+    Load a reservoir inflow profile (MW-eq per hour) from a CSV or Excel file.
+
+    Rows, columns and Feb 29 are handled as in
+    :func:`load_availability_profile`, but the values are flows, not
+    capacity factors: they are not clipped to [0, 1], and a missing or
+    unreadable file raises instead of defaulting to 1.0.
+
+    Returns
+    -------
+    np.ndarray
+        Inflow array with shape (hours, nodes), averaged over
+        ``temporal_resolution_hours`` steps when that is above 1.
+    """
+    from esfex.utils.temporal import aggregate_to_resolution
+
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"Inflow file not found: {file_path}")
+    inflow = _read_node_profile(file_path, num_nodes, date_start)
+    if temporal_resolution_hours > 1:
+        inflow = aggregate_to_resolution(inflow, temporal_resolution_hours)
+    logger.debug(f"Loaded inflow from {file_path}: shape={inflow.shape}, mean={inflow.mean():.3f}")
+    return inflow

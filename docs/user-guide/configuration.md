@@ -1,84 +1,123 @@
 # Configuration Guide
 
+An ESFEX run is described by one YAML file. `esfex.config.loader.load_config()` reads it, converts each system, and validates the result against the Pydantic v2 models in `esfex.config.schema`. The CLI (`esfex run`, `esfex validate`) and the Studio both go through this loader. This page explains the file section by section; the [Configuration Reference](../reference/config-reference.md) lists every field.
+
+The configuration drives a two-stage decomposition [**[25]**](../reference/bibliography.md#ref25): capacity expansion in the master problem [**[24]**](../reference/bibliography.md#ref24), then operational dispatch over a rolling horizon.
+
+!!! warning "Unknown keys are ignored, with a warning"
+    **Unknown keys are not errors.** A typo such as `min_up_time` (instead of `min_up`) or an obsolete key such as `demand_growth` has no effect. The loader logs a warning for each one with its full path (for example `Unknown configuration key systems.island.generators.diesel.min_up_time is ignored`), `esfex validate -c <file>` lists them, and so does the Studio's validation (category *Configuration*).
+
+    Keys the loader translates are not reported: upper-case aliases (`TARGET_RE_PENETRATION`), flat `dc_*` / `DC_*` power-flow keys, penalty keys in any case, legacy `unit_*` / `bat_*` units, the Studio's `_gui_layout`, `_gui_styles`, `_technologies`, `_equipment_buses`, `visual_scaling`, `_geo_assets` and `_last_results`, and the free-form `plugins`, `solver.options` and `master_problem.solver_options`. Stochastic scenario multipliers report their own unknown keys.
+
+---
+
 ## Top-Level Structure
 
-YAML configuration files are validated by Pydantic v2. The configuration drives the two-stage decomposition [**[25]**](../reference/bibliography.md#ref25): capacity expansion via the master problem [**[24]**](../reference/bibliography.md#ref24) followed by operational dispatch using a rolling horizon approach. A complete file has the following top-level keys:
+| Key | Purpose | Required |
+|---|---|---|
+| `simulation_mode` | `development`, `economic_dispatch` or `unit_commitment` | no (default `development`) |
+| `unit_commitment_hours` | Hours dispatched in `unit_commitment` mode | no (24) |
+| `date_start` | Start timestamp `DD/MM/YYYY HH:MM` | no |
+| `temporal` | Time step and rolling horizon | no |
+| `solver` | Solver backend and options | no |
+| `n1_security` | N-1 contingency constraints | no |
+| `master_problem` | Capacity-expansion settings | no |
+| `network_reduction` | Internal bus-network reduction | no |
+| `enable_primary_energy` | Include the fuel supply chain (default `true`), in the dispatch and in the master problem, which then builds fuel storage, routes and electrolyzers and charges fuel-coupled units the fuel price | no |
+| `meta_network` | Systems to simulate and links between them | **yes** |
+| `systems` | One configuration per system, inline or as a file path | **yes** |
+| `risk` | Risk and resilience module | no |
+| `logging` | `console_level: basic \| verbose \| debug` | no |
+| `plugins` | Settings per plugin | no |
+
+A minimal skeleton:
 
 ```yaml
-# Simulation settings
-simulation_mode: development          # "development" or "unit_commitment"
-unit_commitment_hours: 24             # Hours for UC window (UC mode only)
-date_start: "01/01/2025 00:00"       # Simulation start date (DD/MM/YYYY HH:MM)
+simulation_mode: development
+date_start: "01/01/2025 00:00"
 
-# Module configurations
-temporal: { ... }                     # Time resolution settings
-solver: { ... }                       # Solver settings
-n1_security: { ... }                  # N-1 contingency settings
-master_problem: { ... }              # Capacity expansion settings
-enable_primary_energy: true           # Enable fuel supply chain
-
-# Network definition
 meta_network:
-  systems: [system_a, system_b]       # List of system names
-  systems_links: { ... }             # Inter-system connections
+  systems: [island]          # each name must exist under systems
 
-# System definitions
 systems:
-  system_a: { ... }                   # Full system configuration
-  system_b: { ... }
+  island: island_system.yaml # or an inline mapping, see Complete Example
 ```
 
 ### Simulation Modes
 
-| Mode | Description | Model Type | Use Case |
-|------|-------------|------------|----------|
-| `development` | Economic dispatch (ED) | Pure LP | Long-term planning, capacity expansion |
-| `unit_commitment` | Unit commitment (UC) | MIP | Short-term scheduling with binary start/stop |
+| Mode | Master problem | Dispatch | Horizon |
+|---|---|---|---|
+| `development` (default) | yes | LP (economic dispatch), or UC if `master_problem.use_uc_in_dispatch: true` | all simulated years |
+| `economic_dispatch` | no | LP | all simulated years |
+| `unit_commitment` | no | MIP with binary commitment, start-up costs and minimum up/down times | first `unit_commitment_hours` hours of the first year only |
 
-`development` mode formulates a pure LP with continuous generator output -- recommended for multi-year capacity expansion studies. `unit_commitment` mode introduces binary commitment variables, producing a MIP that models startup/shutdown costs and minimum up/down time constraints.
+In `development` mode the master problem decides investments and retirements for every year first; each year is then dispatched with those decisions fixed. The two dispatch-only modes use the existing fleet as configured.
 
+`unit_commitment_hours` is not a window size: in `unit_commitment` mode the run is cut to one year and to the first `unit_commitment_hours` hours of it (at most 8,760).
+
+`date_start` labels the hourly time index of the results, and its year is the first year label (`esfex run --start-year` overrides it). Demand is always read from the first row of the demand file. Every modelled year has 8,760 hours, leap years included: Feb 29 is skipped in the labels and dropped from leap-year data (see [Demand Data](demand-data.md#leap-years)).
 
 ---
-
 
 ## Temporal Configuration
 
 ```yaml
 temporal:
-  resolution_hours: 1                 # Time step (hours): 1, 2, 3, 4, 6
-  use_rolling_horizon: true           # Enable rolling horizon dispatch
-  rolling_horizon_hours: 48           # Window size (hours)
-  overlap_hours: 6                    # Overlap between windows
-
-  # Sub-model resolutions (upscaling for faster solve)
-  investment_resolution: 0            # Master problem (0 = full resolution)
-  primary_energy_resolution: 24       # Fuel model (hours per period)
-  battery_soc_resolution: 0           # SOC tracking (0 = full)
-  ev_resolution: 0                    # EV model (0 = full)
-  reserve_resolution: 0              # Reserve model (0 = full)
+  resolution_hours: 1             # operational time step (hours)
+  use_rolling_horizon: true       # split each year into windows
+  rolling_horizon_hours: 48       # window length
+  overlap_hours: 24               # look-ahead appended to each window (< window)
+  investment_resolution: 8760     # hours per investment period (8760 = yearly)
+  primary_energy_resolution: 24   # fuel-model time step (hours)
+  model_clock: America/Havana     # time base of every hourly series (default auto)
 ```
 
-The rolling horizon splits each year into overlapping windows. Only the non-overlapping portion contributes to the final solution; the overlap ensures continuity of storage SOC and ramp trajectories.
+With the rolling horizon on, each year is solved as a sequence of windows. The overlap gives each window a look-ahead; only the non-overlapping part is kept, and storage state of charge and generator output at the end of that part carry over to the next window. Stored energy has no value at the end of a window, so a window charges storage only for needs it can see: make the overlap long enough to reach the next demand peak (the default 24 h covers a daily cycle), or storage may be empty when a peak arrives just after a window boundary; ESFEX warns when the overlap is shorter than 24 h and the system has storage. The last window of each year must bring batteries back to at least their year-start SOC (soft, within `soc_end_tolerance`), so a year cannot spend its starting stored energy for free. The overlap must be shorter than the window: an explicit `overlap_hours >= rolling_horizon_hours` is rejected, and the default shrinks to half the window when the window is 24 h or shorter. With `use_rolling_horizon: false` each year is one model.
 
-Sub-model resolutions allow individual components to operate at coarser time steps. For example, `primary_energy_resolution: 24` uses daily time blocks for the fuel supply chain, reducing variables while retaining hourly generator dispatch. A value of `0` uses the same resolution as the main model.
+`investment_resolution` groups years into investment periods: `8760` allows investment every year, `17520` every two years (years per period = `max(1, investment_resolution ÷ 8760)`).
 
+There are no `battery_soc_resolution`, `ev_resolution` or `reserve_resolution` keys.
+
+### Model clock
+
+Every hourly series of a case (demand, availability) is on one clock, the model clock: the hour index `t` is the same instant at every node, in every system, also across inter-system links. Hour 0 is 1 January 00:00 on that clock. The clock is a fixed offset from UTC with no daylight saving time, so every model day has 24 hours.
+
+| `temporal.model_clock` | Clock |
+|---|---|
+| `auto` (default) | The standard offset (no DST) of the time zone with the largest share of demand. Zones with the same standard offset count together; when demand is not known yet, every node counts once |
+| an IANA zone, e.g. `America/Havana` | That zone's standard offset (UTC-5). A zone with daylight saving time is used at its standard offset all year |
+| `UTC`, or a fixed zone such as `Etc/GMT+5` | That offset. In the `Etc` zones the sign is inverted: `Etc/GMT+5` is UTC-5 |
+
+Each node's time zone comes from its coordinates (`node_coordinates`, or the node's position in the Studio). A node at sea (offshore, or just off the coastline) gets the zone of the nearest land within 200 km, daylight saving time included; only a node farther out, or outside every zone, gets the fixed offset of its 15° longitude band, with a warning.
+
+The tools that write series put them on the clock and record it in `temporal.model_clock`:
+
+- weather-derived availability (the [Grid Builder](../workflows/grid-auto-mapping.md#availability-profiles), the Solar PV and Wind workflows, the availability generator) comes in UTC and is shifted by the clock's offset (NASA POWER answers in local solar time, the offset of the 15° longitude band, and is shifted from that);
+- the [Grid Builder demand forecast](../workflows/demand-distribution.md) is in each node's local civil time and is converted from the node's own zone, daylight saving time included.
+
+The year wraps: clock hours that fall before 1 January or after 31 December of the source data read the other end of the same year. When a local clock springs forward, the skipped local hour is not used; when it falls back, the repeated local hour is used twice. Zones with a half-hour offset (UTC+05:30) are interpolated linearly between the two neighbouring hours.
+
+`auto` is resolved once, the first time a tool writes a clock-dependent series, and from then on the case keeps that clock (a later demand forecast uses the clock the weather profiles already used). Files you prepare yourself must be on the same clock: set `temporal.model_clock` to it.
+
+A run logs the clock (`Model clock: America/Havana standard time (UTC-05:00), …`) and, when the nodes lie in several zones, the zones found. A case that does not record its clock (`auto`, as every case written before this key existed) runs as before, with a warning that the time base of its series is unknown. ESFEX does not convert existing case files.
 
 ---
-
 
 ## Solver Configuration
 
 ```yaml
 solver:
-  name: highs                         # highs, cbc, glpk, gurobi, cplex, scip, xpress
-  threads: 4                          # Number of solver threads
-  time_limit: 3600                    # Max solve time (seconds)
-  gap: 0.01                           # MIP optimality gap (1%)
-  verbose: false                      # Show solver output
-  options: {}                         # Solver-specific key-value pairs
+  name: highs        # highs, cbc, glpk, gurobi, cplex, scip, xpress, clarabel, scs, ipopt
+  threads: 4
+  time_limit: 10800  # seconds per solve, 0 = unlimited
+  gap: 0.01          # relative MIP gap
+  verbose: false
+  options: {}        # solver-specific options
 ```
 
-The `options` dictionary passes solver-specific parameters directly to the JuMP optimizer:
+`master_problem.solver_options` (same format) is merged over `options` for the master solves only; the dispatch keeps `options` (see [Large LP Master Problems](solver-guide.md#large-lp-master-problems)).
+
+`options` is passed to the JuMP optimizer. For HiGHS, the key `solver_method` selects the LP algorithm (`choose`, `simplex`, `ipm`, `ipx`, `hipo`, `pdlp`). Options that apply to one algorithm only are forwarded only when `solver_method` is set explicitly to that algorithm; otherwise they are dropped with a warning. For example, `primal_feasibility_tolerance`, `dual_feasibility_tolerance` and `simplex_scale_strategy` need `solver_method: simplex`, while `ipm_optimality_tolerance` and `run_crossover` need an interior-point method:
 
 ```yaml
 solver:
@@ -86,62 +125,62 @@ solver:
   threads: 4
   options:
     presolve: "on"
-    solver_method: "ipm"
-    simplex_scale_strategy: "max_equilibration"
-    primal_feasibility_tolerance: 1.0e-7
-    dual_feasibility_tolerance: 1.0e-7
+    solver_method: ipm
+    run_crossover: "on"
+    ipm_optimality_tolerance: 1.0e-8
 ```
 
-See the [Solver Guide](solver-guide.md) for solver-specific options and tuning.
-
+The conic (`clarabel`, `scs`) and NLP (`ipopt`) solvers serve the AC-OPF modes of `power_flow_mode` that need them: `acopf_soc`, `acopf_qc` and `acopf_sdp` need a conic solver (HiGHS has no second-order cones), `acopf_polar` and `acopf_rect` need Ipopt. See the [Solver Guide](solver-guide.md) for tuning.
 
 ---
-
 
 ## N-1 Security
 
-N-1 contingency analysis ensures the system remains secure if any single transmission line or generator fails.
-
 ```yaml
 n1_security:
-  enabled: false                      # Enable N-1 constraints
-  transmission_enabled: false         # Transmission contingency
-  generation_enabled: false           # Generation contingency
-  transmission_reserve_factor: 0.8    # Line loading limit under N-1
-  generation_reserve_factor: 1.0      # Generation margin
+  enabled: false                          # master switch
+  apply_to_modes: [development, unit_commitment]   # simulation modes (simulation_mode)
+  transmission_enabled: true              # line contingencies
+  transmission_reserve_factor: 0.70       # pre-contingency loading limit (fraction of rating)
+  generation_enabled: true                # generator contingencies
+  generation_reserve_type: largest_unit   # or: percentage
+  generation_reserve_percentage: 0.15     # used with generation_reserve_type: percentage
 ```
 
-When `transmission_enabled` is `true`, the model identifies the critical N-1 element at each time step and enforces that remaining lines can carry the redistributed flow. The `transmission_reserve_factor` limits line loading to 80% of thermal capacity for contingency headroom.
-
+The values shown are the defaults. Further fields select iterative SCOPF (`scopf_enabled`), corrective actions, N-1-1 depth, screening and transformer/battery contingencies; see [N1SecurityConfig](../reference/config-reference.md#n1securityconfig).
 
 ---
-
 
 ## Master Problem
 
 ```yaml
 master_problem:
-  stochastic: false                   # Enable stochastic programming
-  representative_days_per_year: 5     # Days for operational validation
-  min_day_separation: 7              # Min days between representatives
+  planning_mode: perfect_foresight   # or: myopic (year by year)
+  solver_method: monolithic          # or: benders
+  representative_days: 5             # days per year used to check operation
+  min_day_separation: 5              # minimum days between representative (and critical) days
+  critical_days: 3                   # lowest-renewable days modelled too (0 = none)
+  storage_firm_hours: null           # battery firm hours in the adequacy (null = from data)
+  use_tsam: false                    # TSAM clustering instead of representative days
+  use_uc_in_dispatch: false          # unit commitment in development-mode dispatch
+  stochastic: false                  # needs stochastic_scenarios in the system
 
-  # MGA / SPORES: Near-optimal alternative exploration
+  # MGA / SPORES: near-optimal alternative exploration
   mga:
-    enabled: false                    # Master toggle
-    method: mga                       # "mga" (HSJ loop) | "spores" (per-objective sweep)
-    # MGA-only knob (ignored under SPORES):
-    num_alternatives: 10              # K alternatives for the HSJ loop
-    # SPORES-only knob (must be empty under MGA):
-    objectives: []                    # e.g. [min_total_build, max_regional_equity]
-    # Shared knobs:
-    slack_fraction: 0.05              # Cost slack (0.05 = 5% above optimal)
-    investment_threshold: 0.1         # MW threshold for HSJ frequency scoring
+    enabled: false
+    method: mga                      # "mga" (HSJ loop) | "spores" (one run per objective)
+    num_alternatives: 10             # MGA only
+    objectives: []                   # SPORES only; must be empty under MGA
+    slack_fraction: 0.05             # cost slack (0.05 = 5 % above optimal)
+    investment_threshold: 0.1        # MW counted as "invested" for HSJ scoring
 ```
 
-ESFEX offers two near-optimal exploration methods. Both share the cost-slack envelope $Z \leq (1+\varepsilon) C^*$ but differ in how alternatives are produced:
+These are the defaults. Planning modes, Benders, TSAM and the RE trajectory are explained in [Master Problem](master-problem.md).
 
-- **`method: mga`** (default) — runs the classical Hop-Skip-Jump (HSJ) loop `num_alternatives` times. Each iteration maximises a single diversity objective that penalises investment variables seen in previous alternatives.
-- **`method: spores`** — solves *one alternative per declared objective* (see [SporesObjective](../api/config-schema.md#sporesobjective)). The alternative count equals `len(objectives)`; `num_alternatives` is ignored. Example:
+ESFEX offers two near-optimal exploration methods. Both share the cost-slack envelope \(Z \leq (1+\varepsilon) C^*\) but differ in how alternatives are produced:
+
+- **`method: mga`** (default) runs the Hop-Skip-Jump (HSJ) loop `num_alternatives` times. Each iteration maximises a diversity objective that penalises investment variables used in earlier alternatives.
+- **`method: spores`** solves one alternative per declared objective (see [SporesObjective](../api/config-schema.md#sporesobjective)). The alternative count equals `len(objectives)`; `num_alternatives` is ignored.
 
 ```yaml
 master_problem:
@@ -156,372 +195,435 @@ master_problem:
     slack_fraction: 0.05
 ```
 
-Results are exported under `/mga/` in the HDF5 file with `/mga.attrs["method"]` and a per-alternative `objective` tag (see [HDF5 Output Schema § MGA Results](../reference/hdf5-output-schema.md#mgaspores-results)). Alternative 0 (cost-optimal) is used for operational dispatch.
-
+With `enabled: true`, `method: spores` and an empty `objectives` list fails validation, and so does `method: mga` with a non-empty list. Results are exported under `/mga/` in the HDF5 file with `/mga.attrs["method"]` and a per-alternative `objective` tag (see [HDF5 Output Schema § MGA Results](../reference/hdf5-output-schema.md#mgaspores-results)). Alternative 0 (cost-optimal) is used for operational dispatch.
 
 ---
 
-
 ## System Configuration
+
+Each entry under `systems` is one power system. The examples below show fragments of a system mapping.
 
 ### Demand
 
 ```yaml
 systems:
-  my_system:
-    name: my_system
-    demand_path: demand.xlsx          # Path to demand data file
-    demand_scale: 1.0                 # Demand multiplier
-    demand_growth: 0.02               # 2% annual growth rate
+  island:
+    name: island
+    demand_path: demand/island_demand.csv   # one column per node, one row per hour
+    demand_scale: 1.0                       # multiplier on all demand
 ```
 
-Demand growth is applied multiplicatively: year `y` demand equals `D_base * (1 + demand_growth)^(y-1)`. See [Demand Data](demand-data.md) for file format details.
+`demand_paths` (a list with one single-column file per node) overrides `demand_path`. Relative paths are resolved against the configuration file's folder first, then the working directory. The file is read when the run starts, not by `esfex validate`.
 
-### Nodes
+Every simulated year is 8,760 rows. If the file covers fewer years than the horizon, the first year is repeated; to model growth, provide a multi-year file. There is no `demand_growth` key (it is ignored); the master problem and the dispatch both use the file values. File formats are described in [Demand Data](demand-data.md).
+
+### Nodes and buses
+
+ESFEX separates geography from electrical topology:
+
+- A **node** is a geographic aggregation (a region or substation area). Demand files, per-node equipment arrays (`rated_power: [...]`), reserves and the master problem's regional view are indexed by node.
+- A **bus** is an electrical connection point inside a node. The operational power flow runs on buses, and equipment attaches to buses. Every node has at least one bus, so there are always at least as many buses as nodes.
+
+**Nodes.** `nodes_connections` is the node adjacency matrix, flattened row by row; entry `(i, j)` is the transfer capacity in MW, `0` means no direct connection. The node count is inferred from its length (√N²) unless `num_nodes` is given.
 
 ```yaml
     nodes:
-      adjacency_matrix:               # N x N connectivity (0 or capacity MW)
-        - [0, 100, 0]
-        - [100, 0, 50]
-        - [0, 50, 0]
-      coordinates:                    # [longitude, latitude] per node
-        - [-82.38, 23.13]
-        - [-81.95, 22.40]
-        - [-80.45, 22.07]
-      names: ["Havana", "Cienfuegos", "Camaguey"]
+      nodes_connections: [0.0, 80.0,
+                          80.0, 0.0]     # 2 nodes, 80 MW between them
+      node_coordinates:                  # one {latitude, longitude} per node
+        - {latitude: 21.5, longitude: -80.0}
+        - {latitude: 21.0, longitude: -80.0}
+      node_names: [North, South]
 ```
 
-The adjacency matrix is symmetric: entry `(i, j)` gives transmission capacity in MW. A value of `0` means no direct connection. Node coordinates are used for distance calculations (zone interconnection costs, GUI map display).
+Empty per-node lists such as `reserve_static` or `losses` are filled with zeros.
+
+**Buses.** If `buses` is omitted, one bus per node is created at load time (`bus_<i>`, role `load`, `demand_fraction: 1.0`), so `num_buses` equals `num_nodes`. List buses explicitly when a node has several connection points:
+
+```yaml
+    buses:
+      - {bus_id: bus_0, name: North 110 kV, parent_node: 0, voltage_kv: 110.0, role: load, demand_fraction: 0.6}
+      - {bus_id: bus_1, name: North feeder, parent_node: 0, voltage_kv: 110.0, role: load, demand_fraction: 0.4}
+      - {bus_id: bus_2, name: North plant,  parent_node: 0, voltage_kv: 110.0, role: connection, demand_fraction: 0.0}
+      - {bus_id: bus_3, name: South 110 kV, parent_node: 1, voltage_kv: 110.0, role: load, demand_fraction: 1.0}
+
+    transmission_lines_geo:                   # bus indices are positions in the buses list (0-based)
+      - {line_id: l_plant,  from_node: 0, to_node: 0, from_bus: 2, to_bus: 0, capacity_mw: 100.0}
+      - {line_id: l_feeder, from_node: 0, to_node: 0, from_bus: 0, to_bus: 1, capacity_mw: 60.0}
+      - {line_id: l_ns,     from_node: 0, to_node: 1, from_bus: 0, to_bus: 3, capacity_mw: 80.0, length_km: 56.0}
+
+    generators:
+      north_plant:                            # other generator fields omitted
+        bus_id_per_node: {0: bus_2}           # node 0 capacity sits on the plant bus
+```
+
+Each bus has a `role`:
+
+| Role | Demand | Load shedding | Typical use |
+|---|---|---|---|
+| `load` (default) | `node demand × demand_fraction` | up to the bus demand | substation feeding load |
+| `mixed` | `node demand × demand_fraction` | up to the bus demand | load and generation at the same bus |
+| `connection` | none (`demand_fraction` must be `0`) | none | plant, transformer or junction bus |
+
+How demand and equipment are placed:
+
+- **Demand is split per bus.** Each hour, every `load`/`mixed` bus takes `demand_fraction` of its parent node's demand. The fractions of a node's buses must sum to 1; if they don't, they are rescaled at load time with a warning (two `load` buses left at the default `1.0` become `0.5` each). A node whose buses all have `demand_fraction: 0` gets no demand at all, and the loader warns about it.
+- **Load shedding is bounded by the bus demand.** Unserved demand at a bus can never exceed the demand on that bus, so it cannot act as a virtual generator.
+- **Equipment attaches to buses.** Generator and battery arrays stay per node. Each node's capacity goes to, in order of priority: the bus named in the unit's `bus_id_per_node` (`{node_index: bus_id}`); the bus at the other end of a `transmission_lines_geo` entry whose endpoint is that unit; the bus given by `bus_index` (0-based) if that bus belongs to the node; otherwise the node's first bus in list order. Per-node properties such as efficiencies, ramp rates and costs are copied to every bus of the node.
+- When the bus list is exactly one bus per node in node order, no mapping is needed and per-node arrays are used directly.
+- A node with no bus cannot serve its demand or host capacity. When there are fewer buses than nodes, the bridge logs a warning naming the bus-less nodes.
+
+**Lines.** A `transmission_lines_geo` entry enters the operational model only if both bus indices are known, through `from_bus`/`to_bus` or a bus endpoint reference (`from_endpoint_type: bus`, `from_endpoint_id: <bus_id>`). A line with only `from_node`/`to_node` is skipped with a warning. A line or transformer whose two ends are the same bus carries no flow and is ignored by the model; loading the configuration logs one warning per system that names them (the Studio validation reports them as errors). When any lines are listed, the bus network is built from them alone and `nodes_connections` does not add operational capacity; without lines and with one bus per node, `nodes_connections` is the network. Missing line reactance is derived from `length_km × dc_power_flow.reactance_per_km / Z_base`, with `Z_base = V² / ac_power_flow.base_mva` and `V` the line's `voltage_kv` (else `dc_power_flow.voltage_level_kv`); 0.01 p.u. if there is no length. Per-unit values are on the `ac_power_flow.base_mva` power base, which the DC flow and losses use too.
+
+Bus `bus_id` values must be unique within a system. Transformers, AC/DC converters and frequency converters also take `from_bus`/`to_bus`; see the [reference](../reference/config-reference.md#transformerconfig).
 
 ### Generators
 
-Each generator is defined as a named entry with per-node arrays:
+Existing units go under `generators`, keyed by a unit id. Every list has one entry per node; a unit present at only some nodes has zeros elsewhere.
 
 ```yaml
     generators:
-      solar_pv:
-        name: Solar PV
-        type: Renewable               # "Renewable" or "Non-renewable"
-        fuel: Solar
-        rated_power: [50.0, 30.0, 20.0]   # MW per node
-        min_power: [0.0, 0.0, 0.0]        # Fraction of rated
-        invest_cost: [800000, 800000, 800000]  # $/MW
-        invest_max_power: [500, 300, 200]      # MW max investment
-        fuel_cost: [0.0, 0.0, 0.0]            # $/MWh
-        fixed_cost: [5.0, 5.0, 5.0]           # $/MWh (fixed O&M)
-        maintenance_cost: [2.0, 2.0, 2.0]     # $/MWh (variable O&M)
-        start_up_cost: [0.0, 0.0, 0.0]        # $/start
-        decommissioning_cost: [0, 0, 0]        # $/MW
-        ramp_up: [1.0, 1.0, 1.0]              # Fraction/hour
-        ramp_down: [1.0, 1.0, 1.0]
-        min_up_time: [0, 0, 0]                 # Hours (UC mode only)
-        min_down_time: [0, 0, 0]
-        eff_at_rated: [1.0, 1.0, 1.0]         # Efficiency at rated power
-        eff_at_min: [1.0, 1.0, 1.0]           # Efficiency at min power
-        life_time: [25, 25, 25]                # Years
-        initial_age: [0, 0, 0]                 # Years
-        degradation_rate: [0.005, 0.005, 0.005] # Annual capacity degradation
-        inertia: [0.0, 0.0, 0.0]              # MVA*s
-        Availability: solar_profile.csv        # Availability file path
+      diesel:
+        name: Diesel
+        type: Non-renewable          # Renewable | Non-renewable | Electrolyzer
+        fuel: Diesel                 # key in fuels (Sun / Wind / Water for renewables)
+        rated_power: [0.0, 60.0]     # MW per node
+        min_power: [0.0, 0.3]        # fraction of rated (unit commitment)
+        min_up: [0, 2]               # hours (unit commitment)
+        min_down: [0, 2]             # hours (unit commitment)
+        ramp_up: [1.0, 0.5]          # fraction of capacity per hour (0 = no limit)
+        ramp_down: [1.0, 0.5]
+        eff_at_rated: [0.0, 0.35]
+        eff_at_min: [0.0, 0.25]
+        inertia: [0.0, 2.0]          # H (s)
+        start_up_cost: [0.0, 500.0]  # $ per start
+        fuel_cost: [0.0, 0.0]        # $/MWh; zero -> computed from fuels (see below)
+        fixed_cost: [0.0, 0.0]       # $/MW per year
+        maintenance_cost: [0.0, 5.0] # $/MWh
+        decommissioning_cost: [0.0, 20000.0]  # $/MW
+        invest_cost: [0.0, 900000.0] # $/MW, prices life extension
+        life_time: [0, 25]           # years
+        initial_age: [0, 10]         # years
+        degradation_rate: [0.0, 0.005]  # fraction/year
+        bus_id_per_node: {1: bus_3}  # bus of the South node in the example above
 ```
 
-Every per-node parameter must have exactly `num_nodes` entries; a mismatch causes a validation error.
+**Required keys.** `type`, `life_time`, `initial_age`, `degradation_rate`, `decommissioning_cost`, `rated_power`, `min_power`, `min_up`, `min_down`, `ramp_up`, `ramp_down`, `eff_at_rated`, `eff_at_min`, `inertia`, `start_up_cost`, `fuel_cost`, `fixed_cost`, `maintenance_cost` and `invest_cost`. A missing one aborts loading with `Failed to load configuration: '<key>'`. `fuel` defaults to `"None"`, `name` to the unit key. Optional keys: `technology`, `reservable`, `Availability` (profile file, see [Availability Profiles](availability-profiles.md)), `frequency_hz`, `current_type`, `bus_id_per_node`, `bus_index` and the reservoir fields below.
 
-#### Generator Age and Retirement
+**Units.** `fixed_cost` is fixed O&M in $ per MW per year, charged on the power in service (rated power, degraded with age; none past `life_time` unless the master extends the unit's life) whether or not the unit runs; each dispatch window pays its share of the year. `maintenance_cost` (variable O&M) is charged per MWh generated. `min_power` is a fraction of rated power (0–1) and ramp limits are fractions of capacity per hour (0 = no limit); with `resolution_hours` > 1 the allowed change per step is `ramp × resolution_hours` (at most the full capacity). The loader clamps values outside these ranges (`min_power` to 0–1, a negative ramp to 0) and names each one in a warning. `decommissioning_cost` and `invest_cost` are per MW. Investment in new capacity is modelled with `technologies`; a generator's `invest_cost` is used to price life extension.
 
-Generators are retired when age exceeds lifetime:
+**Type.** Use `Renewable`, `Non-renewable` or `Electrolyzer`. Case and surrounding spaces are ignored (`renewable`, `non-renewable`), and the labels saved by a translated Studio (`Renovable`, `No renovable`, `Renouvelable`, ...) are read as their English value. Any other value, such as `Thermal`, is logged as a warning and treated as `Non-renewable`.
 
-- **Existing units**: `age = initial_age + (year_idx - 1)`
-- **Invested units**: `age = year_idx - investment_year`
+**Fuel cost and the non-fuel O&M adder.** When the system has a `fuels` block, the loader adjusts every generator whose `fuel` names an entry of that block, whatever its type (a `Renewable` biomass unit pays its fuel too; Sun, Wind and Water have no entry or a price of 0):
 
-Setting `initial_age: [20, 20, 20]` with `life_time: [25, 25, 25]` means the generator retires after 5 simulation years.
+1. If `fuel_cost` is missing or all zero, it is computed per node as `price_base / energy_content / eff_at_rated` (the linked technology's `eff_at_rated` is used where the unit's is 0). Nodes with zero efficiency get 0.
+2. For gas (`Gas`, `Natural_gas`, `NG`, `LNG`) and diesel (`Diesel`, `Gasoil`) 60 $/MWh, fuel oil (`Fuel_oil`, `Oil`, `HFO`, `Crude`) 55 $/MWh and `Biomass` 20 $/MWh, a fixed non-fuel cost is **added to `maintenance_cost`** at every node with a positive fuel cost. It is a per-MWh stand-in for the capital, fixed and variable O&M the unit's data lack, so it is skipped when the unit has its own fixed O&M (`fixed_cost` > 0, in $/MW per year: the adder would charge it a second time) or its largest `maintenance_cost` is already at least half the adder.
 
-### Cost Curves and Bidding Curves
+In the example above, with `Diesel: {energy_content: 10.0, price_base: 800.0}`, node 1 gets `fuel_cost` ≈ 228.6 $/MWh and `maintenance_cost` 5 + 60 = 65 $/MWh. To keep your own O&M figures, give the unit a `fixed_cost` or set `maintenance_cost` to at least half the adder (30 $/MWh for diesel). Each unit that receives the adder is named in the run log (INFO level, so in the log file and in the `verbose` console). A non-renewable unit whose fuel is missing from `fuels` and whose fuel cost is zero is reported in a warning, because it would be dispatched for free with zero emissions.
 
-Piecewise cost curves replace the flat `fuel_cost` parameter. Four curve types are available:
+**Optional fields.** Other generator schema fields, such as `fuel_cost_curve`, `droop`, `governor_time_const`, `q_max_mvar`, `q_min_mvar`, `power_factor` and `risk_coefficient`, are read when present and take their schema defaults otherwise.
+
+#### Age, lifetime and retirement
+
+A unit's age in planning year `y` (1-based) is `initial_age + y − 1`. Once the age reaches `life_time`, the master problem can keep the capacity only through a paid life extension, costing `invest_cost × life_extension_cost_factor` per MW per year; otherwise the capacity retires. Setting `initial_age: [20]` with `life_time: [25]` makes the unit reach end of life in year 6. See [Master Problem](master-problem.md).
+
+#### Reservoir hydro
+
+A generator with `reservoir_capacity` is dispatched against stored water energy:
 
 ```yaml
     generators:
-      gas_turbine:
-        name: Gas Turbine
-        type: Non-renewable
-        fuel: Natural Gas
-        # ... other fields ...
-        fuel_cost_curve:
-          - curve_type: stepwise       # Node 0: stepwise blocks
-            blocks:
-              - { fraction: 0.4, price: 45.0 }   # First 40% at $45/MWh
-              - { fraction: 0.3, price: 55.0 }   # Next 30% at $55/MWh
-              - { fraction: 0.3, price: 75.0 }   # Last 30% at $75/MWh
-          - curve_type: linear         # Node 1: linear ramp
-            price_at_zero: 40.0        # $/MWh at minimum output
-            price_at_max: 80.0         # $/MWh at rated power
-          - curve_type: flat           # Node 2: constant price
-            flat_price: 50.0           # $/MWh at all output levels
+      hydro:                                # other generator fields omitted
+        reservoir_capacity: [0.0, 5000.0]   # MWh
+        reservoir_initial_level: [0.0, 0.6] # fraction
+        reservoir_min_level: [0.0, 0.1]
+        reservoir_max_level: [0.0, 1.0]
+        reservoir_turbine_efficiency: [0.0, 0.9]
+        reservoir_inflow_file: data/inflow.csv
+        reservoir_spillage_allowed: true
 ```
 
-Supported `curve_type` values:
-
-| Curve Type | Parameters | Description |
-|------------|-----------|-------------|
-| `flat` | `flat_price` | Constant marginal cost at all output levels |
-| `linear` | `price_at_zero`, `price_at_max` | Linear interpolation from min to max output |
-| `stepwise` | `blocks` (list of `{fraction, price}`) | Piecewise constant blocks; fractions must sum to 1.0 |
-| `exponential` | `base_price`, `scale_factor` | `price(P) = base_price * exp(scale_factor * P / P_max)` |
-
-`fuel_cost_curve` overrides the flat `fuel_cost` array. Each list entry corresponds to one node. All curves are internally normalized to stepwise blocks for the optimizer.
+Also read: `reservoir_evaporation_rate`, `reservoir_pump_capacity`, `reservoir_pump_efficiency`, `reservoir_invest_cost`, `reservoir_invest_max`, and the minimum-release, cascade and head-dependence fields (`reservoir_min_release`, `cascade_downstream`, `cascade_delay_hours`, `reservoir_head_min_factor`). See [Reservoir Hydro](../formulation/reservoir-hydro.md).
 
 ### Technologies (Investment Candidates)
 
-Technologies define investment options for new capacity. Unlike generators (existing physical units), these are candidates evaluated by the master problem.
+Technologies are what the master problem can build. Each is passed to the schema unchanged, so every [TechnologyConfig](../reference/config-reference.md#technologyconfig) field is read.
 
 ```yaml
     technologies:
-      solar_pv_new:
-        name: Solar PV (New)
-        type: Renewable
-        fuel: Solar
-        invest_cost: [700000, 700000, 700000]    # $/MW per node
-        invest_max_power: [500, 300, 200]         # MW max per node
-        Availability: solar_profile.csv
-        eff_at_rated: [1.0, 1.0, 1.0]
-        degradation_rate: [0.005, 0.005, 0.005]
-        lifetime: 25
-        fuel_cost: [0.0, 0.0, 0.0]
-        fixed_cost: [5.0, 5.0, 5.0]
-        maintenance_cost: [2.0, 2.0, 2.0]
-
-      wind_onshore:
-        name: Wind Onshore
-        type: Renewable
-        fuel: Wind
-        invest_cost: [1200000, 1200000, 1200000]
-        invest_max_power: [200, 100, 100]
-        Availability: wind_profile.csv
-        eff_at_rated: [1.0, 1.0, 1.0]
-        degradation_rate: [0.002, 0.002, 0.002]
-        lifetime: 20
-        fuel_cost: [0.0, 0.0, 0.0]
-        fuel_cost_curve:                          # Optional: per-node bidding curves
-          - curve_type: flat
-            flat_price: 0.0
-          - curve_type: flat
-            flat_price: 0.0
-          - curve_type: flat
-            flat_price: 0.0
+      solar_new:
+        name: Solar PV (new)
+        type: Renewable                  # Renewable | Non-renewable
+        fuel: Sun
+        invest_cost: [700000.0, 700000.0]  # $/MW per node
+        invest_max_power: [50.0, 50.0]     # MW per node
+        Availability: availability/solar.csv
+        eff_at_rated: [1.0, 1.0]
+        degradation_rate: [0.005, 0.005]
+        lifetime: 25                       # years, a single integer
+        fixed_cost: [20000.0, 20000.0]     # $/MW per year
+        maintenance_cost: [2.0, 2.0]       # $/MWh
 ```
 
-Selected technologies produce virtual generator instances that participate in operational dispatch.
+Required: `type`, `fuel`, `invest_cost`, `invest_max_power`, `eff_at_rated`, `degradation_rate`, `lifetime`. Capacity built by the master problem becomes a virtual generator in operational dispatch.
+
+**Fuel cost.** A technology prices its fuel like a generator: if `fuel_cost` is missing or all zero and `fuel` names an entry of `fuels`, the loader sets it per node to `price_base / energy_content / eff_at_rated` (a single `eff_at_rated` value counts for every node). The master problem and the units it builds then pay that cost per MWh. The non-fuel O&M adder is not applied to technologies: it stands in for capital cost, which a technology pays through `invest_cost`. A `Non-renewable` technology that ends with no fuel cost and no `fuel_cost_curve` (no fuel, a fuel missing from `fuels`, or a fuel without `price_base` and `energy_content`) is named in a warning, because the master would build it as free generation.
+
+### Cost curves
+
+A per-node offer curve can replace the flat `fuel_cost` of a technology:
+
+```yaml
+    technologies:
+      gas_new:                           # other technology fields omitted
+        fuel_cost_curve:
+          - curve_type: stepwise         # node 0
+            blocks:
+              - {fraction: 0.4, price: 45.0}
+              - {fraction: 0.3, price: 55.0}
+              - {fraction: 0.3, price: 75.0}
+          - curve_type: linear           # node 1
+            price_at_zero: 40.0
+            price_at_max: 80.0
+```
+
+| `curve_type` | Parameters | Discretisation |
+|---|---|---|
+| `flat` | `flat_price` | one block |
+| `stepwise` | `blocks` of `{fraction, price}` | as given; fractions are rescaled if they do not sum to 1 |
+| `linear` | `price_at_zero`, `price_at_max`, `num_segments` | equal blocks priced at their mid-point |
+| `exponential` | `base_price`, `scale_factor`, `num_segments` | equal blocks priced at `base_price × exp(scale_factor × mid-point)` |
+
+Missing prices fall back to the scalar `fuel_cost`. A generator `fuel_cost_curve` or battery `discharge_cost_curve` prices that unit in both the dispatch and the master problem. On a technology, the curve prices its output in the master problem (on every bus of the node) and the capacity built from it in the operational dispatch. Details in [CostCurveConfig](../reference/config-reference.md#costcurveconfig).
 
 ### Battery Technologies
 
 ```yaml
     battery_technologies:
       li_ion_4h:
-        name: Li-Ion 4h
-        invest_cost_power: [180000, 180000, 180000]    # $/MW per node
-        invest_cost_energy: [120000, 120000, 120000]   # $/MWh per node
-        invest_max_power: [200, 100, 100]              # MW max per node
-        invest_max_capacity: [800, 400, 400]           # MWh max per node
-        min_duration_hours: 2.0                        # Min E/P ratio (hours)
-        max_duration_hours: 8.0                        # Max E/P ratio (hours)
-        efficiency_charge: [0.95, 0.95, 0.95]
-        efficiency_discharge: [0.95, 0.95, 0.95]
-        degradation_rate: [0.01, 0.01, 0.01]
+        name: Li-ion 4h
+        invest_cost_power: [180000.0, 180000.0]   # $/MW per node
+        invest_cost_energy: [120000.0, 120000.0]  # $/MWh per node
+        invest_max_power: [20.0, 20.0]            # MW per node
+        invest_max_capacity: [80.0, 80.0]         # MWh per node
+        min_duration_hours: 2.0                   # energy/power ratio bounds
+        max_duration_hours: 8.0
+        efficiency_charge: [0.95, 0.95]
+        efficiency_discharge: [0.95, 0.95]
+        degradation_rate: [0.01, 0.01]
         lifetime: 15
-        soc_initial: [0.5, 0.5, 0.5]
-        max_DoD: [0.9, 0.9, 0.9]
-        maintenance_cost: [1.0, 1.0, 1.0]
-        decommissioning_cost: [5000, 5000, 5000]
+        throughput_degradation_cost: [1.0, 1.0]   # $/MWh discharged, keep > 0
 ```
+
+Every [BatteryTechnologyConfig](../reference/config-reference.md#batterytechnologyconfig) field is read. Keep `throughput_degradation_cost` positive: with 0 the LP may charge and discharge in the same hour.
 
 ### Batteries (Existing)
 
 ```yaml
     batteries:
-      li_ion:
-        name: Li-Ion Storage
-        capacity: [0.0, 0.0, 0.0]            # MWh per node
-        max_charge_power: [0.0, 0.0, 0.0]    # MW
-        max_discharge_power: [0.0, 0.0, 0.0] # MW
-        charge_efficiency: [0.95, 0.95, 0.95]
-        discharge_efficiency: [0.95, 0.95, 0.95]
-        soc_min: [0.10, 0.10, 0.10]          # Fraction
-        soc_max: [0.95, 0.95, 0.95]
-        soc_initial: [0.50, 0.50, 0.50]
-        self_discharge: [0.0001, 0.0001, 0.0001]  # Per hour
-        invest_cost_power: [200000, 200000, 200000]    # $/MW
-        invest_cost_capacity: [150000, 150000, 150000]  # $/MWh
-        invest_max_power: [200, 100, 100]      # MW
-        invest_max_capacity: [800, 400, 400]   # MWh
-        min_duration_hours: 2.0                # Min E/P ratio
-        max_duration_hours: 8.0                # Max E/P ratio
-        life_time: [15, 15, 15]
-        maintenance_cost: [1.0, 1.0, 1.0]     # $/MWh
-        spillage: false                        # Allow energy spillage
+      bess:
+        name: BESS
+        type: Storage
+        capacity: [40.0, 0.0]            # MWh per node
+        rated_power: [10.0, 0.0]         # MW
+        MaxChargePower: [10.0, 0.0]      # MW
+        MaxDischargePower: [10.0, 0.0]   # MW
+        efficiency_charge: [0.95, 0.0]
+        efficiency_discharge: [0.95, 0.0]
+        soc_initial: [0.5, 0.0]          # fraction
+        max_DoD: [0.9, 0.0]              # maximum depth of discharge
+        life_time: [15, 0]
+        initial_age: [0, 0]
+        degradation_rate: [0.01, 0.0]
+        decommissioning_cost: [0.0, 0.0]
+        ramp_up: [0.0, 0.0]              # optional: 0 = no ramp limit
+        ramp_down: [0.0, 0.0]
+        inertia: [0.0, 0.0]
+        fixed_cost: [0.0, 0.0]           # optional: $/MW/year
+        maintenance_cost: [0.0, 0.0]
+        invest_cost: [0.0, 0.0]
+        invest_max_power: [0.0, 0.0]
+        bus_id_per_node: {0: bus_0}
 ```
 
-Battery SOC is subject to a cyclic constraint: `SOC(t_last) == SOC(t_initial)` at the end of each operational day, preventing batteries from acting as free energy sources.
+All keys above except `name`, `type`, `bus_id_per_node`, `ramp_up`, `ramp_down` and `fixed_cost` are required by the loader. Optional: `ramp_up`/`ramp_down` (how fast charge or discharge power may rise or fall, as a fraction of `MaxChargePower`/`MaxDischargePower` per hour; default 0 = no limit), `fixed_cost` ($ per MW of `MaxDischargePower` per year, default 0), `min_duration_hours`/`max_duration_hours` (integers), `spillage`, `reservable` (whether the battery holds reserve, default true), `current_type`, `bus_index`, `throughput_degradation_cost` (cycling cost per MWh discharged, default 0), `discharge_cost_curve`, `risk_coefficient`, `Availability`. As a legacy alternative, a unit can be written as a system-level `bat_<n>` key with `type: Storage`. Generator keys that batteries do not use (`min_power`, `min_up`, `min_down`, `eff_at_rated`, `eff_at_min`, `start_up_cost`, `fuel_cost`) are reported as unknown keys.
+
+**Availability.** An `Availability` file ([Availability Profiles](availability-profiles.md)) multiplies the battery's charge and discharge power each hour, and the power it can offer as reserve, in the dispatch and in the master problem.
+
+**State of charge.** In operational dispatch the SOC is carried from one window to the next, and a window's own end SOC is free. The year's last window (or the single window of a year without rolling horizon) has a soft floor: each battery must end the year with at least (1 − `soc_end_tolerance`) × its year-start SOC; a shortfall is allowed but priced below load shedding (10 % of VOLL, BAT-5c, `bat_soc_end_floor_*`), so it is refilled from generation, never by shedding load. In the master problem's representative periods, SOC is cyclic within each period, or linked across periods when TSAM inter-period linking is on.
+
+### Fuels
+
+```yaml
+    fuels:
+      Diesel:
+        unit: m3
+        emission_factor: 0.27      # t CO2 per MWh of fuel (divided by each unit's eff_at_rated)
+        energy_content: 10.0       # MWh per unit
+        price_base: 800.0          # $ per unit (may be negative)
+        price_growth_rate: 0.0     # per year
+```
+
+The fuel key must match the generators' `fuel` value exactly; it drives the fuel-cost linking and the non-fuel O&M adder described under [Generators](#generators). `price_growth_rate` grows the fuel's price every year from the first planning year, in every mode: a generator or technology burning the fuel pays its `fuel_cost` × (1 + rate)^(year − first year), whether the loader derived that cost from `price_base` or you set it, and so does the fuel balance when primary energy is on. A unit whose `fuel` is not a key of `fuels` keeps its `fuel_cost` flat, and offer curves (`fuel_cost_curve`) are not grown. Benders decomposition does not grow the units' `fuel_cost` yet. Earlier versions grew only the primary-energy fuel balance. The adder recognises a fuel by its key or its `name`, ignoring case, spaces, `_` and `-` (`Natural_gas`, `Natural Gas` and `NG` are all gas). `emission_factor` and `price_base` default to 0 when omitted.
 
 ### Penalties
 
-Penalties are costs for violating soft constraints. They guide the optimizer toward feasible solutions and provide shadow prices for constraint relaxation.
+Penalties price constraint violations and soft limits. Keys are case-insensitive (`LOSS_OF_LOAD`, `CO2_cost` and `TransferMargin`, as written by the Studio, are accepted).
 
 ```yaml
     penalties:
-      loss_of_load: 10000000.0            # $/MW not supplied (VOLL)
-      curtailment: 100.0                  # $/MWh curtailed energy
-      loss_of_reserve_static: 100.0       # $/MW static reserve deficit
-      loss_of_reserve_dynamic: 100.0      # $/MW dynamic reserve deficit
-      loss_of_inertia: 200.0              # $/MW-s inertia deficit
-      transfer_margin: 100.0              # $/MW transfer margin violation
-      fre_penetration_loss: 100.0         # $/MWh RE shortfall
-      co2_cost: 10.0                      # $/tCO2 carbon price
-      co2_budget_violation: 500.0         # $/tCO2 over budget
-      max_curtailment_ratio: 0.05         # Max curtailment as fraction of RE gen
-      ev_loss: 10.0                       # $/MWh EV demand not met
-      loss_of_fuel_supply: 100.0          # $/MW-eq fuel deficit
-      transport_congestion: 100.0         # $/MW congestion penalty
-      storage_violation: 100.0            # $/MW storage constraint violation
-      non_electric_demand_loss: 100.0     # $/unit fuel demand unmet
-      soc_violation: 1000000.0            # $/MWh SOC limit violation
-      delay_retirement_per_mw: 50000.0    # $/MW retirement delay penalty
-      rooftop_curtailment: 5.0            # $/MWh rooftop solar curtailed
+      loss_of_load: 10000000.0          # $/MWh unserved (VOLL)
+      loss_of_reserve_static: 100.0     # $/MW
+      loss_of_reserve_dynamic: 100.0    # $/MW
+      loss_of_inertia: 200.0            # $/MW·s
+      transfer_margin: 100.0            # $/MW
+      curtailment_cost: 20.0            # $/MWh curtailed RE in dispatch
+      max_curtailment_ratio: 0.05       # cap on curtailment / RE generation (master)
+      fre_penetration_loss: 100.0       # $/MWh RE shortfall
+      co2_cost: 10.0                    # $/t CO2
+      co2_budget_violation: 500.0       # $/t CO2 over budget
+      ev_loss: 10000000.0               # $/MWh EV driving not supplied (omit: = loss_of_load)
+      rooftop_curtailment: 5.0          # $/MWh
+      loss_of_fuel_supply: 100.0
+      non_electric_demand_loss: 100.0   # $/unit non-electric fuel demand not served
 ```
 
-`loss_of_load` (VOLL) must be significantly higher than any generation cost so the optimizer prefers expensive dispatch over load shedding. Typical VOLL values: $1,000-$50,000/MWh depending on jurisdiction.
+The values shown are the defaults. `max_curtailment_ratio` is an annual, per-system limit in the master problem (monolithic, TSAM, stochastic, MGA, myopic or Benders): each system's curtailment over the year, its representative days weighted to the year, is at most this share of its renewable generation over the year, and single days may curtail more. Curtailment above the limit costs 10⁴ $/MWh, so the master keeps within it whenever it can; when it cannot (existing renewables that must curtail more than the limit allows), the master still solves and a WARNING names each system and year with the excess in GWh/yr. Benders keeps the limit as a hard constraint. Curtailing existing renewables above the yearly RE growth cap (`MAX_ANNUAL_INCREMENT`) is exempt and only pays `curtailment_cost`. Operational dispatch does not enforce the limit and charges `curtailment_cost` instead. It belongs in `penalties`; a system-level `max_curtailment_ratio` key is ignored.
 
-`max_curtailment_ratio` limits RE curtailment to a fraction of total RE generation (e.g., `0.05` = 5% maximum). Enforced as a constraint, not a cost.
+`soc_violation` can also be set here. Any other key under `penalties` is reported as an unknown key when the configuration loads. Older files may contain `curtailment`, `curtailment_excess_penalty`, `re_excess_penalty`, `coupling_slack_penalty`, `transport_congestion`, `storage_violation` or `delay_retirement_per_mw`: these were removed because they priced nothing (curtailed RE is priced by `curtailment_cost`, the curtailment limit is hard, the fuel model has no congestion, storage-violation or coupling slacks, and no run schedules a delayed retirement), and can be deleted.
 
-### Targets and Constraints
+`loss_of_load` should be far above any generation cost so the optimizer prefers expensive dispatch to load shedding.
+
+### Targets and Economic Parameters
 
 ```yaml
     co2_budget:
       enabled: true
-      annual_budget: 1000000.0            # tonnes CO2/year
+      annual_budget: 1000000.0           # t CO2/year
 
-    target_re_penetration: 0.80           # 80% RE target
-    initial_re_penetration: 0.0           # Starting RE fraction (auto-calculated if 0)
-    min_annual_increment: 0.0             # Min RE increase per year
-    max_annual_increment: 1.0             # Max RE increase per year
-    max_curtailment_ratio: 0.05           # 5% curtailment limit
-
-    # Economic parameters
-    discount_rate: 0.05                   # 5% discount rate
-    demand_growth: 0.02                   # 2% annual demand growth
-    MAX_ANNUAL_SYSTEM_COST: 1000000000.0  # Annual investment budget ($/year)
+    TARGET_RE_PENETRATION: 0.8           # final-year RE share
+    MIN_ANNUAL_INCREMENT: 0.01           # bounds on the yearly step of the RE target path
+    MAX_ANNUAL_INCREMENT: 0.1
+    max_annual_investment: 20000000000.0  # $/year investment budget (master)
+    budget_scope: investment             # or total: investment + the year's operating cost
+    # max_annual_operating_cost: 5.0e8   # $/year operating budget of the dispatch (off when unset)
+    discount_rate: 0.05
+    life_extension_cost_factor: 0.2
 ```
 
-When `initial_re_penetration` is `0.0`, ESFEX auto-calculates it from existing renewable capacities. The RE target is enforced as a master problem constraint, with `fre_penetration_loss` as the shortfall penalty.
+The uppercase names are legacy aliases written by older Studio versions; the lowercase field names (`target_re_penetration`, ...) work too.
 
-### DC Power Flow
+Two separate budgets, each per system:
+
+- `max_annual_investment` caps the overnight investment of each build year in the master. With `budget_scope: total` the money the year spends on operation (fuel, maintenance, start-ups, fixed O&M, life extension, decommissioning; no modelling penalty and no CO2 price) counts against the same budget, so a build that lowers the fuel bill by more than its cost makes room in it. Older files call it `max_annual_system_cost` (or `MAX_ANNUAL_SYSTEM_COST`); that key is read as `max_annual_investment` and the Studio saves it under the new name.
+- `max_annual_operating_cost` (off unless set) caps the dispatch's fuel, maintenance and fixed O&M over each year. The windows share it by demand and carry what earlier windows left; spending above it costs 1000 $ per $, so fuel the budget cannot pay for becomes unserved energy, and the runner warns for a year that goes over it. See [COST-1](../formulation/operational-dispatch.md#annual-operating-budget).
+
+There is no `initial_re_penetration` key: the starting RE share is always computed from existing capacity. The RE target is a planning target, used only in `development` runs; `economic_dispatch` and `unit_commitment` runs apply none. How the target path is built is described in [Master Problem](master-problem.md).
+
+### Power Flow
 
 ```yaml
-    dc_power_flow:
-      enabled: true
-      base_impedance: 100.0               # Ohms
-      max_angle_diff_deg: 30.0            # Max voltage angle difference (degrees)
+    power_flow_mode: dcopf               # dcopf | dcopf_ac_verify | acopf_soc | acopf_qc | acopf_sdp | acopf_polar | acopf_rect
 
-    transmission_lines_geo:               # Per-line data
-      - line_id: line_0
-        from_node: 0
-        to_node: 1
-        capacity_mw: 100.0
-        reactance_pu: 0.05
-        resistance_pu: 0.01
-        length_km: 200.0
-        voltage_kv: 220.0
-      - line_id: line_1
-        from_node: 1
-        to_node: 2
-        capacity_mw: 50.0
-        reactance_pu: 0.08
-        resistance_pu: 0.015
-        length_km: 150.0
-        voltage_kv: 110.0
+    dc_power_flow:
+      reactance_per_km: 0.4              # Ω/km, for lines without reactance_pu
+      voltage_level_kv: 220.0            # kV, for lines without voltage_kv
+      slack_bus: 0                       # unless a bus has bus_type: slack
+      loss_model: pwl                    # none | linear | pwl
+      pwl_loss_segments: 3
+      pwl_loss_segments_master: 2
 ```
 
-With DC power flow enabled, transmission uses linearized power flow equations: `P_ij = (theta_i - theta_j) / x_ij`. The `max_angle_diff_deg` constraint limits angle differences between connected nodes.
-
-With DC power flow disabled, a transport model applies: flows are limited only by line capacity without angle constraints.
+`power_flow_mode` selects the network formulation; there is no `dc_power_flow.enabled` switch and no transport model. In DC-OPF, flows follow `P_ij = (θ_i − θ_j) / x_ij` on the bus network. `max_angle_diff_deg` applies to the AC-OPF formulations only. `ac_power_flow` holds the AC check and AC-OPF parameters ([ACPowerFlowConfig](../reference/config-reference.md#acpowerflowconfig)). See [DC Power Flow](../formulation/dc-power-flow.md) and [AC Power Flow](../formulation/ac-power-flow.md).
 
 ### EV Configuration
 
 ```yaml
     ev_categories:
       sedan:
-        battery_capacity_kwh: 60.0
-        max_charge_power_kw: 11.0
-        max_discharge_power_kw: 7.0
-        charge_efficiency: 0.95
-        discharge_efficiency: 0.92
-        min_soc: 0.20
-        max_soc: 0.90
+        battery_capacity: 60.0       # kWh per vehicle
+        charging_power: 11.0         # kW per vehicle
+        v2g_power: 7.0               # kW per vehicle
+        v2g_participation: 0.2       # fraction of vehicles offering V2G
+        efficiency_charge: 0.95
+        efficiency_discharge: 0.92
+        min_soc: 0.2
+        daily_energy_kwh: 8.0        # default: 12 % of battery_capacity
 
     ev_quantity:
-      sedan: [1000, 500, 300]             # Per node
+      sedan: [1000, 500]             # vehicles per node
 
-    EV_initial_soc: [0.5, 0.5, 0.5]      # Per node
+    EV_initial_soc: [0.5, 0.5]       # per node
 
     base_patterns:
-      commuter: [0.1, 0.1, ..., 0.8, 0.9]    # 24 hourly availability values
+      sedan: [0.9, 0.9, 0.9, 0.9, 0.9, 0.8, 0.5, 0.2, 0.1, 0.1, 0.1, 0.1,
+              0.1, 0.1, 0.1, 0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 0.9, 0.9, 0.9]
 ```
 
-EV charging demand uses an S-curve growth model. When EV optimization is enabled, the optimizer decides charging/V2G schedules; when disabled, EV demand is added to `total_demand`.
+`base_patterns` holds 24 hourly plug-in values per category; the pattern is rescaled so a vehicle charges `daily_energy_kwh` per day. Fleet size grows along an S-curve set by `max_adoption`, `growth_rate` and `mid_point_fraction`. See [EV Model](../formulation/ev-model.md).
 
 ### Sectoral Demand
 
 ```yaml
     electric_demand:
       residential:
-        criticality: 0.7       # 0 = fully flexible, 1 = critical
-        flexibility: 0.3
+        criticality: medium        # critical | high | medium | low
+        is_flexible: true
+        flexibility_ratio: 0.3     # shiftable share
+        delay_tolerance: 4         # hours it can move (0 = no shifting)
       industrial:
-        criticality: 0.9
-        flexibility: 0.1
+        criticality: high
       commercial:
-        criticality: 0.5
-        flexibility: 0.5
+        criticality: low
+        is_flexible: true
+        flexibility_ratio: 0.5
+        delay_tolerance: 2
 
     sector_distribution:
-      0:                        # Node 0
-        residential: 0.40       # 40% residential
-        industrial: 0.35
-        commercial: 0.25
-      1:                        # Node 1
-        residential: 0.50
-        industrial: 0.30
-        commercial: 0.20
+      0: {residential: 0.40, industrial: 0.35, commercial: 0.25}   # node 0
+      1: {residential: 0.50, industrial: 0.30, commercial: 0.20}   # node 1
+
+    criticality_penalties: {critical: 1000, high: 100, medium: 10, low: 1}
 ```
 
-Fractions per node must sum to 1.0. Higher `criticality` sectors are shed last.
+Each node's shares should sum to 1; this is not validated. Shedding priority follows `criticality`, weighted by `criticality_penalties`.
+
+### Other System Sections
+
+| Key | Page |
+|---|---|
+| `development_zones` | [Development Zones](development-zones.md) |
+| `custom_constraints` | [Custom Constraints](custom-constraints.md) |
+| `outage_schedule` | [Scheduled Interruptions](scheduled-interruptions.md) |
+| `primary_energy_sources`, `fuel_entry_points`, `fuel_infrastructure`, `non_electric_demand`, `conversion_technologies` | [Primary Energy](../formulation/primary-energy.md) |
+| `rooftop_solar_config`, `sim_rooftop` | [Rooftop Solar](../formulation/rooftop-solar.md) |
+| `electrolyzers` | [Electrolyzer](../formulation/electrolyzer.md) |
+| `stochastic_scenarios` | [Stochastic Programming](../formulation/stochastic-programming.md) |
+| `transformers`, `acdc_converters`, `freq_converters` | [Reference](../reference/config-reference.md#transformerconfig) |
 
 
 ---
-
 
 ## Multi-System Configuration
 
 ```yaml
 meta_network:
-  systems: [cuba_main, isla_juventud]
-  dynamic_transfer_pricing: false
+  systems: [mainland, island]
 
   systems_links:
-    - systems: [cuba_main, isla_juventud]
-      from_nodes: [2]                     # Node in system A
-      to_nodes: [0]                       # Node in system B
-      capacity: [50.0]                    # MW existing
-      invest_cost: [500000.0]             # $/MW for expansion
-      invest_max: [200.0]                 # MW max expansion
+    - systems: [mainland, island]
+      connections: [[2, 0]]               # [node in mainland, node in island]
+      existing_capacity_MW: [50.0]
+      max_investment_MW: [200.0]
+      investment_cost_per_MW: [500000.0]
+      # loss_factor: only for fuel_route links (losses per 100 km)
+      distance_km: [90.0]
+      cost_per_mw_km: [0.0]               # flow cost, $ per MWh and km
 ```
 
-Each system is solved independently for operational dispatch but shares investment decisions through the master problem.
-
+`systems_links` is a list. Each list field holds one value per entry of `connections`. All listed systems are merged into a single network, and each link becomes a transmission line in both the master problem and the operational dispatch. The master and the dispatch charge every MWh the link carries, in either direction, `distance_km × cost_per_mw_km` (reported as `line_flow_cost` in the dispatch cost breakdown). The first system in `meta_network.systems` is the primary system; some features (for example development zones) read only the primary system. See [Inter-System Links](../gui/inter-system-links.md).
 
 ---
-
 
 ## External System Files
 
@@ -531,49 +633,52 @@ meta_network:
   systems: [mainland, island]
 
 systems:
-  mainland: mainland_system.yaml      # Reference to external file
+  mainland: mainland_system.yaml      # path, relative to this file
   island: island_system.yaml
 ```
 
-Paths are resolved relative to the main configuration file.
-
+A system file contains the system mapping itself (`name`, `nodes`, `generators`, ...). Demand and availability paths inside it are resolved at run time against the folder of the main configuration file.
 
 ---
-
 
 ## Validation
 
-Pydantic v2 validates all configuration at load time:
+`load_config()` (and `esfex validate -c <file>`) checks:
 
-- **Type checking**: All fields must match expected types
-- **Range validation**: Values must be within acceptable ranges (e.g., efficiencies in [0, 1])
-- **Cross-field validation**: Array lengths must match `num_nodes`
-- **File existence**: Referenced data files (demand, availability) are checked
-- **Enum validation**: Fields like `type` must be one of the allowed values
+- **Required keys and types**, including the keys the loader reads directly from each generator and battery.
+- **Ranges and enumerations**, for example `discount_rate` in [0, 1] or `criticality` in `critical | high | medium | low`.
+- **Cross-field rules:** systems named in `meta_network` exist; `bus_id` values are unique; a `connection` bus has `demand_fraction: 0`; each node's bus `demand_fraction` values are rescaled to sum to 1 (with a warning); stochastic scenario probabilities sum to 1; MGA `method` and `objectives` agree; linear custom constraints have terms; outage windows have `end_hour > start_hour`.
 
-Common validation errors:
+It does **not** check:
 
-| Error | Cause | Fix |
-|-------|-------|-----|
-| `list length must match num_nodes` | Per-node array wrong size | Add/remove entries to match node count |
-| `field required` | Missing required field | Add the field to YAML |
-| `value is not a valid float` | String where number expected | Remove quotes from numeric values |
-| `Input should be 'Renewable' or 'Non-renewable'` | Invalid generator type | Use exact case: `Renewable` or `Non-renewable` |
-| `ensure this value is greater than or equal to 0` | Negative value where positive required | Check for typos in numeric values |
+- unknown or misspelled keys: these are listed (as warnings), not rejected;
+- the length of per-node arrays against the node count;
+- that demand, availability or inflow files exist (they are opened when the run starts).
 
-### Validating Before Running
+Common errors:
+
+| Message | Cause | Fix |
+|---|---|---|
+| `Failed to load configuration: 'life_time'` | A key the loader requires is missing from a generator or battery | Add the key (see [Generators](#generators)) |
+| `nodes_connections  Field required` | Old `nodes` format (`adjacency_matrix`) | Use the flattened `nodes_connections` list |
+| `Input should be a valid number, unable to parse string as a number` | Text where a number is expected | Remove quotes or fix the value |
+| `Input should be greater than or equal to 0` | Value outside its range | Check the value against the reference |
+| `Input should be 'Renewable' or 'Non-renewable'` | Invalid technology `type` (case and translated labels are accepted; other words are not) | Use `Renewable` or `Non-renewable` |
+| `role='connection' requires demand_fraction=0` | Demand on a connection bus | Set `demand_fraction: 0` or change the role |
+| `Duplicate bus_id 'bus_0'` | Two buses share an id | Rename one |
+| `System 'x' referenced in meta_network but not defined in systems` | Name mismatch | Fix `meta_network.systems` or `systems` |
 
 ```bash
-esfex validate -c my_system.yaml
+esfex validate -c my_config.yaml
 ```
 
-Performs all checks without starting the optimization.
-
+Loads and validates the file and prints a summary without starting the optimization.
 
 ---
 
-
 ## Complete Example
+
+A two-node island: solar and a battery in the north, a diesel plant in the south, one 80 MW line, and candidate solar and battery technologies. This is a trimmed version of what the Studio exports; layout keys and fields left at their defaults are omitted.
 
 ```yaml
 simulation_mode: development
@@ -583,20 +688,19 @@ temporal:
   resolution_hours: 1
   use_rolling_horizon: true
   rolling_horizon_hours: 48
-  overlap_hours: 6
+  overlap_hours: 24
+  investment_resolution: 8760
 
 solver:
   name: highs
   threads: 4
-  time_limit: 3600
+  time_limit: 10800
   gap: 0.01
-  verbose: false
-
-n1_security:
-  enabled: false
 
 master_problem:
-  representative_days_per_year: 5
+  planning_mode: perfect_foresight
+  representative_days: 5
+  min_day_separation: 5
 
 enable_primary_energy: false
 
@@ -606,79 +710,140 @@ meta_network:
 systems:
   island:
     name: island
-    demand_path: demand.xlsx
+    demand_path: demand/island_demand.csv
     demand_scale: 1.0
-    demand_growth: 0.02
     discount_rate: 0.05
-    target_re_penetration: 0.80
-    max_curtailment_ratio: 0.05
-    MAX_ANNUAL_SYSTEM_COST: 1000000000.0
+    TARGET_RE_PENETRATION: 0.8
+    MIN_ANNUAL_INCREMENT: 0.01
+    MAX_ANNUAL_INCREMENT: 0.1
+    max_annual_investment: 20000000000.0
+    power_flow_mode: dcopf
 
     nodes:
-      adjacency_matrix:
-        - [0, 100]
-        - [100, 0]
-      coordinates:
-        - [-82.38, 23.13]
-        - [-81.95, 22.40]
-      names: ["Node_A", "Node_B"]
+      nodes_connections: [0.0, 80.0, 80.0, 0.0]
+      node_coordinates:
+        - {latitude: 21.5, longitude: -80.0}
+        - {latitude: 21.0, longitude: -80.0}
+      node_names: [North, South]
+
+    buses:
+      - {bus_id: bus_0, name: North 110 kV, parent_node: 0, voltage_kv: 110.0, role: mixed, demand_fraction: 1.0}
+      - {bus_id: bus_1, name: South 110 kV, parent_node: 1, voltage_kv: 110.0, role: mixed, demand_fraction: 1.0}
+
+    transmission_lines_geo:
+      - {line_id: l0, from_node: 0, to_node: 1, from_bus: 0, to_bus: 1, capacity_mw: 80.0, length_km: 56.0}
+
+    fuels:
+      Diesel: {unit: m3, emission_factor: 0.27, energy_content: 10.0, price_base: 800.0}
 
     generators:
+      solar:
+        name: Solar PV
+        type: Renewable
+        fuel: Sun
+        Availability: availability/solar.csv
+        bus_id_per_node: {0: bus_0}
+        rated_power: [20.0, 0.0]
+        min_power: [0.0, 0.0]
+        min_up: [0, 0]
+        min_down: [0, 0]
+        ramp_up: [1.0, 0.0]
+        ramp_down: [1.0, 0.0]
+        eff_at_rated: [1.0, 0.0]
+        eff_at_min: [1.0, 0.0]
+        inertia: [0.0, 0.0]
+        start_up_cost: [0.0, 0.0]
+        fuel_cost: [0.0, 0.0]
+        fixed_cost: [0.0, 0.0]
+        maintenance_cost: [2.0, 0.0]
+        decommissioning_cost: [0.0, 0.0]
+        invest_cost: [700000.0, 0.0]
+        life_time: [25, 0]
+        initial_age: [0, 0]
+        degradation_rate: [0.005, 0.0]
       diesel:
         name: Diesel
         type: Non-renewable
         fuel: Diesel
-        rated_power: [50.0, 30.0]
-        min_power: [0.3, 0.3]
-        invest_cost: [0, 0]
-        invest_max_power: [0, 0]
-        fuel_cost: [85.0, 85.0]
-        fixed_cost: [5.0, 5.0]
-        maintenance_cost: [3.0, 3.0]
-        start_up_cost: [500, 500]
-        decommissioning_cost: [10000, 10000]
-        ramp_up: [0.5, 0.5]
-        ramp_down: [0.5, 0.5]
-        min_up: [2, 2]
-        min_down: [2, 2]
-        eff_at_rated: [0.38, 0.38]
-        eff_at_min: [0.30, 0.30]
-        life_time: [30, 30]
-        initial_age: [10, 10]
-        degradation_rate: [0.01, 0.01]
-        inertia: [5.0, 5.0]
+        bus_id_per_node: {1: bus_1}
+        rated_power: [0.0, 60.0]
+        min_power: [0.0, 0.3]
+        min_up: [0, 2]
+        min_down: [0, 2]
+        ramp_up: [0.0, 0.5]
+        ramp_down: [0.0, 0.5]
+        eff_at_rated: [0.0, 0.35]
+        eff_at_min: [0.0, 0.25]
+        inertia: [0.0, 2.0]
+        start_up_cost: [0.0, 500.0]
+        fuel_cost: [0.0, 0.0]          # loader: 800 / 10 / 0.35 ≈ 228.6 $/MWh at node 1
+        fixed_cost: [0.0, 0.0]
+        maintenance_cost: [0.0, 5.0]   # loader adds 60 $/MWh (diesel non-fuel adder) -> 65
+        decommissioning_cost: [0.0, 20000.0]
+        invest_cost: [0.0, 900000.0]
+        life_time: [0, 25]
+        initial_age: [0, 10]
+        degradation_rate: [0.0, 0.005]
+
+    batteries:
+      bess:
+        name: BESS
+        type: Storage
+        bus_id_per_node: {0: bus_0}
+        capacity: [40.0, 0.0]
+        rated_power: [10.0, 0.0]
+        MaxChargePower: [10.0, 0.0]
+        MaxDischargePower: [10.0, 0.0]
+        efficiency_charge: [0.95, 0.0]
+        efficiency_discharge: [0.95, 0.0]
+        soc_initial: [0.5, 0.0]
+        max_DoD: [0.9, 0.0]
+        life_time: [15, 0]
+        initial_age: [0, 0]
+        degradation_rate: [0.01, 0.0]
+        decommissioning_cost: [0.0, 0.0]
+        inertia: [0.0, 0.0]
+        maintenance_cost: [0.0, 0.0]
+        invest_cost: [0.0, 0.0]
+        invest_max_power: [0.0, 0.0]
 
     technologies:
-      solar_pv:
-        name: Solar PV
+      solar_new:
+        name: Solar PV (new)
         type: Renewable
-        fuel: Solar
-        invest_cost: [700000, 700000]
-        invest_max_power: [200, 100]
-        Availability: solar_profile.csv
+        fuel: Sun
+        Availability: availability/solar.csv
+        invest_cost: [700000.0, 700000.0]
+        invest_max_power: [50.0, 50.0]
         eff_at_rated: [1.0, 1.0]
         degradation_rate: [0.005, 0.005]
         lifetime: 25
+        maintenance_cost: [2.0, 2.0]
 
     battery_technologies:
-      li_ion:
-        name: Li-Ion
-        invest_cost_power: [180000, 180000]
-        invest_cost_energy: [120000, 120000]
-        invest_max_power: [100, 50]
-        invest_max_capacity: [400, 200]
+      li_ion_4h:
+        name: Li-ion 4h
+        invest_cost_power: [180000.0, 180000.0]
+        invest_cost_energy: [120000.0, 120000.0]
+        invest_max_power: [20.0, 20.0]
+        invest_max_capacity: [80.0, 80.0]
         min_duration_hours: 2.0
         max_duration_hours: 8.0
         efficiency_charge: [0.95, 0.95]
         efficiency_discharge: [0.95, 0.95]
         degradation_rate: [0.01, 0.01]
         lifetime: 15
+        throughput_degradation_cost: [1.0, 1.0]
 
     penalties:
-      loss_of_load: 10000000.0
-      fre_penetration_loss: 100.0
-      curtailment: 100.0
+      loss_of_load: 50000.0
+      curtailment_cost: 20.0
       max_curtailment_ratio: 0.05
+      fre_penetration_loss: 100.0
+      co2_cost: 10.0
+
+    co2_budget:
+      enabled: false
 ```
 
-See the [Config Reference](../reference/config-reference.md) for a complete field listing.
+See the [Configuration Reference](../reference/config-reference.md) for every field.

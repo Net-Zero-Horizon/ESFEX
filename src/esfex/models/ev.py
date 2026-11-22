@@ -21,6 +21,26 @@ from esfex.utils.temporal import HOURS_STD_YEAR
 logger = logging.getLogger(__name__)
 
 
+def fleet_growth_factor(
+    category: dict,
+    year: int,
+    base_year: int,
+    target_year: int,
+    max_adoption: float = 30.0,
+    growth_rate: float = 0.12,
+) -> float:
+    """S-curve multiplier on a category's base-year fleet for *year*.
+
+    Single source of truth for the fleet size, shared by the profile
+    generators and by the dispatch fleet limits so both see the same fleet.
+    """
+    cat_max = category.get("max_adoption", max_adoption)
+    cat_rate = category.get("growth_rate", growth_rate)
+    mid_fraction = category.get("mid_point_fraction", 0.5)
+    mid_point_year = base_year + (target_year - base_year) * mid_fraction
+    return cat_max / (1 + np.exp(-cat_rate * (year - mid_point_year)))
+
+
 def generate_ev_profiles(
     num_nodes: int,
     num_hours: int,
@@ -31,6 +51,7 @@ def generate_ev_profiles(
     target_year: int = 2050,
     max_adoption: float = 30.0,
     growth_rate: float = 0.12,
+    seed: Optional[int] = 0,
 ) -> pd.DataFrame:
     """
     Generate EV charging profiles with S-curve fleet growth.
@@ -58,6 +79,9 @@ def generate_ev_profiles(
         Maximum growth factor (multiplier on initial fleet)
     growth_rate : float
         Logistic growth rate
+    seed : int, optional
+        Seed of the hourly noise, so a configuration always yields the same
+        profiles. ``None`` draws fresh noise on every call.
 
     Returns
     -------
@@ -71,19 +95,11 @@ def generate_ev_profiles(
             columns.append(f"Node_{node+1}_{category}")
 
     profiles = pd.DataFrame(index=range(num_hours), columns=columns, dtype=float)
-
-    total_years = target_year - base_year
+    rng = np.random.default_rng(seed)
 
     for node in range(num_nodes):
         for category in ev_categories:
             pattern = base_patterns[category]
-
-            # Category-specific parameters
-            category_max_adoption = ev_categories[category].get("max_adoption", max_adoption)
-            category_growth_rate = ev_categories[category].get("growth_rate", growth_rate)
-            category_mid_point_fraction = ev_categories[category].get("mid_point_fraction", 0.5)
-
-            mid_point_year = base_year + total_years * category_mid_point_fraction
 
             # Energy normalization. ``pattern`` is an availability/plug-in
             # profile (fraction of fleet connected per hour), not a power
@@ -109,9 +125,9 @@ def generate_ev_profiles(
                 year_index = hour // HOURS_STD_YEAR
                 current_year = base_year + year_index
 
-                # S-curve growth factor
-                growth_factor = category_max_adoption / (
-                    1 + np.exp(-category_growth_rate * (current_year - mid_point_year))
+                growth_factor = fleet_growth_factor(
+                    ev_categories[category], current_year, base_year, target_year,
+                    max_adoption, growth_rate,
                 )
 
                 # Cyclic pattern
@@ -119,7 +135,7 @@ def generate_ev_profiles(
                 base_value = pattern[hour_of_day]
 
                 # Add noise
-                noise = np.random.normal(0, 0.02)
+                noise = rng.normal(0, 0.02)
                 value = max(0, min(1, base_value + noise))
 
                 # Scale by vehicle count
@@ -149,6 +165,7 @@ def generate_v2g_availability(
     target_year: int = 2050,
     max_adoption: float = 30.0,
     growth_rate: float = 0.12,
+    seed: Optional[int] = 0,
 ) -> pd.DataFrame:
     """
     Generate V2G availability profiles with S-curve fleet growth.
@@ -173,6 +190,9 @@ def generate_v2g_availability(
         Maximum growth factor
     growth_rate : float
         Logistic growth rate
+    seed : int, optional
+        Seed of the hourly noise, so a configuration always yields the same
+        profiles. ``None`` draws fresh noise on every call.
 
     Returns
     -------
@@ -185,33 +205,27 @@ def generate_v2g_availability(
             columns.append(f"Node_{node+1}_{category}")
 
     profiles = pd.DataFrame(index=range(num_hours), columns=columns, dtype=float)
-
-    total_years = target_year - base_year
+    rng = np.random.default_rng(seed)
 
     for node in range(num_nodes):
         for category in ev_categories:
             pattern = base_patterns[category]
             v2g_participation = ev_categories[category]["v2g_participation"]
 
-            category_max_adoption = ev_categories[category].get("max_adoption", max_adoption)
-            category_growth_rate = ev_categories[category].get("growth_rate", growth_rate)
-            category_mid_point_fraction = ev_categories[category].get("mid_point_fraction", 0.5)
-
-            mid_point_year = base_year + total_years * category_mid_point_fraction
-
             profile = []
             for hour in range(num_hours):
                 year_index = hour // HOURS_STD_YEAR
                 current_year = base_year + year_index
 
-                growth_factor = category_max_adoption / (
-                    1 + np.exp(-category_growth_rate * (current_year - mid_point_year))
+                growth_factor = fleet_growth_factor(
+                    ev_categories[category], current_year, base_year, target_year,
+                    max_adoption, growth_rate,
                 )
 
                 hour_of_day = hour % 24
                 base_value = pattern[hour_of_day]
 
-                noise = np.random.normal(0, 0.01)
+                noise = rng.normal(0, 0.01)
                 value = max(0, min(1, base_value + noise))
 
                 v2g_value = value * v2g_participation

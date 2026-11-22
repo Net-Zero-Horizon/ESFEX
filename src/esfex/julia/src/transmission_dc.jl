@@ -28,8 +28,8 @@ struct TransmissionDC
     incidence_matrix::Matrix{Float64}   # buses × lines
     max_angle_diff_rad::Float64
     slack_bus::Int
-    line_losses::Vector{Float64}        # Per-line loss factor (0-1), legacy linear model
-    pwl_losses::Union{PWLLossSegments, Nothing}  # PWL loss model (nothing = use linear)
+    line_losses::Vector{Float64}        # Per-line series resistance R_pu (loss coefficient)
+    pwl_losses::Union{PWLLossSegments, Nothing}  # Loss segments, see with_loss_model (nothing = lossless)
     line_ids::Vector{String}            # line_id per entry in `lines` ("" = transformer/adjacency); id-addresses outage masks
 end
 
@@ -93,6 +93,7 @@ function TransmissionDC(network::NetworkConfig)
             # Transmission line
             src = transmission_src_indices[idx]
             if !isempty(network.transmission_lines) && src <= length(network.transmission_lines)
+                # Whole-line R, like the reactance in build_from_line_data
                 push!(losses, network.transmission_lines[src].resistance_pu)
             else
                 push!(losses, reactances[idx] * network.default_r_to_x_ratio)
@@ -134,9 +135,40 @@ function TransmissionDC(network::NetworkConfig)
         network.max_angle_diff_rad,
         network.slack_bus,
         losses,
-        nothing,  # pwl_losses: computed by compute_pwl_loss_segments() after construction
+        nothing,  # pwl_losses: attached by with_loss_model() after construction
         line_ids
     )
+end
+
+"""
+    with_loss_model(transmission::TransmissionDC, segments::Int, s_base::Float64) -> TransmissionDC
+
+Attach the configured loss model (`pwl_loss_segments` / `transmission_loss_segments`):
+`segments > 0` → PWL quadratic losses with that many segments, `segments < 0` →
+linear losses (`linear_loss_segments`), `0` → lossless.
+"""
+function with_loss_model(t::TransmissionDC, segments::Int, s_base::Float64)
+    pwl = segments > 0 ? compute_pwl_loss_segments(t, segments, s_base) :
+          segments < 0 ? linear_loss_segments(t) : nothing
+    losses = segments == 0 ? zeros(length(t.lines)) : t.line_losses
+    return TransmissionDC(t.num_buses, t.lines, t.line_reactances, t.line_capacities,
+        t.incidence_matrix, t.max_angle_diff_rad, t.slack_bus, losses, pwl, t.line_ids)
+end
+
+"""
+    linear_loss_segments(transmission::TransmissionDC) -> PWLLossSegments
+
+Linear loss model as a single segment of slope `λ_l = R_pu`: a constant fraction
+`λ_l` of the flow is lost whichever way it runs, split between both ends like the
+PWL losses. (It used to scale the flow at the lower-index end by `1 - λ_l`, which
+created energy whenever the flow ran from that end.)
+"""
+function linear_loss_segments(transmission::TransmissionDC)
+    n_lines = length(transmission.lines)
+    λ = [l <= length(transmission.line_losses) ? clamp(transmission.line_losses[l], 0.0, 1.0) : 0.0
+         for l in 1:n_lines]
+    widths = [[max(transmission.line_capacities[l], 0.0)] for l in 1:n_lines]
+    return PWLLossSegments(1, widths, [[λ[l]] for l in 1:n_lines], λ)
 end
 
 """
@@ -219,9 +251,9 @@ function build_from_line_data(network::NetworkConfig)
         i, j = tl.from_node, tl.to_node
         edge = i < j ? (i, j) : (j, i)
         push!(lines, edge)
-        # Effective values accounting for parallel circuits
-        push!(reactances, tl.reactance_pu / tl.num_circuits)
-        push!(capacities, tl.capacity_mw * tl.num_circuits)
+        # Whole-line values: they already include all of its circuits
+        push!(reactances, tl.reactance_pu)
+        push!(capacities, tl.capacity_mw)
     end
 
     return lines, capacities, reactances
@@ -231,7 +263,8 @@ end
     build_from_adjacency(network::NetworkConfig) -> (lines, capacities, reactances)
 
 Legacy mode: build line list from adjacency matrix with uniform reactance.
-X_ij = (reactance_per_km × distance_km) / base_impedance
+X_ij = reactance_per_km × distance_km / Z_base, Z_base = voltage_level_kv² / s_base
+(0.01 p.u. without a distance)
 Adjacency matrix is now bus×bus.
 """
 function build_from_adjacency(network::NetworkConfig)
@@ -248,7 +281,8 @@ function build_from_adjacency(network::NetworkConfig)
                 push!(lines, (i, j))
                 push!(capacities, max(cap_ij, cap_ji))
                 distance_km = network.distances[i, j]
-                x_pu = network.reactance_per_km * distance_km / network.base_impedance
+                z_base = network.voltage_level_kv^2 / network.s_base
+                x_pu = distance_km > 0 ? network.reactance_per_km * distance_km / z_base : 0.01
                 push!(reactances, x_pu)
             end
         end
@@ -276,6 +310,679 @@ function build_incidence_matrix(num_buses::Int, lines::Vector{Tuple{Int,Int}})
 end
 
 """
+    pair_flow(vars, i, j, t) -> AffExpr
+
+Flow from bus `i` to bus `j` at step `t`: the sum over every branch between
+the pair (parallel lines and transformers), signed for the `i → j` direction
+(branches are stored low → high bus). Zero when no branch joins the pair.
+"""
+function pair_flow(vars::PowerSystemVariables, i::Int, j::Int, t::Int)
+    e = AffExpr(0.0)
+    key, sgn = i < j ? ((i, j), 1.0) : ((j, i), -1.0)
+    for ℓ in get(vars.pair_lines, key, Int[])
+        add_to_expression!(e, sgn, vars.power_flow_by_line[ℓ][t])
+    end
+    return e
+end
+
+# =============================================================================
+# Exact PWL losses: no line may lose more than the PWL loss of its net flow
+# =============================================================================
+#
+# The PWL loss of a line-step is `ploss = Σ_k m_k (dp_k + dn_k)` with the flow
+# `pf = Σ dp_k − Σ dn_k`. Nothing in an LP stops both directions carrying flow
+# at once, or a steep segment filling before a flat one, so whenever energy is
+# worth less than nothing somewhere (curtailment has a cost, a curtailment
+# limit or an RE target that counts renewable output binds) the solver loses
+# energy on the lines on purpose: up to twice the full-flow loss of every lossy
+# line, at no cost. Cuba, 2049: 9.3 TWh "lost" (23 % of supply) and no
+# curtailment. No LP can forbid it (the set {loss = f(|pf|)} is not convex),
+# so each solve is repaired instead (`optimize_exact_losses!`).
+
+"""
+    LossBlock
+
+One lossy line at one step, as `add_dc_constraints!` builds it: the loss
+constraint `ploss == Σ m_k (dp_k + dn_k)`, the flow and its segments, and the
+repair state (`dir` 0 = PWL; ±1 = linearised, flow held in that direction
+and `ploss = alpha × |pf|`; `retunes`, times `alpha` was updated;
+`releases`, times the direction check released it in this solve, and
+`prefer`, the direction it is held in when linearised again, 0 for none).
+"""
+mutable struct LossBlock
+    con::ConstraintRef
+    ploss::VariableRef
+    pf::VariableRef
+    dp::Vector{VariableRef}
+    dn::Vector{VariableRef}
+    widths::Vector{Float64}
+    slopes::Vector{Float64}
+    open_last::Bool        # last segment unbounded (expandable line)
+    group::Int             # time step (of one add_dc_constraints! call)
+    dir::Int
+    alpha::Float64
+    retunes::Int           # times alpha followed the flow in this solve
+    releases::Int          # times released by the direction check in this solve
+    prefer::Int            # direction to hold it in when linearised again (0: its flow's)
+end
+
+"""
+    PWLLossRepair
+
+The lossy line-steps of a model (`model.ext[:pwl_loss_repair]`) and the
+number of time-step groups registered so far (one per step of each
+`add_dc_constraints!` call: a dispatch window, or one representative day of
+a master or Benders subproblem).
+"""
+mutable struct PWLLossRepair
+    blocks::Vector{LossBlock}
+    n_groups::Int
+end
+
+# A copy (copy_model) gets no registry: the hook then solves it as it stands
+JuMP.copy_extension_data(::PWLLossRepair, ::JuMP.AbstractModel, ::JuMP.AbstractModel) = nothing
+
+# Rounds of the repair, the ones that release directions included
+const LOSS_REPAIR_MAX_ROUNDS = 8
+# The direction check (step 3 of `optimize_exact_losses!`) is off: on Cuba's
+# master it took the repair from 3 rounds to 19 and the master 2.5 to 10 times
+# longer (a TSAM year from 0.5 h to over 6 h). Tests switch it on.
+const LOSS_REPAIR_DIRECTION_CHECK = Ref(false)
+const LOSS_REPAIR_TOL_MW = 1e-3      # over-loss (MW) ignored as solver noise
+# A line-step released twice by the direction check stays held (no cycling)
+const LOSS_REPAIR_MAX_RELEASES = 2
+# A held line-step is released when reversing it would save more than this
+# share of the objective (first-order: its reduced cost × its first segment)
+const LOSS_REPAIR_REVERSE_RTOL = 1e-7
+const LOSS_REPAIR_SECANT_RTOL = 0.02 # linearised loss within 2 % of the PWL loss
+const LOSS_REPAIR_SECANT_TOL_MW = 0.1 # ... or within 0.1 MW
+const LOSS_REPAIR_MAX_RETUNES = 2    # then the line-step keeps its alpha
+# A round only to update alphas runs while the linearised losses, together,
+# miss the PWL losses of their flows by more than 0.1 % of all line losses
+const LOSS_REPAIR_RETUNE_SHARE = 1e-3
+
+# Per solver: the parameter that makes a re-solve ignore the previous basis,
+# its value, and the LP method parameter with its simplex values (for which
+# the previous basis is the method's own warm start)
+const LP_WARM_START_PARAMS = Dict{String, Tuple{String, Any, String, Tuple}}(
+    "Gurobi" => ("LPWarmStart", 0, "Method", (0, 1)),
+    "CPLEX" => ("CPXPARAM_Advance", 0, "CPXPARAM_LPMethod", (1, 2, 3)),
+)
+
+"""
+    lp_warm_start_off(solver, attribute) -> Union{Nothing, Pair{String}}
+
+The parameter (and value) that makes `solver` ignore the previous basis when
+it re-solves an LP, read from `LP_WARM_START_PARAMS`; `nothing` for other
+solvers and when the LP method (`attribute(name)` reads a parameter) is
+simplex, whose own warm start that basis is.
+"""
+function lp_warm_start_off(solver::AbstractString, attribute)
+    spec = get(LP_WARM_START_PARAMS, solver, nothing)
+    spec === nothing && return nothing
+    param, off, method_param, simplex = spec
+    attribute(method_param) in simplex && return nothing
+    return param => off
+end
+
+"""
+    optimize_like_first!(model; kwargs...)
+
+Re-solve a model the loss repair has changed with the LP method of its first
+solve. Gurobi and CPLEX restart a changed LP from the previous basis with
+simplex, whatever method the user set: on a Cuba master that barrier solves
+in 2 minutes, that dual/primal simplex ran 47+ minutes. Unless the user chose
+simplex, the previous basis is ignored for this solve (`lp_warm_start_off`)
+and the parameter is set back afterwards. Other solvers re-solve as they do.
+"""
+function optimize_like_first!(model; kwargs...)
+    # Set on the backend: through JuMP the change would mark the solution
+    # just found as out of date (OPTIMIZE_NOT_CALLED)
+    param(name) = MOI.RawOptimizerAttribute(name)
+    restore = nothing
+    try
+        off = lp_warm_start_off(solver_name(model), name -> get_attribute(model, name))
+        if off !== nothing
+            restore = off.first => get_attribute(model, off.first)
+            MOI.set(backend(model), param(off.first), off.second)
+        end
+    catch
+        restore = nothing   # a solver version without the parameter
+    end
+    try
+        optimize!(model; ignore_optimize_hook = true, kwargs...)
+    finally
+        restore === nothing || MOI.set(backend(model), param(restore.first), restore.second)
+    end
+    return
+end
+
+"""
+    retry_worthy(model) -> Bool
+
+The solve ended `NUMERICAL_ERROR`, or `LOCALLY_SOLVED`: on an LP, Gurobi's
+`SUBOPTIMAL` (the barrier stalled short of its tolerances and returned its
+best iterate, neither optimal nor proven so). Another solve with other
+parameters (`NUMERICAL_RETRY_PARAMS`) may finish either.
+"""
+retry_worthy(model) = termination_status(model) in (MOI.NUMERICAL_ERROR, MOI.LOCALLY_SOLVED)
+
+# Per solver: the parameters of a second attempt at a solve that ended
+# NUMERICAL_ERROR or SUBOPTIMAL (Gurobi's own advice: "Consider using the
+# homogeneous algorithm (through parameter 'BarHomogeneous')")
+const NUMERICAL_RETRY_PARAMS = Dict{String, Vector{Pair{String, Any}}}(
+    "Gurobi" => ["BarHomogeneous" => 1],
+)
+
+# The model's solver's retry parameters (`nothing` without any)
+numerical_retry_params(model) = get(NUMERICAL_RETRY_PARAMS, JuMP.solver_name(model), nothing)
+
+"""
+    solve_retrying!(solve!, model, retry; again = solve!, label)
+
+Run `solve!()`. When it ends `retry_worthy` and `retry` holds solver
+parameters (`name => value` pairs), set them, run `again()` with a warning
+that starts with `label` (the model solved: "Master problem", a dispatch
+window), and set them back on the backend afterwards (through JuMP the
+change would mark the solution just found as out of date). With no `retry`
+(`nothing` or empty) the first solve stands.
+"""
+function solve_retrying!(solve!, model, retry; again = solve!,
+                         label = get(model.ext, :solve_label, "Master problem"))
+    solve!()
+    (retry !== nothing && !isempty(retry) && retry_worthy(model)) || return
+    first = termination_status(model)
+    detail = try raw_status(model) catch; "" end
+    previous = Pair{String, Any}[]
+    for (name, val) in retry
+        push!(previous, name => get_attribute(model, name))
+        set_attribute(model, name, val)
+    end
+    @warn "$(label): the solve ended $(first)" *
+          (isempty(detail) ? "" : " ($(detail))") * "; solving again with " *
+          join(("$k = $v" for (k, v) in retry), ", ")
+    try
+        again()
+    finally
+        for (name, val) in previous
+            MOI.set(backend(model), MOI.RawOptimizerAttribute(name), val)
+        end
+    end
+    @info "$(label): second solve $(termination_status(model))"
+    return
+end
+
+"""
+    optimize_retrying!(model, retry, label)
+
+Solve a master problem (`optimize_master!`) or a dispatch window
+(`optimize_dispatch!`): a solve that ends `retry_worthy` is solved once more
+with the solver's `retry` parameters (`solve_retrying!`). With line losses
+each solve of the loss repair is retried there (`optimize_exact_losses!`),
+and a repair round whose re-solve is still not `OPTIMAL` is undone.
+`label` names the model in the warnings.
+"""
+function optimize_retrying!(model, retry, label::AbstractString)
+    reg = get(model.ext, :pwl_loss_repair, nothing)
+    if reg isa PWLLossRepair && !isempty(reg.blocks)
+        # Each solve of the loss repair is retried there: retrying the whole
+        # repair would solve every round again
+        model.ext[:solve_retry] = retry
+        model.ext[:solve_label] = label
+        try
+            optimize!(model)
+        finally
+            delete!(model.ext, :solve_retry)
+            delete!(model.ext, :solve_label)
+        end
+    else
+        solve_retrying!(() -> optimize!(model), model, retry; label = label)
+    end
+    return
+end
+
+"""
+    pwl_loss_repair!(model) -> PWLLossRepair
+
+The model's loss registry, created (with `optimize_exact_losses!` as its
+optimize hook) on first use.
+"""
+function pwl_loss_repair!(model)
+    reg = get(model.ext, :pwl_loss_repair, nothing)
+    reg isa PWLLossRepair && return reg
+    reg = PWLLossRepair(LossBlock[], 0)
+    model.ext[:pwl_loss_repair] = reg
+    set_optimize_hook(model, optimize_exact_losses!)
+    return reg
+end
+
+"""
+    pwl_loss_value(blk::LossBlock, F) -> Float64
+
+PWL loss of a flow of magnitude `F` on the line: its segments filled in
+order (the open last segment of an expandable line takes the rest).
+"""
+function pwl_loss_value(blk::LossBlock, F::Real)
+    rem = max(F, 0.0)
+    loss = 0.0
+    N = length(blk.widths)
+    for k in 1:N
+        take = (k == N && blk.open_last) ? rem : min(rem, blk.widths[k])
+        loss += blk.slopes[k] * take
+        rem -= take
+        rem <= 0 && break
+    end
+    return loss
+end
+
+# Loss per MW of a linearised block at flow F: the PWL secant (first slope at 0)
+loss_secant(blk::LossBlock, F::Real) = F > 1e-6 ? pwl_loss_value(blk, F) / F : blk.slopes[1]
+
+# A linearised block carries its whole flow on the first segment of its
+# direction (`ploss = alpha × that segment`)
+function set_block_alpha!(blk::LossBlock, alpha::Float64)
+    set_normalized_coefficient(blk.con, (blk.dir > 0 ? blk.dp : blk.dn)[1], -alpha)
+    blk.alpha = alpha
+end
+
+function linearise_block!(blk::LossBlock, dir::Int, alpha::Float64)
+    same, opp = dir > 0 ? (blk.dp, blk.dn) : (blk.dn, blk.dp)
+    foreach(v -> set_upper_bound(v, 0.0), opp)
+    # The other segments would be copies of the first at the same alpha: a
+    # degenerate LP the solvers then wander through
+    foreach(v -> set_upper_bound(v, 0.0), @view same[2:end])
+    if blk.open_last
+        has_upper_bound(same[1]) && delete_upper_bound(same[1])
+    else
+        set_upper_bound(same[1], sum(blk.widths))
+    end
+    blk.dir = dir
+    blk.retunes = 0
+    set_block_alpha!(blk, alpha)
+end
+
+function restore_block!(blk::LossBlock)
+    blk.dir == 0 && return false
+    same, opp = blk.dir > 0 ? (blk.dp, blk.dn) : (blk.dn, blk.dp)
+    set_normalized_coefficient(blk.con, same[1], -blk.slopes[1])
+    N = length(blk.widths)
+    for k in 1:N, v in (same[k], opp[k])
+        if k < N || !blk.open_last
+            set_upper_bound(v, blk.widths[k])
+        elseif has_upper_bound(v)
+            delete_upper_bound(v)
+        end
+    end
+    blk.dir = 0
+    blk.alpha = 0.0
+    blk.retunes = 0
+    return true
+end
+
+# Back to the PWL model as built; true if some block was linearised
+restore_pwl_losses!(reg::PWLLossRepair) =
+    foldl((changed, b) -> restore_block!(b) | changed, reg.blocks; init = false)
+
+"""
+    optimize_exact_losses!(model; kwargs...)
+
+Optimize hook of every model with PWL line losses (set by
+`add_dc_constraints!`), so each `optimize!` returns losses that never exceed
+the PWL loss of the net flow on any line:
+
+1. Solve with the PWL loss model as built (exact wherever energy has a
+   positive value: the LP then fills segments in order, one direction).
+2. Each step where some line loses more than the PWL loss of its flow
+   `|pf|` is repaired on every lossy line of that step: the flow is held in
+   the direction it had and the loss becomes `alpha × |pf|`, with `alpha`
+   the PWL secant at that flow (a linear function of the flow, so nothing
+   can be lost beyond it). The model is solved again; `alpha` follows the
+   new flow until the loss is within 2 % (or 0.1 MW) of the PWL loss, at most
+   twice per line-step, and steps that now over-lose are repaired too. A
+   round that would only update alphas is skipped when the linearised
+   losses together miss the PWL losses of their flows by at most
+   $(100 * LOSS_REPAIR_RETUNE_SHARE) % of all line losses.
+3. Direction check (`reversible_blocks`), off unless
+   `LOSS_REPAIR_DIRECTION_CHECK[]` is set (it multiplies the rounds and the
+   solve time of a large master): once the losses are settled, a
+   held line-step whose flow sits at zero and whose opposite direction
+   would lower the objective (reduced cost of that direction's first
+   segment, held at 0) is released back to the PWL model and the repair
+   goes on from step 2; if it over-loses again it is held in the direction
+   its reduced cost asked for. The direction an over-losing PWL solve
+   happens to put on a line was otherwise kept for the whole solve, and the
+   end point depended on it (Cuba's one-year master: 4.4 % between two
+   Gurobi methods; with the check, 4.3 % lower under barrier).
+   A line-step is released at most $(LOSS_REPAIR_MAX_RELEASES) times per
+   solve, and the repair runs at most $(LOSS_REPAIR_MAX_ROUNDS) rounds. It
+   ends on the round without over-loss of lowest objective: when a later
+   round ends higher (or still over-losing), that model is solved again.
+   Needs duals: a MIP (unit commitment) skips the check.
+
+Each re-solve of a changed model uses the LP method of the first solve
+(`optimize_like_first!`): Gurobi and CPLEX would otherwise restart from the
+previous basis with simplex, even under barrier.
+
+The surplus that was lost on the lines is then curtailed (at its cost,
+within its limits), stored or not produced. Steps without over-loss keep the
+PWL model and its marginal losses. Every call starts again from the PWL
+model, so a model re-solved after a change (Benders, MGA, NPV retirement) is
+repaired for its new solution. If a repaired solve finds no solution (only
+discarding energy on the lines kept the model feasible), the PWL solve is
+kept with a warning. A first solve that is not optimal (stopped at a limit,
+or a solver without an answer, as HiGHS's "no progress") is returned as it
+is, with a warning: its losses mean nothing, and each round re-solves the
+whole model. The model stays an LP (or the MIP it was).
+
+The bounds of the solve are recorded in `model.ext[:loss_repair_bounds]`
+(`loss_repair_bounds`): the objective of the first (PWL) solve, a lower
+bound of the model with exact PWL losses (the PWL model with over-loss
+allowed relaxes it), the final objective (a feasible point of it, up to the
+2 % tolerance of the linearised losses: an upper bound), their gap, the
+repair rounds, the line-steps linearised at the end and the releases.
+
+Under `optimize_master!` or `optimize_dispatch!` (`optimize_retrying!`,
+which sets `model.ext[:solve_retry]`), each solve that ends `NUMERICAL_ERROR`
+or `LOCALLY_SOLVED` is solved once more with the solver's retry parameters
+(`solve_retrying!`), and a repair round whose re-solve is still not
+`OPTIMAL` is undone (`undo_loss_round!`): the model of the round before is
+solved again and kept, with a warning. The master takes only an optimal
+plan, and an interior point short of optimal runs flow both ways on lines
+the optimum leaves alone, which the next round would read as over-loss. A
+plain `optimize!` neither retries nor undoes a round.
+"""
+# An optimal solve, whose losses the repair can start from
+loss_repair_solved(model) =
+    termination_status(model) in (MOI.OPTIMAL, MOI.LOCALLY_SOLVED) &&
+    primal_status(model) == MOI.FEASIBLE_POINT
+
+# Re-solves and releases of one repair
+mutable struct LossRepairStats
+    rounds::Int
+    released::Int
+end
+
+function optimize_exact_losses!(model; kwargs...)
+    sync_highs_threads!(model)
+    reg = get(model.ext, :pwl_loss_repair, nothing)
+    if !(reg isa PWLLossRepair) || isempty(reg.blocks)
+        return optimize!(model; ignore_optimize_hook = true, kwargs...)
+    end
+    delete!(model.ext, :loss_repair_bounds)
+    # A master or a dispatch window (`optimize_retrying!` sets the key for
+    # the duration of its solve) repairs only from optimal rounds; its value
+    # holds the solver parameters for one more attempt at a solve that stalls
+    retrying = haskey(model.ext, :solve_retry)
+    retry = get(model.ext, :solve_retry, nothing)
+    resolve!() = optimize_like_first!(model; kwargs...)
+    for b in reg.blocks
+        b.releases = 0
+        b.prefer = 0
+    end
+    if restore_pwl_losses!(reg)
+        solve_retrying!(resolve!, model, retry)
+    else
+        solve_retrying!(() -> optimize!(model; ignore_optimize_hook = true, kwargs...),
+                        model, retry; again = resolve!)
+    end
+    if has_values(model) && !loss_repair_solved(model)
+        # Cuba on HiGHS: "no progress" after 12.8 h (relative primal-dual
+        # objective gap 1.0), and its repair started another solve as long
+        @warn "Line losses: not repaired, the solve ended " *
+              "$(termination_status(model)) ($(primal_status(model)))"
+        return
+    end
+    has_values(model) || return
+    lower = objective_value(model)
+    stats = LossRepairStats(0, 0)
+    repair_losses!(model, reg, resolve!, retry, retrying, stats)
+    record_loss_repair_bounds!(model, reg, lower, stats)
+    return
+end
+
+# The rounds of `optimize_exact_losses!` after its first (PWL) solve
+function repair_losses!(model, reg::PWLLossRepair, resolve!, retry, retrying,
+                        stats::LossRepairStats)
+    repaired = Set{Int}()
+    best = nothing      # (objective, state) of the best settled round
+    for r in 1:LOSS_REPAIR_MAX_ROUNDS
+        has_values(model) || break
+        # Read the whole solution before touching the model
+        pf = [value(b.pf) for b in reg.blocks]
+        F = abs.(pf)
+        L = [value(b.ploss) for b in reg.blocks]
+        over_groups = Set{Int}()
+        retune = Int[]
+        over_mw = 0.0
+        retune_mw = 0.0
+        for (i, b) in enumerate(reg.blocks)
+            exact = pwl_loss_value(b, F[i])
+            if b.dir == 0
+                excess = L[i] - exact
+                if excess > LOSS_REPAIR_TOL_MW + 1e-5 * F[i]
+                    push!(over_groups, b.group)
+                    over_mw += excess
+                end
+            elseif b.retunes < LOSS_REPAIR_MAX_RETUNES &&
+                   abs(L[i] - exact) > max(LOSS_REPAIR_SECANT_TOL_MW,
+                                           LOSS_REPAIR_SECANT_RTOL * exact)
+                # A flow that keeps moving with alpha (it sits where alpha
+                # decides it) keeps the alpha of its second update
+                push!(retune, i)
+                retune_mw += abs(L[i] - exact)
+            end
+        end
+        settled = isempty(over_groups) &&
+                  retune_mw <= LOSS_REPAIR_RETUNE_SHARE * sum(L; init = 0.0)
+        release = Int[]
+        if settled
+            obj = objective_value(model)
+            if best === nothing || obj < best[1]
+                best = (obj, loss_repair_state(reg))
+            end
+            # A release needs two more rounds: its solve, and the repair of
+            # the steps that over-lose again
+            LOSS_REPAIR_DIRECTION_CHECK[] && r + 2 <= LOSS_REPAIR_MAX_ROUNDS &&
+                (release = reversible_blocks(model, reg, F, obj))
+            isempty(release) && return keep_best_round!(model, best, obj, resolve!, retry)
+        elseif r == LOSS_REPAIR_MAX_ROUNDS
+            if !isempty(over_groups)
+                msg = "Line losses: lines still lose $(round(over_mw; digits = 1)) MW·step " *
+                      "beyond the PWL loss of their flows after " *
+                      "$(LOSS_REPAIR_MAX_ROUNDS) repair rounds"
+                # With a settled round to go back to, the result is repaired
+                best === nothing ? @warn(msg) :
+                    @debug(msg * "; keeping the best earlier round without over-loss")
+            end
+            return keep_best_round!(model, best, nothing, resolve!, retry)
+        end
+        # (block, dir, alpha, retunes) before this round, to undo it
+        undo = Tuple{LossBlock, Int, Float64, Int}[]
+        if !isempty(release)
+            @debug "Line losses: releasing $(length(release)) linearised line-step(s) " *
+                   "held at zero flow whose reversal would lower the objective (round $(r))"
+            for i in release
+                b = reg.blocks[i]
+                push!(undo, (b, b.dir, b.alpha, b.retunes))
+                b.prefer = -b.dir
+                b.releases += 1
+                restore_block!(b)
+            end
+            stats.released += length(release)
+        else
+            @debug "Line losses: repairing $(length(over_groups)) step(s) losing " *
+                   "$(round(over_mw; digits = 1)) MW·step beyond the PWL loss, updating " *
+                   "$(length(retune)) linearised loss(es) off by " *
+                   "$(round(retune_mw; digits = 1)) MW·step (all lines lose " *
+                   "$(round(sum(L; init = 0.0); digits = 1)) MW·step; round $(r))"
+            for i in retune
+                b = reg.blocks[i]
+                push!(undo, (b, b.dir, b.alpha, b.retunes))
+                set_block_alpha!(b, loss_secant(b, F[i]))
+                b.retunes += 1
+            end
+            for (i, b) in enumerate(reg.blocks)
+                (b.dir == 0 && b.group in over_groups) || continue
+                push!(undo, (b, 0, 0.0, 0))
+                # Held in the direction of its flow (+ at 0), or, released
+                # by the direction check, in the one its reduced cost asked for
+                dir = b.prefer != 0 ? b.prefer : (pf[i] < 0 ? -1 : 1)
+                linearise_block!(b, dir, loss_secant(b, F[i]))
+            end
+            union!(repaired, over_groups)
+        end
+        stats.rounds += 1
+        solve_retrying!(resolve!, model, retry)
+        if !loss_repair_solved(model)
+            @warn "Line losses: the model has no optimal solution once $(length(repaired)) " *
+                  "step(s) lose no more than the PWL loss of their flows " *
+                  "($(termination_status(model))); keeping the PWL solution, whose " *
+                  "lines lose energy beyond their flows' losses"
+            restore_pwl_losses!(reg)
+            solve_retrying!(resolve!, model, retry)
+            return
+        end
+        if retrying && termination_status(model) != MOI.OPTIMAL
+            # A master would end on a status it rejects, and a point short of
+            # optimal (Gurobi's barrier stalled: SUBOPTIMAL, LOCALLY_SOLVED)
+            # is no ground for another round: an interior point, it runs flow
+            # both ways on lines the optimum leaves alone (Cuba 2037: 85
+            # steps "over-losing" after a round that only updated alphas; 0
+            # at the optimum of the same model). The model of the round
+            # before, whose solve was optimal, is solved again. The dispatch
+            # does the same (round 39).
+            st = termination_status(model)
+            undo_loss_round!(undo)
+            solve_retrying!(resolve!, model, retry)
+            @warn "Line losses: the solve of repair round $(r + 1) ended $(st), not " *
+                  "proven optimal; keeping the model of round $(r) (solved again: " *
+                  "$(termination_status(model))), whose lines lose " *
+                  "$(round(over_mw; digits = 1)) MW·step beyond the PWL loss of their " *
+                  "flows and whose linearised losses miss it by " *
+                  "$(round(retune_mw; digits = 1)) MW·step"
+            return
+        end
+    end
+    return
+end
+
+"""
+    reversible_blocks(model, reg, F, obj) -> Vector{Int}
+
+The linearised line-steps (indices into `reg.blocks`, `F` their flows)
+whose held direction costs the model: the flow sits at zero (within
+$(LOSS_REPAIR_TOL_MW) MW) and the first segment of the opposite direction,
+held at 0, has a negative reduced cost, worth more than
+$(LOSS_REPAIR_REVERSE_RTOL) of the objective `obj` over that segment's width.
+
+At zero flow that segment is exactly the PWL model's first segment in the
+other direction (loss slope `m_1`, nothing flowing the held way), so its
+reduced cost is the first-order change of the objective of the exact-loss
+model when the flow starts to reverse: negative, reversing pays. Each
+reduced cost holds for one line moving, the others adjusting (the lines of
+a step are tied by KVL); all of them are released at once all the same. On
+Cuba's one-year master that settled in a few cycles (2377 releases, then
+fewer each cycle) where releasing only the best line of each step moved
+~190 per cycle and was still far from it after 30 rounds; in small meshed
+cases (300 random 3-4 bus cases) it left 64 of the 97 that ended above the
+best direction pattern there, against 50 one line per step at a time.
+A held flow above zero is a local optimum of its direction (moving it is
+free at the margin) and is not checked; neither is a line-step released
+$(LOSS_REPAIR_MAX_RELEASES) times already. Needs the solve's duals (a
+barrier without crossover has them): a MIP, or a solve without duals,
+checks nothing, with a debug note.
+"""
+function reversible_blocks(model, reg::PWLLossRepair, F, obj)
+    held = [i for (i, b) in enumerate(reg.blocks)
+            if b.dir != 0 && b.releases < LOSS_REPAIR_MAX_RELEASES &&
+               F[i] <= LOSS_REPAIR_TOL_MW]
+    isempty(held) && return Int[]
+    if !has_duals(model)
+        @debug "Line losses: the solve has no duals (a MIP, or none returned); the " *
+               "directions of $(length(held)) linearised line-step(s) at zero flow " *
+               "are not checked"
+        return Int[]
+    end
+    tol = max(LOSS_REPAIR_REVERSE_RTOL * abs(obj), 1e-12)
+    return filter(held) do i
+        b = reg.blocks[i]
+        rc = reduced_cost((b.dir > 0 ? b.dn : b.dp)[1])
+        -rc * max(b.widths[1], LOSS_REPAIR_TOL_MW) > tol
+    end
+end
+
+# Every block's (block, dir, alpha, retunes), as `undo_loss_round!` takes it
+loss_repair_state(reg::PWLLossRepair) =
+    [(b, b.dir, b.alpha, b.retunes) for b in reg.blocks]
+
+# End the repair on the best settled round (`best`: its objective and
+# state): the current round is kept when it is settled (`obj`, its
+# objective) and no worse; otherwise the best round's model is solved again
+function keep_best_round!(model, best, obj, resolve!, retry)
+    best === nothing && return
+    obj !== nothing && obj <= best[1] + 1e-9 * abs(best[1]) && return
+    @debug "Line losses: the repair ends on its best round without over-loss " *
+           "(objective $(best[1])$(obj === nothing ? "" : ", not $(obj)")), solved again"
+    undo_loss_round!(best[2])
+    solve_retrying!(resolve!, model, retry)
+    return
+end
+
+# Set blocks back to an earlier state (`undo`: block, dir, alpha, retunes),
+# the round before (`undo_loss_round!`) or the best round (`keep_best_round!`)
+function undo_loss_round!(undo)
+    for (b, dir, alpha, retunes) in undo
+        if dir == 0
+            restore_block!(b)
+            continue
+        end
+        if b.dir != dir
+            # Released, or held the other way: back to PWL, then held again
+            restore_block!(b)
+            linearise_block!(b, dir, alpha)
+        elseif b.alpha != alpha
+            set_block_alpha!(b, alpha)
+        end
+        b.retunes = retunes
+    end
+end
+
+# `model.ext[:loss_repair_bounds]` of a repaired solve (`lower`: the
+# objective of its first, PWL, solve)
+function record_loss_repair_bounds!(model, reg::PWLLossRepair, lower::Float64,
+                                    stats::LossRepairStats)
+    final = has_values(model) ? objective_value(model) : NaN
+    gap = final == lower ? 0.0 : (final - lower) / max(abs(final), 1e-12)
+    linearised = count(b -> b.dir != 0, reg.blocks)
+    model.ext[:loss_repair_bounds] = (lower_bound = lower, objective = final, gap = gap,
+        rounds = stats.rounds, linearised = linearised, released = stats.released)
+    stats.rounds > 0 && @debug "Line losses: PWL solve $(lower) (lower bound), repaired " *
+        "$(final): gap $(round(100 * gap; digits = 3)) % after $(stats.rounds) round(s), " *
+        "$(linearised) line-step(s) linearised, $(stats.released) released"
+    return
+end
+
+"""
+    loss_repair_bounds(model) -> Union{Nothing, Dict{String, Float64}}
+
+The bounds of the model's last loss-repaired solve (`optimize_exact_losses!`):
+`lower_bound`, the objective of the first solve with the PWL loss model
+(over-loss allowed: a relaxation of the model whose lines lose exactly the
+PWL loss of their net flow, so a lower bound of it); `objective`, the final
+objective (losses repaired: an upper bound, within the 2 % tolerance of the
+linearised losses); `gap` = (objective − lower_bound) / |objective|;
+`rounds` (repair rounds, one re-solve each), `linearised` (line-steps held in a direction at the
+end) and `released` (by the direction check). `nothing` for a model without
+PWL losses or whose first solve was not optimal. Model units (M\$ in the
+master and the dispatch).
+"""
+function loss_repair_bounds(model)
+    nt = get(model.ext, :loss_repair_bounds, nothing)
+    nt === nothing && return nothing
+    return Dict{String, Float64}(string(k) => Float64(v) for (k, v) in pairs(nt))
+end
+
+"""
     add_dc_constraints!(model, transmission::TransmissionDC, vars, input)
 
 Add DC power flow constraints to JuMP model.
@@ -289,7 +996,9 @@ Bus demand is derived from the parent node's demand scaled by demand_fraction.
 """
 function add_dc_constraints!(model, transmission::TransmissionDC,
                              vars::PowerSystemVariables, input;
-                             extra_injections_fn::Union{Nothing, Function} = nothing)
+                             extra_injections_fn::Union{Nothing, Function} = nothing,
+                             expandable_lines::Set{Int} = Set{Int}(),
+                             expansion_max::AbstractDict{Int, Float64} = Dict{Int, Float64}())
     n_bus = transmission.num_buses
     n_line = length(transmission.lines)
     hours = input.temporal.hours
@@ -302,13 +1011,10 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
     end
     vars.power_flow_by_line = pf_by_line
 
-    # Also populate the node-pair power_flow dict (consumed by N-1 constraints
-    # and result extraction). For parallel lines the first line's variables
-    # represent the pair; the full per-line breakdown stays in power_flow_by_line.
+    # Bus pair → every branch between it (parallel lines, transformers), for
+    # pair flows (results, custom constraints) that sum all of them
     for (ℓ, (i, j)) in enumerate(transmission.lines)
-        if !haskey(vars.power_flow, (i, j))
-            vars.power_flow[(i, j)] = pf_by_line[ℓ]
-        end
+        push!(get!(vars.pair_lines, (i, j), Int[]), ℓ)
     end
 
     n_gen = length(input.generators)
@@ -321,6 +1027,9 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
     pwl = transmission.pwl_losses  # may be nothing
     pwl_loss_by_line = has_pwl ?
         [Vector{VariableRef}(undef, hours) for _ in 1:n_line] : nothing
+    vars.line_losses = pwl_loss_by_line
+
+    shift_net = demand_shift_net(vars)
 
     # Detect connected components to handle disconnected networks.
     # Each connected component needs its own angle reference (slack bus).
@@ -363,6 +1072,12 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
     # Override: global slack is the reference for its component
     component_slack[slack_component] = slack
 
+    # Every lossy line-step is registered for the exact-loss repair
+    # (`optimize_exact_losses!`), each time step of this call as one group
+    loss_repair = has_pwl ? pwl_loss_repair!(model) : nothing
+    group0 = has_pwl ? loss_repair.n_groups : 0
+    has_pwl && (loss_repair.n_groups += hours)
+
     if component_count > 1
         # @debug not @warn: this function runs at every rolling-horizon
         # window setup. A multi-component network is a property of the
@@ -385,7 +1100,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
             for ℓ in 1:n_line
                 g_l = pwl.conductances[ℓ]
                 cap_ℓ = transmission.line_capacities[ℓ]
-                if g_l <= 0 || cap_ℓ < 0.1  # lossless or negligible capacity
+                if g_l <= 0 || (cap_ℓ < 0.1 && !(ℓ in expandable_lines))  # lossless or negligible capacity
                     # Lossless line: loss = 0
                     ploss = @variable(model, lower_bound=0, upper_bound=0,
                         base_name="ploss_$(ℓ)_$(t)")
@@ -400,17 +1115,35 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
                     base_name="fneg_$(ℓ)_$(t)")
                 @constraint(model, pf_by_line[ℓ][t] == f_pos - f_neg)
 
-                # Incremental segment variables with PWL loss accumulation
+                # Incremental segment variables with PWL loss accumulation.
+                # Segments span the base capacity; on a line that investment can
+                # expand, the last one also spans the MW that can be built
+                # (`expansion_max`), or is left open when that has no limit.
+                # An open segment in both directions lets f_pos and f_neg grow
+                # together: Cuba's masters had one on every line (round 36),
+                # and barrier iterates ran to 10⁶ MW and ended NUMERICAL_ERROR.
                 loss_expr = AffExpr(0.0)
                 fpos_sum = AffExpr(0.0)
                 fneg_sum = AffExpr(0.0)
+                dps = Vector{VariableRef}(undef, N)
+                dns = Vector{VariableRef}(undef, N)
+                widths = copy(pwl.segment_widths[ℓ])
+                extra = ℓ in expandable_lines ? get(expansion_max, ℓ, Inf) : 0.0
+                open_last = !isfinite(extra)
+                open_last || (widths[N] += extra)
                 for k in 1:N
-                    w = pwl.segment_widths[ℓ][k]
+                    w = widths[k]
                     m = pwl.slopes[ℓ][k]
-                    dp = @variable(model, lower_bound=0, upper_bound=w,
+                    dp = @variable(model, lower_bound=0,
                         base_name="dp_$(ℓ)_$(k)_$(t)")
-                    dn = @variable(model, lower_bound=0, upper_bound=w,
+                    dn = @variable(model, lower_bound=0,
                         base_name="dn_$(ℓ)_$(k)_$(t)")
+                    if k < N || !open_last
+                        set_upper_bound(dp, w)
+                        set_upper_bound(dn, w)
+                    end
+                    dps[k] = dp
+                    dns[k] = dn
                     add_to_expression!(fpos_sum, dp)
                     add_to_expression!(fneg_sum, dn)
                     add_to_expression!(loss_expr, m, dp)
@@ -422,8 +1155,11 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
                 # Store loss variable for KCL half-loss split
                 ploss = @variable(model, lower_bound=0,
                     base_name="ploss_$(ℓ)_$(t)")
-                @constraint(model, ploss == loss_expr)
+                loss_con = @constraint(model, ploss == loss_expr)
                 pwl_loss_by_line[ℓ][t] = ploss
+                push!(loss_repair.blocks, LossBlock(loss_con, ploss, pf_by_line[ℓ][t],
+                    dps, dns, widths, pwl.slopes[ℓ], open_last,
+                    group0 + t, 0, 0.0, 0, 0, 0))
             end
         end
 
@@ -435,7 +1171,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
             is_load_bus = bus_role == "load" || bus_role == "mixed"
             # Connection buses carry no demand: their KCL is pure flow balance
             # (gen ± bat ± converters + extra = Σ flows). All node-level demand
-            # variables (load_shed, reserves, EV, rooftop) are skipped because
+            # variables (load_shed, EV, rooftop) are skipped because
             # they are scaled by demand_fraction which is 0 for connection buses.
             bus_df = is_load_bus ? input.network.buses[i].demand_fraction : 0.0
 
@@ -454,7 +1190,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
             )
 
             # EV V2G (supply side) and charging (demand side)
-            # Node-level variables scaled by demand_fraction (same as load_shed, reserves)
+            # Node-level variables scaled by demand_fraction (same as load_shed)
             ev_v2g_term = if vars.ev_v2g !== nothing
                 vars.ev_v2g[ni, t] * bus_df
             else
@@ -469,7 +1205,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
 
             # Electrolyzer power (demand side)
             electrolyzer_term = if vars.electrolyzer_power !== nothing
-                vars.electrolyzer_power[i, t]
+                electrolyzer_load(vars, i, t)
             else
                 AffExpr(0.0)
             end
@@ -514,18 +1250,29 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
             # Connection buses (bus_df = 0) contribute zero to the demand term.
             bus_demand = input.demand[t, input.network.bus_to_node[i]] * bus_df
 
-            # NOTE: flex_curt is NOT in the KCL.  Flexible demand curtailment
-            # participates only in the objective (benefit) and in sectoral
-            # constraints.  Including it in the KCL allowed the model to
-            # eliminate demand at negative cost, preventing fossil dispatch.
+            # Cap load shedding at the demand actually sitting on this bus.
+            # ``load_shed`` enters the KCL below on the SUPPLY side, so with
+            # only its ``>= 0`` declaration it is unbounded above and the
+            # solver can use it as a virtual generator: shed far more than a
+            # bus consumes and export the surplus over the network. Japan:
+            # 1 504 MW "shed" at a 33 MW bus, and 66 % of the reported load
+            # shedding was this artefact rather than real unserved load, which
+            # also displaced real dispatch. The single-bus balance
+            # (``add_demand_constraints!``) and the AC-OPF path both bound it;
+            # the DC-OPF path — the default for every UC run — did not.
+            # Connection buses (bus_df = 0) get the bound at 0, which is the
+            # same rule: nothing to leave unserved where there is no load.
+            @constraint(model,
+                vars.load_shed[i, t] <= max(bus_demand, 0.0),
+                base_name = "max_load_shed_dc_b$(i)_t$(t)")
 
             # Reservoir pump power (demand side — pumping consumes electricity)
             reservoir_pump_term = AffExpr(0.0)
             if vars.reservoir_pump !== nothing
                 for g in vars.gens_at_bus[i]
                     gen = input.generators[g]
-                    nidx = b2n[i]
-                    if gen.reservoir_capacity[nidx] > 0 && gen.reservoir_pump_capacity[nidx] > 0
+                    # Reservoir arrays are per bus (expanded by the adapter).
+                    if gen.reservoir_capacity[i] > 0 && gen.reservoir_pump_capacity[i] > 0
                         add_to_expression!(reservoir_pump_term, vars.reservoir_pump[g, i, t])
                     end
                 end
@@ -551,23 +1298,24 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
                 AffExpr(0.0)
             end
 
+            # Demand moved into this step by demand shifting (net, may be < 0)
+            shift_term = haskey(shift_net, (ni, t)) ? shift_net[(ni, t)] * bus_df : AffExpr(0.0)
+
             # Net injection: LHS - RHS
             # LHS: gen + bat_discharge + EV_V2G + load_shed + rooftop_gen + converter_injections + extra
-            # RHS: bus_demand + electrolyzer + bat_charge + reservoir_pump + reserves + EV_charging + rooftop_curt
-            # NOTE: flex_curt is NOT in KCL (only in objective + sectoral constraints)
-            # Node-level variables (load_shed, reserves) scaled by demand_fraction for bus-level KCL
+            # RHS: bus_demand + shifted demand + electrolyzer + bat_charge + reservoir_pump + EV_charging + rooftop_curt
+            # Reserves are headroom (add_reserve_constraints!), not energy, so not in KCL.
+            # Node-level variables (load_shed, EV, shifts) scaled by demand_fraction for bus-level KCL
             net_inj = @expression(model,
                 gen_sum + bat_discharge + ev_v2g_term + vars.load_shed[i, t] +
                 rooftop_gen_term + acdc_term + freq_term + extra_term -
-                bus_demand - electrolyzer_term - bat_charge_sum - reservoir_pump_term -
-                vars.reserve_static[ni, t] * bus_df - vars.reserve_dynamic[ni, t] * bus_df -
+                bus_demand - shift_term - electrolyzer_term - bat_charge_sum - reservoir_pump_term -
                 ev_charging_term - rooftop_curt_term
             )
 
             # Sum of flows using incidence matrix (per physical line)
-            # Loss models:
-            #   PWL: net_inj = Σ_l (K[i,l] × pf[l,t] - 0.5 × |K[i,l]| × loss[l,t])
-            #   Linear (legacy): incoming flows reduced by constant factor
+            # With losses (PWL or linear segments, see with_loss_model):
+            #   net_inj = Σ_l (K[i,l] × pf[l,t] + 0.5 × |K[i,l]| × loss[l,t])
             flow_sum = AffExpr(0.0)
             for ℓ in 1:n_line
                 coeff = transmission.incidence_matrix[i, ℓ]
@@ -583,13 +1331,7 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
                     add_to_expression!(flow_sum, coeff, pf_by_line[ℓ][t])
                     add_to_expression!(flow_sum, 0.5 * abs(coeff), pwl_loss_by_line[ℓ][t])
                 else
-                    # Legacy linear model: incoming flow reduced by loss factor
-                    loss_factor = ℓ <= length(transmission.line_losses) ? transmission.line_losses[ℓ] : 0.0
-                    if loss_factor > 0 && coeff > 0
-                        add_to_expression!(flow_sum, coeff * (1 - loss_factor), pf_by_line[ℓ][t])
-                    else
-                        add_to_expression!(flow_sum, coeff, pf_by_line[ℓ][t])
-                    end
+                    add_to_expression!(flow_sum, coeff, pf_by_line[ℓ][t])
                 end
             end
 
@@ -614,34 +1356,22 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
 
         end
 
-        # Per-bus: load_shed = 0 at non-demand buses.  load_shed represents
-        # UNSERVED demand; a bus with no local demand has nothing to leave
-        # unserved, so allowing it would turn load_shed into virtual
-        # generation.  (Physical constraint — not an outcome cap; the
-        # economic upper bound on shedding is the VOLL penalty itself.)
-        for b in 1:n_bus
-            ni = input.network.bus_to_node[b]
-            bus_role = input.network.buses[b].role
-            is_load_bus = bus_role == "load" || bus_role == "mixed"
-            bus_df = is_load_bus ? input.network.buses[b].demand_fraction : 0.0
-            bus_demand_t = input.demand[t, ni] * bus_df
-            if bus_demand_t <= 0.0
-                @constraint(model,
-                    vars.load_shed[b, t] <= 0.0,
-                    base_name = "max_load_shed_dc_b$(b)_t$(t)")
-            end
-        end
+        # NOTE: the per-bus load_shed bound lives in the KCL loop above
+        # (``max_load_shed_dc_b*``), where it caps every bus at its OWN
+        # demand. The zero-demand case this block used to handle separately
+        # is that same bound evaluated at 0, so it is no longer repeated here.
 
         # 3. Flow-angle coupling (standard DCOPF: pf_MW = S_base/x_pu × Δθ)
         # This replaces the cycle-based KVL formulation and correctly handles
         # parallel lines (each line independently linked to bus angles).
-        # S_base (base_impedance) converts per-unit susceptance to MW/radian.
-        s_base = input.network.base_impedance
+        # S_base converts per-unit susceptance to MW/radian.
+        s_base = input.network.s_base
         for (ℓ, (i, j)) in enumerate(transmission.lines)
             cap_ℓ = transmission.line_capacities[ℓ]
             # Lines with negligible capacity add constraints without meaningful
-            # power transfer and worsen LP conditioning. Fix their flow to 0.
-            if cap_ℓ < 0.1  # < 0.1 MW is electrically negligible
+            # power transfer and worsen LP conditioning. Fix their flow to 0,
+            # unless investment can expand them (a candidate corridor starts at 0 MW).
+            if cap_ℓ < 0.1 && !(ℓ in expandable_lines)  # < 0.1 MW is electrically negligible
                 @constraint(model, pf_by_line[ℓ][t] == 0,
                     base_name = "flow_zero_$(ℓ)_$(t)")
                 continue
@@ -672,77 +1402,47 @@ function add_dc_constraints!(model, transmission::TransmissionDC,
 end
 
 """
+    branch_outage_factor(input, id, t) -> Float64
+
+Scheduled-outage capacity factor (1.0 = none) of the line (`line_id`) or
+transformer (name) `id` at step `t`, from `input.outage_masks`. Lightweight
+NamedTuple inputs (master problem) carry no masks: always 1.0.
+"""
+function branch_outage_factor(input, id::AbstractString, t::Int)
+    isempty(id) && return 1.0
+    masks = hasproperty(input, :outage_masks) ? input.outage_masks : nothing
+    masks === nothing && return 1.0
+    for kind in ("line", "transformer")
+        m = get(masks, kind, nothing)
+        if m !== nothing && haskey(m, id)
+            return m[id][t]
+        end
+    end
+    return 1.0
+end
+
+"""
     add_line_capacity_constraints!(model, transmission::TransmissionDC, vars, input)
 
-Add thermal capacity limits for transmission lines (per physical line).
+Add thermal capacity limits for transmission lines (per physical line), scaled
+by scheduled outages. The master passes its investment-augmented capacities in
+`capacity_override`; the dispatch never builds lines.
 """
 function add_line_capacity_constraints!(model, transmission::TransmissionDC,
                                         vars::PowerSystemVariables, input;
                                         capacity_override::Union{Dict{Int, Any}, Nothing} = nothing)
     hours = input.temporal.hours
-    is_dev = hasproperty(input, :mode) ? input.mode == "development" : false
     pf_by_line = vars.power_flow_by_line
 
-    # Deterministic scheduled outages: id → hourly capacity factor (1.0 = none).
-    # transmission.line_ids holds a line_id (transmission lines) or a transformer
-    # name (transformer branches share this same flow constraint).
-    # Lightweight NamedTuple inputs (master problem) omit outage_masks → no outages.
-    _om = hasproperty(input, :outage_masks) ? input.outage_masks : Dict{String, Any}()
-    line_masks = get(_om, "line", nothing)
-    trafo_masks = get(_om, "transformer", nothing)
-    outage_for(ℓ, t) = begin
-        id = transmission.line_ids[ℓ]
-        isempty(id) && return 1.0
-        if line_masks !== nothing && haskey(line_masks, id)
-            return line_masks[id][t]
-        elseif trafo_masks !== nothing && haskey(trafo_masks, id)
-            return trafo_masks[id][t]
-        end
-        1.0
-    end
-
-    for (ℓ, (i, j)) in enumerate(transmission.lines)
-        base_capacity = transmission.line_capacities[ℓ]
-
-        if capacity_override !== nothing && haskey(capacity_override, ℓ)
-            # Master: use investment-augmented line capacity (AffExpr)
-            total_cap = capacity_override[ℓ]
-            for t in 1:hours
-                om = outage_for(ℓ, t)
-                @constraint(model, pf_by_line[ℓ][t] <= total_cap * om)
-                @constraint(model, pf_by_line[ℓ][t] >= -total_cap * om)
-            end
-        else
-            # Standard operational dispatch path
-            # Create investment variable if in development mode
-            if is_dev && vars.transfer_investment !== nothing
-                if !haskey(vars.transfer_investment, (i, j))
-                    vars.transfer_investment[(i, j)] = @variable(model,
-                        lower_bound=0, base_name="tf_inv_$(i)_$(j)")
-                end
-            end
-
-            # B10: Transfer symmetry — inv[i,j] == inv[j,i]
-            if is_dev && vars.transfer_investment !== nothing && haskey(vars.transfer_investment, (i, j))
-                if haskey(vars.transfer_investment, (j, i))
-                    @constraint(model,
-                        vars.transfer_investment[(i, j)] == vars.transfer_investment[(j, i)],
-                        base_name = "transfer_symmetry_$(i)_$(j)")
-                end
-            end
-
-            for t in 1:hours
-                if is_dev && vars.transfer_investment !== nothing && haskey(vars.transfer_investment, (i, j))
-                    total_cap = base_capacity + vars.transfer_investment[(i, j)]
-                else
-                    total_cap = base_capacity
-                end
-
-                # Bidirectional flow limits per physical line (× outage factor)
-                om = outage_for(ℓ, t)
-                @constraint(model, pf_by_line[ℓ][t] <= total_cap * om)
-                @constraint(model, pf_by_line[ℓ][t] >= -total_cap * om)
-            end
+    for ℓ in eachindex(transmission.lines)
+        # Master: investment-augmented line capacity (AffExpr)
+        total_cap = capacity_override !== nothing && haskey(capacity_override, ℓ) ?
+            capacity_override[ℓ] : transmission.line_capacities[ℓ]
+        for t in 1:hours
+            # Bidirectional flow limits per physical line (× outage factor)
+            om = branch_outage_factor(input, transmission.line_ids[ℓ], t)
+            @constraint(model, pf_by_line[ℓ][t] <= total_cap * om)
+            @constraint(model, pf_by_line[ℓ][t] >= -total_cap * om)
         end
     end
 end
@@ -760,13 +1460,25 @@ Variables:
 Constraints:
 - Capacity: rectify + invert ≤ rated_power (per converter)
 - Capacity: flow_a_to_b + flow_b_to_a ≤ rated_power (per converter)
+- Minimum power (`min_power_mva` > 0, unit commitment dispatch only): binary
+  `on` per direction and step (`acdc_on_rectify`/`acdc_on_invert`,
+  `freq_on_a_to_b`/`freq_on_b_to_a`), at most one direction on, and
+  `min_power_mva × on ≤ flow ≤ rated × on` in each direction. Economic
+  dispatch and the master (LP) ignore `min_power_mva`.
 
 KCL injection is handled in add_dc_constraints! (reads these variables).
+
+`capacity_override` (master problem) maps `("acdc", c)` / `("freq", c)` to
+the converter's capacity (an expression with the master's investment) in
+place of `rated_power_mva`.
 """
 function add_converter_constraints!(model, vars::PowerSystemVariables,
-                                     input)
+                                     input;
+                                     capacity_override::Union{Nothing, AbstractDict} = nothing)
     hours = input.temporal.hours
     network = input.network
+    rated(kind, c, conv) = capacity_override === nothing ? conv.rated_power_mva :
+        get(capacity_override, (kind, c), conv.rated_power_mva)
 
     # Deterministic scheduled outages: converters are id-addressed by name
     # (name → hourly capacity factor in [0,1]; 1.0 = none).
@@ -774,6 +1486,8 @@ function add_converter_constraints!(model, vars::PowerSystemVariables,
     acdc_masks = get(_om, "acdc_converter", nothing)
     freq_masks = get(_om, "freq_converter", nothing)
     conv_om(masks, nm, t) = (masks === nothing || !haskey(masks, nm)) ? 1.0 : masks[nm][t]
+    # Unit commitment dispatch: converters with a minimum power are on/off
+    uc = capacity_override === nothing && vars.gen_startup !== nothing
 
     # --- AC/DC Converters ---
     n_acdc = length(network.acdc_converters)
@@ -790,12 +1504,12 @@ function add_converter_constraints!(model, vars::PowerSystemVariables,
                 # Mutual capacity: total through-power ≤ rated (× outage factor)
                 @constraint(model,
                     acdc_rect[c, t] + acdc_inv[c, t] <=
-                        conv.rated_power_mva * conv_om(acdc_masks, conv.name, t))
-                # Minimum power (if applicable)
-                if conv.min_power_mva > 0
-                    # Only enforce when active — skip for now (would need binary)
-                end
+                        rated("acdc", c, conv) * conv_om(acdc_masks, conv.name, t))
             end
+            uc && conv.min_power_mva > 0 && add_converter_commitment!(model,
+                acdc_rect, acdc_inv, c, conv, hours,
+                t -> rated("acdc", c, conv) * conv_om(acdc_masks, conv.name, t),
+                "acdc_on_rectify", "acdc_on_invert")
         end
     end
 
@@ -813,10 +1527,39 @@ function add_converter_constraints!(model, vars::PowerSystemVariables,
             for t in 1:hours
                 @constraint(model,
                     freq_ab[c, t] + freq_ba[c, t] <=
-                        conv.rated_power_mva * conv_om(freq_masks, conv.name, t))
+                        rated("freq", c, conv) * conv_om(freq_masks, conv.name, t))
             end
+            uc && conv.min_power_mva > 0 && add_converter_commitment!(model,
+                freq_ab, freq_ba, c, conv, hours,
+                t -> rated("freq", c, conv) * conv_om(freq_masks, conv.name, t),
+                "freq_on_a_to_b", "freq_on_b_to_a")
         end
     end
+end
+
+"""
+    add_converter_commitment!(model, fwd, bwd, c, conv, hours, cap, fwd_name, bwd_name)
+
+On/off commitment of converter `c` (`min_power_mva` > 0, unit commitment
+dispatch): a binary per direction and step, at most one of them on, and each
+direction's flow either 0 or between `min_power_mva` and `cap(t)` (rated
+power × outage factor). The binaries are listed in
+`model.ext[:converter_commitment]`, so the UC dual recovery fixes them with
+the generators' commitment.
+"""
+function add_converter_commitment!(model, fwd, bwd, c::Int, conv, hours::Int,
+                                   cap::Function, fwd_name::String, bwd_name::String)
+    on_f = @variable(model, [1:hours], Bin, base_name = "$(fwd_name)_c$(c)")
+    on_b = @variable(model, [1:hours], Bin, base_name = "$(bwd_name)_c$(c)")
+    for t in 1:hours
+        @constraint(model, on_f[t] + on_b[t] <= 1)
+        @constraint(model, fwd[c, t] <= cap(t) * on_f[t])
+        @constraint(model, bwd[c, t] <= cap(t) * on_b[t])
+        @constraint(model, fwd[c, t] >= conv.min_power_mva * on_f[t])
+        @constraint(model, bwd[c, t] >= conv.min_power_mva * on_b[t])
+    end
+    append!(get!(model.ext, :converter_commitment, VariableRef[]), on_f, on_b)
+    return nothing
 end
 
 """
@@ -825,8 +1568,7 @@ end
 Return objective cost expression for converter operations.
 Cost = Σ variable_cost × (rectify + invert) for each converter and hour.
 """
-function add_converter_objective_terms(vars::PowerSystemVariables,
-                                       input::PowerSystemInput)
+function add_converter_objective_terms(vars::PowerSystemVariables, input)
     cost = AffExpr(0.0)
     hours = input.temporal.hours
     network = input.network

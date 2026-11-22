@@ -20,7 +20,7 @@ name: esfex
 channels:
   - conda-forge
 dependencies:
-  - python >=3.10,<3.13
+  - python >=3.10,<3.14   # same range as requires-python in pyproject.toml
   - pip
   # Core scientific stack (conda-forge binaries)
   - numpy >=1.24.0

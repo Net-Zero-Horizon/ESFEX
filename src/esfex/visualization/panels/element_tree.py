@@ -31,9 +31,18 @@ _CATEGORY_KEYS = [
 ]
 
 
+# Labels of categories added by plugins (register_plugin_category), used
+# when no ``tree.<key>`` translation exists.
+_PLUGIN_CATEGORY_LABELS: dict[str, str] = {}
+
+
 def _category_label(cat_key: str) -> str:
     """Return the translated display label for a category key."""
-    return tr(f"tree.{cat_key}")
+    key = f"tree.{cat_key}"
+    label = tr(key)
+    if label == key and cat_key in _PLUGIN_CATEGORY_LABELS:
+        return _PLUGIN_CATEGORY_LABELS[cat_key]
+    return label
 
 # element_type (used in signals) -> category key (used in _system_roots)
 _ELEMENT_TYPE_TO_CATEGORY = {
@@ -252,7 +261,7 @@ class ElementTreePanel(QWidget):
         if name in self._system_items:
             return
 
-        sys_item = QTreeWidgetItem(self.tree, [name, "system"])
+        sys_item = QTreeWidgetItem(self.tree, [name, tr("tree.system_info")])
         sys_item.setData(0, 100, ("system", name))
         font = sys_item.font(0)
         font.setBold(True)
@@ -338,13 +347,15 @@ class ElementTreePanel(QWidget):
         """Register a new category from a plugin.
 
         Adds the category to the module-level registries and creates tree
-        nodes in every existing system.
+        nodes in every existing system (and in systems added later).
         """
         global _CATEGORY_KEYS
         if key not in _CATEGORY_KEYS:
             _CATEGORY_KEYS.append(key)
         if element_type not in _ELEMENT_TYPE_TO_CATEGORY:
             _ELEMENT_TYPE_TO_CATEGORY[element_type] = key
+        _PLUGIN_CATEGORY_LABELS[key] = label
+        label = _category_label(key)
 
         # Create nodes in every existing system
         for sys_name, roots in self._system_roots.items():
@@ -356,6 +367,26 @@ class ElementTreePanel(QWidget):
             cat_item = QTreeWidgetItem(sys_item, [f"{label} (0)", ""])
             cat_item.setExpanded(True)
             roots[key] = cat_item
+
+    def add_plugin_element(
+        self, key: str, element_id: str, label: str, info: str = ""
+    ) -> None:
+        """Add an element under the plugin category *key* of the current system.
+
+        Selecting it shows the form registered for the category's
+        ``element_type`` (``load_element(element_id)`` is called on it).
+        The tree does not store plugin elements in the project: they are
+        gone when the project is reloaded.
+        """
+        root = self._get_root(key)
+        if root is None:
+            return
+        element_type = next(
+            (et for et, cat in _ELEMENT_TYPE_TO_CATEGORY.items() if cat == key), key
+        )
+        item = QTreeWidgetItem(root, [label, info])
+        item.setData(0, 100, (element_type, str(element_id)))
+        self._update_count(root)
 
     # ------------------------------------------------------------------
     # Public API — elements

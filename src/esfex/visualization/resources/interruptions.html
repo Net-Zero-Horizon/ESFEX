@@ -59,7 +59,7 @@
 <body>
 <div id="app">
     <div id="toolbar">
-        <strong id="tb-title">Interruptions</strong>
+        <strong id="tb-title" data-i18n="web.interruptions.title">Interruptions</strong>
         <span class="hint" id="tb-hint"></span>
     </div>
     <div id="main">
@@ -83,6 +83,9 @@
                 <div class="field">
                     <label id="lbl-label"></label>
                     <input type="text" id="in-label" maxlength="60">
+                </div>
+                <div class="field">
+                    <label><input type="checkbox" id="in-recurring"> <span id="lbl-recurring"></span></label>
                 </div>
                 <button class="danger" id="btn-delete"></button>
             </div>

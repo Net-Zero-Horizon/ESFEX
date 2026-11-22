@@ -1,22 +1,29 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "esfex"
-version = "0.3.0"
+version = "0.4.0"
 description = "ESFEX: Energy System Flexibility — Power System Optimization"
 readme = "README.md"
-license = {text = "Apache-2.0"}
+# ESFEX code is Apache-2.0; the package also ships third-party JavaScript
+# libraries and data files under their own licences (REUSE.toml, DATA_SOURCES.md).
+license = "Apache-2.0 AND MIT AND BSD-2-Clause AND BSD-3-Clause AND ISC AND EPL-2.0 AND CC-BY-4.0 AND CC0-1.0 AND LicenseRef-NaturalEarth-PublicDomain AND LicenseRef-UNdata AND LicenseRef-StatCan-Open-Licence AND LicenseRef-US-Government-Public-Domain"
+# Shipped in the sdist and in the wheel's metadata next to LICENSE: the
+# third-party licence texts (LICENSES/) and the data attributions.
+license-files = ["LICENSE", "LICENSES/*.txt", "DATA_SOURCES.md"]
 authors = [
-    {name = "Manuel Soto Calvo", email = "manuel.sotocalvo@gmail.com"},
+    {name = "Manuel Soto Calvo"},
     {name = "Han Soo Lee"},
+]
+maintainers = [
+    {name = "Manuel Soto Calvo", email = "manuel.sotocalvo@gmail.com"},
 ]
 requires-python = ">=3.10,<3.14"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -40,6 +47,8 @@ dependencies = [
     "rich>=13.0.0",
     "psutil>=5.9.0",
     "scipy>=1.10.0",
+    # Node time zones from coordinates (the model clock, utils/model_clock.py)
+    "timezonefinder>=6.2.0",
     "windrex>=0.1.0",
     "solarex>=0.1.0",
     "rooftex>=0.1.0",
@@ -85,12 +94,12 @@ dependencies = [
     "xarray>=2023.1.0",
     "gcsfs>=2023.1.0",
     "zarr>=2.14.0",
-    # Demand estimation — classical ML (former [ml]):
+    # Demand estimation (former [ml]):
     "xgboost>=2.0.0",
-    # Demand estimation — deep learning (former [dl]; heavy: torch):
-    "torch>=2.0.0",
-    "pytorch-lightning>=2.0.0",
-    "pytorch-forecasting>=1.0.0",
+    # Holiday predictors of the demand density model. Pinned to the release
+    # its training table was built with: later releases move holidays (India
+    # in 0.109) and the predictions drift from the article's.
+    "holidays==0.94",
 ]
 
 [project.optional-dependencies]
@@ -114,6 +123,7 @@ esfex-studio = "esfex.cli:_studio_entrypoint"
 Homepage = "https://github.com/Net-Zero-Horizon/ESFEX"
 Documentation = "https://github.com/Net-Zero-Horizon/ESFEX#readme"
 Repository = "https://github.com/Net-Zero-Horizon/ESFEX"
+Paper = "https://doi.org/10.1016/j.softx.2026.103244"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -125,10 +135,14 @@ esfex = [
     "visualization/translations/**/*.json",
     "icons/**/*",
     "plugins/**/*.json",
+    "assets/**/*",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The repository root, so tests can import shared helpers as ``tests.<module>``
+# under a bare ``pytest`` as well as ``python -m pytest``.
+pythonpath = ["."]
 python_files = ["test_*.py"]
 addopts = "-v --tb=short"
 markers = [
@@ -197,19 +211,13 @@ omit = [
     "*/esfex/models/demand_real_data.py",
     "*/esfex/models/demand_training.py",
     "*/esfex/models/demand_zonal_fetchers.py",
-    "*/esfex/models/ecvi_gridded.py",
     "*/esfex/models/demand_dataset.py",
     "*/esfex/models/demand_ml.py",
-    "*/esfex/models/demand_tft.py",
-    "*/esfex/models/tft_inference.py",
     "*/esfex/models/tsam.py",
     "*/esfex/models/climate_profiles.py",
     "*/esfex/models/pixel_features.py",
     "*/esfex/models/zone_centroids.py",
     "*/esfex/models/download_cmip6.py",
-    "*/esfex/models/download_cmip6_subdaily.py",
-    "*/esfex/plugins/availability_generator/wind_cf.py",
-    "*/esfex/plugins/availability_generator/solar_cf.py",
     "*/esfex/plugins/availability_generator/otec_cf.py",
     "*/esfex/plugins/availability_generator/grid_builder_hook.py",
 ]

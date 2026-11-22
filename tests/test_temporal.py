@@ -7,11 +7,12 @@ Covers all public functions and the HOURS_STD_YEAR constant:
 - validate_hourly_data
 - get_aggregated_timesteps
 - get_hours_per_year
-- hours_for_year
+- hours_for_year, model_time_index, drop_leap_days
 - calculate_rolling_horizon_windows
 """
 
 import warnings
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -23,8 +24,10 @@ from esfex.utils.temporal import (
     aggregate_to_resolution,
     calculate_rolling_horizon_windows,
     get_aggregated_timesteps,
+    drop_leap_days,
     get_hours_per_year,
     hours_for_year,
+    model_time_index,
     validate_hourly_data,
 )
 
@@ -377,34 +380,62 @@ class TestGetHoursPerYear:
 
 
 class TestHoursForYear:
-    """Tests for hours_for_year (calendar-year-specific)."""
+    """hours_for_year: every modelled year is 8760 h, leap years included (#49)."""
 
-    def test_leap_year_2024(self):
-        assert hours_for_year(2024) == 8784
+    @pytest.mark.parametrize("year", [1900, 2000, 2023, 2024, 2025, 2028])
+    def test_always_8760(self, year):
+        assert hours_for_year(year) == HOURS_STD_YEAR == 8760
 
-    def test_leap_year_2000(self):
-        """2000 is a leap year (divisible by 400)."""
-        assert hours_for_year(2000) == 8784
 
-    def test_non_leap_year_1900(self):
-        """1900 is NOT a leap year (divisible by 100 but not 400)."""
-        assert hours_for_year(1900) == 8760
+class TestModelTimeIndex:
+    """model_time_index: date labels that skip Feb 29 (#49)."""
 
-    def test_non_leap_year_2025(self):
-        assert hours_for_year(2025) == 8760
+    def test_leap_year_skips_feb29_and_ends_dec31(self):
+        idx = model_time_index(datetime(2028, 1, 1), HOURS_STD_YEAR)
+        assert len(idx) == HOURS_STD_YEAR
+        assert not ((idx.month == 2) & (idx.day == 29)).any()
+        assert idx[1416] == pd.Timestamp("2028-03-01 00:00")
+        assert idx[-1] == pd.Timestamp("2028-12-31 23:00")
 
-    def test_non_leap_year_2023(self):
-        assert hours_for_year(2023) == 8760
+    def test_year_blocks_start_on_jan1(self):
+        idx = model_time_index("2027-01-01", 3 * HOURS_STD_YEAR)
+        for k, year in enumerate([2027, 2028, 2029]):
+            assert idx[k * HOURS_STD_YEAR] == pd.Timestamp(f"{year}-01-01")
 
-    def test_leap_year_2028(self):
-        assert hours_for_year(2028) == 8784
+    def test_coarser_step(self):
+        idx = model_time_index("2028-01-01", HOURS_STD_YEAR // 3, step_hours=3)
+        assert len(idx) == 2920
+        assert idx[-1] == pd.Timestamp("2028-12-31 21:00")
 
-    def test_consistency_with_get_hours_per_year(self):
-        """hours_for_year and get_hours_per_year should agree."""
-        import calendar
-        for yr in [2020, 2021, 2022, 2023, 2024]:
-            is_leap = calendar.isleap(yr)
-            assert hours_for_year(yr) == get_hours_per_year(leap_year=is_leap)
+    def test_common_year_matches_calendar(self):
+        idx = model_time_index("2025-01-01", 100)
+        assert list(idx) == list(pd.date_range("2025-01-01", periods=100, freq="h"))
+
+
+class TestDropLeapDays:
+    """drop_leap_days: input data come in 8760-h blocks (#49, #7)."""
+
+    def test_single_leap_year_file(self):
+        data = np.arange(8784.0)
+        out = drop_leap_days(data)
+        assert out.shape == (HOURS_STD_YEAR,)
+        assert out[1415] == 1415 and out[1416] == 1440  # Feb 29 removed
+
+    def test_multi_year_from_date_start(self):
+        # 2027 (365 d) + 2028 (366 d) from 1 Jan 2027
+        data = np.arange(8760.0 + 8784.0).reshape(-1, 1)
+        out = drop_leap_days(data, datetime(2027, 1, 1))
+        assert out.shape == (2 * HOURS_STD_YEAR, 1)
+        feb29 = 8760 + 1416
+        assert out[feb29, 0] == feb29 + 24
+
+    def test_8760_blocks_untouched(self):
+        data = np.ones((2 * HOURS_STD_YEAR, 2))
+        assert drop_leap_days(data, datetime(2028, 1, 1)) is data
+
+    def test_unmatched_length_untouched(self):
+        data = np.ones(100)
+        assert drop_leap_days(data, datetime(2028, 1, 1)) is data
 
 
 # ---------------------------------------------------------------------------

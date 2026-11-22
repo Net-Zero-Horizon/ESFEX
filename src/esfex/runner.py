@@ -10,15 +10,17 @@ Manages the complete simulation workflow including:
 """
 
 import gc
+import hashlib
 import logging
+import math
 import os
 import time
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Optional, Dict, List, Tuple
+from typing import Any, Iterable, Optional, Dict, List, Tuple, Union
 
 import sys
 
@@ -27,15 +29,44 @@ import pandas as pd
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeRemainingColumn
 
-from esfex.config.schema import ESFEXConfig, SystemConfig
-from esfex.bridge.adapters import PowerSystemAdapter, MasterProblemAdapter, PrimaryEnergyAdapter
-from esfex.models.ev import generate_ev_profiles, generate_v2g_availability, aggregate_ev_profiles
-from esfex.io.demand import create_sectoral_demand
+from esfex.config.schema import (
+    CostCurveConfig,
+    ESFEXConfig,
+    SystemConfig,
+    fuel_price_factor,
+    is_committed_unit,
+)
+from esfex.bridge.adapters import (
+    LOSS_REPAIR_GAP_INFO,
+    MasterProblemAdapter,
+    PowerSystemAdapter,
+    PrimaryEnergyAdapter,
+    reset_run_warnings,
+)
+from esfex.bridge.converters import (
+    OPERATING_BUDGET_COSTS,
+    battery_availability_key,
+    battery_technology_availability_key,
+)
+from esfex.models.ev import (
+    aggregate_ev_profiles,
+    fleet_growth_factor,
+    generate_ev_profiles,
+    generate_v2g_availability,
+)
+from esfex.api._common import ApiError
+from esfex.io.checkpoint import PHASE_COMPLETE, PHASE_DISPATCH, PHASE_MASTER, ResumeError
+from esfex.io.demand import _read_tabular, create_sectoral_demand, read_hourly_table
 from esfex.utils import aggregate_demand_to_resolution
+from esfex.utils.per_unit import derived_reactance_pu, line_reactance_pu, system_s_base
 from esfex.utils.temporal import (
+    DEFAULT_RUN_YEARS,
     HOURS_STD_YEAR,
     aggregate_to_resolution,
+    drop_leap_days,
     hours_for_year,
+    model_time_index,
+    parse_date_start,
 )
 from esfex.zones import expand_config_with_zones
 
@@ -48,6 +79,439 @@ if sys.platform == "win32":
 console = Console(force_terminal=True)
 
 
+def _node_link_impedances(lines, buses, dc_config, s_base_mva,
+                          transformers=()) -> dict[tuple[int, int], tuple[float, float]]:
+    """Equivalent series (R, X) in p.u. of the bus-level lines between each node pair.
+
+    The master problem joins nodes with one synthetic link per pair; this gives
+    that link the impedance of the lines it stands for. Parallel lines share a
+    flow F in proportion to 1/X: the equivalent reactance is 1 / Σ 1/X_k, and
+    the loss F² Σ R_k s_k² with s_k = (1/X_k)/Σ 1/X gives the equivalent R.
+    R and X are those of each whole line (all its circuits), as in the
+    dispatch network. A transformer whose ends sit in two nodes joins them
+    too, with the R and X the bridge gives it (convert_transformer_data).
+    """
+    def _ends(br):
+        a = buses[br.from_bus].parent_node if br.from_bus is not None and br.from_bus < len(buses) else br.from_node
+        b = buses[br.to_bus].parent_node if br.to_bus is not None and br.to_bus < len(buses) else br.to_node
+        return a, b
+
+    by_pair: dict[tuple[int, int], list[tuple[float, float]]] = {}
+    for line in lines:
+        a, b = _ends(line)
+        if a == b:
+            continue
+        x = line_reactance_pu(line, line.length_km, dc_config, s_base_mva)
+        by_pair.setdefault((min(a, b), max(a, b)), []).append(
+            (line.resistance_pu or 0.0, x))
+    for tr in transformers:
+        a, b = _ends(tr)
+        if a == b:
+            continue
+        z = float(tr.impedance_pu)
+        r = tr.resistance_pu if tr.resistance_pu is not None else tr.losses_fraction * z
+        x = math.sqrt(max(z * z - r * r, 1e-12))
+        by_pair.setdefault((min(a, b), max(a, b)), []).append((r, x))
+    result = {}
+    for pair, rx in by_pair.items():
+        total_b = sum(1.0 / x for _, x in rx)
+        result[pair] = (sum(r * ((1.0 / x) / total_b) ** 2 for r, x in rx), 1.0 / total_b)
+    return result
+
+
+def _reservoir_investment_key(key: str) -> Optional[tuple[int, int]]:
+    """``(generator, master location)`` (0-based) of a
+    ``reservoir_investment_{g}_{n}`` investment key; ``None`` for any other key."""
+    prefix = "reservoir_investment_"
+    if not key.startswith(prefix):
+        return None
+    g, _, n = key[len(prefix):].partition("_")
+    if not (g.isdigit() and n.isdigit()):
+        return None
+    return int(g), int(n)
+
+
+def _converter_investment_key(key: str) -> tuple[Optional[str], int]:
+    """``("acdc" | "freq", index)`` of a ``converter_investment_{kind}_{c}``
+    investment key; ``(None, -1)`` for any other key."""
+    prefix = "converter_investment_"
+    if not key.startswith(prefix):
+        return None, -1
+    kind, _, idx = key[len(prefix):].partition("_")
+    if kind not in ("acdc", "freq") or not idx.isdigit():
+        return None, -1
+    return kind, int(idx)
+
+
+def _link_flow_costs(links, offsets: dict[str, int]) -> dict[tuple[int, int], dict]:
+    """Flow cost of the master's node links that stand for inter-system links.
+
+    An electrical inter-system link costs ``distance_km × cost_per_mw_km``
+    per MWh it carries. The master joins each pair of merged nodes
+    ``(i, j)``, ``i < j``, with one link: it gets the links' mean length and
+    a cost per MW·km that gives their mean cost per MWh (weighted by their
+    existing capacity), as ``{"length_km": …, "cost_per_mw_km": …}``.
+    """
+    def _at(seq, idx):
+        return float(seq[idx]) if idx < len(seq) and seq[idx] is not None else 0.0
+
+    acc: dict[tuple[int, int], list[float]] = {}
+    for link in links:
+        if len(link.systems) < 2:
+            continue
+        sa, sb = link.systems[0], link.systems[1]
+        if sa not in offsets or sb not in offsets:
+            continue
+        for idx, (na, nb) in enumerate(link.connections):
+            ga, gb = offsets[sa] + na, offsets[sb] + nb
+            dist, cost = _at(link.distance_km, idx), _at(link.cost_per_mw_km, idx)
+            w = max(_at(link.existing_capacity_mw, idx), 1e-6)
+            a = acc.setdefault((min(ga, gb), max(ga, gb)), [0.0, 0.0, 0.0])
+            a[0] += w
+            a[1] += w * dist
+            a[2] += w * dist * cost
+    out: dict[tuple[int, int], dict] = {}
+    for pair, (w, wd, wdc) in acc.items():
+        if wd > 0 and wdc > 0:
+            out[pair] = {"length_km": wd / w, "cost_per_mw_km": wdc / wd}
+    return out
+
+
+def _fuel_link_routes(links, offsets: dict[str, int]) -> list[dict]:
+    """Primary-energy transport routes for the ``fuel_route`` inter-system links.
+
+    Each connection of a fuel link joins two merged (global) nodes. Like a
+    GUI fuel route it becomes two one-way routes, ``…_fwd`` and ``…_rev``,
+    for the link's fuel: route capacity = ``existing_capacity_MW`` (fuel
+    units/day), ``transport_cost`` = ``cost_per_mw_km`` ($/unit/km),
+    ``losses_fraction`` = ``loss_factor`` (per 100 km). Capacity investment
+    on the route follows the fuel's ``fuel_infrastructure``, so the link's
+    ``max_investment_MW`` / ``investment_cost_per_MW`` are not used.
+
+    Route ids are ``link{k}_{A}_{B}_{fuel}_{i}_fwd|rev``, with ``k`` the
+    link's position in ``systems_links`` and ``i`` the connection, so two
+    fuel links between the same systems (e.g. Diesel and LNG) keep apart.
+    """
+    def _at(seq, idx, default=0.0):
+        return float(seq[idx]) if idx < len(seq) and seq[idx] is not None else default
+
+    routes: list[dict] = []
+    for pos, link in enumerate(links):
+        if link.link_type != "fuel_route" or len(link.systems) < 2:
+            continue
+        sa, sb = link.systems[0], link.systems[1]
+        if sa not in offsets or sb not in offsets:
+            continue
+        if not link.fuel:
+            logger.warning(f"Fuel-route link {sa}-{sb} has no fuel; it is ignored.")
+            continue
+        if any(link.max_investment_mw) or any(link.investment_cost_per_mw):
+            logger.warning(
+                f"Fuel-route link {sa}-{sb}: max_investment_MW / investment_cost_per_MW "
+                f"are not used; route investment follows fuel_infrastructure.{link.fuel}.")
+        for idx, (na, nb) in enumerate(link.connections):
+            ga, gb = offsets[sa] + na, offsets[sb] + nb
+            params = {link.fuel: {
+                "capacity": _at(link.existing_capacity_mw, idx),
+                "transport_cost": _at(link.cost_per_mw_km, idx),
+                "losses_fraction": _at(link.loss_factor, idx),
+            }}
+            dist = _at(link.distance_km, idx)
+            for suffix, frm, to in (("fwd", ga, gb), ("rev", gb, ga)):
+                routes.append({
+                    "route_id": f"link{pos}_{sa}_{sb}_{link.fuel}_{idx}_{suffix}",
+                    "from_node": frm,
+                    "to_node": to,
+                    "distance_km": dist,
+                    "fuel_params": {f: dict(p) for f, p in params.items()},
+                })
+    return routes
+
+
+def _merged_operating_budget(systems) -> Optional[float]:
+    """The operating budget of systems merged into one dispatch: the sum of
+    theirs when every system sets ``max_annual_operating_cost``. The merged
+    dispatch has one budget over all their spending, so when only some set
+    one, none is applied (with a warning)."""
+    budgets = [s.max_annual_operating_cost for s in systems]
+    if all(b is None for b in budgets):
+        return None
+    if any(b is None for b in budgets):
+        logger.warning(
+            "max_annual_operating_cost is set for %s but not for %s; the merged "
+            "dispatch has one operating budget over every system, so none is "
+            "applied. Set it for every system (or none).",
+            ", ".join(s.name for s, b in zip(systems, budgets) if b is not None),
+            ", ".join(s.name for s, b in zip(systems, budgets) if b is None))
+        return None
+    return float(sum(budgets))
+
+
+def _merged_budget_scope(systems) -> str:
+    """The merged master's ``budget_scope``: the first system's (a warning
+    when the systems differ; the merged master has one budget)."""
+    scopes = [s.budget_scope for s in systems]
+    if len(set(scopes)) > 1:
+        logger.warning(
+            "The systems set different budget_scope values (%s); the merged "
+            "master has one budget and uses %r.",
+            ", ".join(f"{s.name}: {s.budget_scope}" for s in systems), scopes[0])
+    return scopes[0]
+
+
+def operating_spend(breakdown: Optional[dict]) -> float:
+    """What a dispatch window spent for the operating budget
+    (``max_annual_operating_cost``), from its cost breakdown: the money it
+    paid (fuel, maintenance, start-ups, fixed O&M, electrolyzer, converter
+    and line-flow costs, primary-energy fuel bought and transported; the
+    Julia ``OPERATING_BUDGET_COSTS``), no modelling penalty."""
+    if not breakdown:
+        return 0.0
+    return float(sum(breakdown.get(k, 0.0) for k in OPERATING_BUDGET_COSTS))
+
+
+def window_operating_budget(budget_left: float, window_demand: float,
+                            remaining_demand: float) -> float:
+    """A rolling window's share of the year's operating budget: what is left
+    of it × the demand of the window's committed steps over the demand of the
+    rest of the year (from the window's start), so a window that spends less
+    leaves more to the next ones. Never negative."""
+    left = max(budget_left, 0.0)
+    if remaining_demand <= 0:
+        return left
+    return left * min(1.0, max(window_demand, 0.0) / remaining_demand)
+
+
+def _concat_window_series(windows) -> dict:
+    """Join per-window ``{key: series}`` dicts along time.
+
+    ``windows`` is a list of ``(dict, keep_steps)``: each series is cut to
+    the window's committed steps (the overlap tail belongs to the next
+    window), and a key missing from a window (no variable or no binding
+    dual there) is zero-filled so every series stays aligned with the
+    year's time axis.
+    """
+    keys: list = []
+    for d, _ in windows:
+        keys.extend(k for k in d if k not in keys)
+    return {
+        k: np.concatenate([
+            np.asarray(d[k], dtype=float)[:n] if k in d else np.zeros(n)
+            for d, n in windows
+        ])
+        for k in keys
+    }
+
+
+def _stamp_power_in_service(ds, in_service: list, i: int) -> None:
+    """Record on results dataset ``ds`` the MW in service per node of unit
+    ``i`` (``in_service[i]``, see ``Orchestrator._rebuild_unit_names``): the
+    readers charge fixed O&M on it and count it as installed capacity (a
+    unit the master built has no config in the results file)."""
+    if i < len(in_service) and in_service[i] is not None:
+        ds.attrs["rated_power"] = np.asarray(in_service[i], dtype=float)
+
+
+def _stamp_num_units(ds, num_units: list, i: int) -> None:
+    """Record on a ``gen_status`` / ``gen_startup`` dataset the units per
+    node of generator ``i`` (``num_units[i]``, see
+    ``Orchestrator._rebuild_unit_names``): the readers show the units online
+    against it and charge each unit start ``start_up_cost / num_units``."""
+    if i < len(num_units) and num_units[i] is not None:
+        ds.attrs["num_units"] = np.asarray(num_units[i], dtype=np.int64)
+
+
+def existing_power_in_service(unit: dict, power_key: str, num_nodes: int,
+                              year_offset: int, degrade: bool = True) -> list[float]:
+    """Per-node MW in service of an existing unit in the dispatch's year, as
+    the dispatch charges its fixed O&M (``fixed_om_annual_cost`` in
+    power_system.jl): ``unit[power_key]``, nothing at a node past its
+    ``life_time`` (age = ``initial_age`` + *year_offset*) and, with
+    *degrade* (generators), shrunk by ``(1 - degradation_rate)^age``.
+
+    *unit* is the dispatch's config of the unit: after a master run it holds
+    the master's capacity (retirements and life extension applied) with no
+    degradation and no end of life, so it is taken as is.
+    """
+    power = _per_node_list(unit.get(power_key) or [], num_nodes)
+    age0 = _per_node_list(unit.get("initial_age") or [], num_nodes, 0)
+    life = _per_node_list(unit.get("life_time") or [], num_nodes, float("inf"))
+    deg = _per_node_list(unit.get("degradation_rate") or [], num_nodes, 0.0)
+    out = []
+    for p, a0, lt, d in zip(power, age0, life, deg):
+        p, age = float(p), float(a0) + year_offset
+        if p > 0 and float(lt) - age <= 0:
+            p = 0.0
+        elif p > 0 and degrade and float(d) > 0:
+            p *= (1.0 - float(d)) ** age
+        out.append(p)
+    return out
+
+
+# Operating-cost fields of the candidate technologies written to the results
+# file (system_configuration/technologies, /battery_technologies)
+_TECH_COST_ATTRS = ("fuel_cost", "fixed_cost", "maintenance_cost", "start_up_cost")
+_BAT_TECH_COST_ATTRS = ("maintenance_cost", "fixed_cost")
+
+
+def unique_unit_names(names: list[str]) -> list[str]:
+    """Index-aligned unit names with homonyms made unique.
+
+    The first unit keeps its name; later ones with the same name get
+    `` (1)``, `` (2)``… (skipping a candidate that is already taken). This
+    is the one convention of the results file: the runner's name lists,
+    the HDF5 dataset names and the readers that strip the suffix to find a
+    unit's configuration (``financial_analysis``, the results charts).
+    """
+    used = set()
+    out: list[str] = []
+    for name in names:
+        name = str(name)
+        cand, k = name, 0
+        while cand in used:
+            k += 1
+            cand = f"{name} ({k})"
+        used.add(cand)
+        out.append(cand)
+    return out
+
+
+def _profile_year_block(profile: np.ndarray, year_idx: int, steps: int) -> np.ndarray:
+    """Rows of ``profile`` for year ``year_idx`` of the horizon.
+
+    Same rule as the dispatch (``absolute_start_hour``): step ``t`` of year
+    ``k`` is row ``k × steps_per_year + t``, wrapping around a shorter
+    profile, so a multi-year profile gives each year its own block and a
+    one-year profile repeats.
+    """
+    n = len(profile)
+    if n == 0 or steps <= 0:
+        return profile[:0]
+    return np.take(profile, (year_idx * steps + np.arange(steps)) % n, axis=0)
+
+
+def _pe_period_bounds(n_steps: int, period_steps: int) -> list[tuple[int, int]]:
+    """``[start, end)`` steps of each primary-energy period of a window.
+
+    Mirrors ``create_temporal_mapping`` in primary_energy.jl: periods of
+    ``min(period_steps, n_steps)`` steps, the last one possibly shorter.
+    """
+    length = min(period_steps, n_steps) if period_steps > 0 else n_steps
+    length = max(length, 1)
+    return [(s, min(s + length, n_steps)) for s in range(0, n_steps, length)]
+
+
+def _merge_pe_windows(windows, period_steps: int) -> dict:
+    """Join the primary-energy results of the rolling-horizon windows.
+
+    ``windows`` is a list of ``(pe_result, window_steps, keep_steps)``.
+    Per-period series (fuel supply, non-electric demand served, fuel
+    shortfall, transport flows ``[route x period]``) are spread evenly over
+    the steps of their period, cut to the window's committed steps (the
+    overlap tail belongs to the next window), joined along time and summed
+    back into periods of ``period_steps`` steps from the start of the year.
+    Windows may have different period counts (the last one is shorter).
+    Each window's costs already cover only its committed steps
+    (``PrimaryEnergyAdapter.get_results(keep_steps=...)``) and are summed.
+    ``fuel_for_power`` (``{unit: [node x step]}``) is cut to the committed
+    steps and joined like the dispatch arrays. Investments and end-of-year
+    tank levels come from the last window.
+    """
+    def _committed_steps(arr, n_steps, keep):
+        arr = np.asarray(arr, dtype=float)
+        bounds = _pe_period_bounds(n_steps, period_steps)
+        if arr.shape[-1] != len(bounds):
+            raise ValueError(
+                f"primary-energy series has {arr.shape[-1]} periods, "
+                f"expected {len(bounds)} for {n_steps} steps")
+        per_step = np.concatenate(
+            [np.repeat(arr[..., [p]] / (e - s), e - s, axis=-1)
+             for p, (s, e) in enumerate(bounds)], axis=-1)
+        return per_step[..., :keep]
+
+    def _to_periods(series):
+        total = series.shape[-1]
+        return np.stack(
+            [series[..., s:e].sum(axis=-1) for s, e in _pe_period_bounds(total, period_steps)],
+            axis=-1)
+
+    merged: dict = {}
+    for key in ("total_fuel_supply", "total_ne_demand_satisfied",
+                "total_loss_of_supply", "transport_flows"):
+        fuels: list = []
+        for pe, _, _ in windows:
+            fuels.extend(f for f in (pe.get(key) or {}) if f not in fuels)
+        merged[key] = {}
+        for fuel in fuels:
+            parts = []
+            shape = next(np.asarray(pe[key][fuel]).shape[:-1] for pe, _, _ in windows
+                         if fuel in (pe.get(key) or {}))
+            for pe, n_steps, keep in windows:
+                arr = (pe.get(key) or {}).get(fuel)
+                parts.append(_committed_steps(arr, n_steps, keep) if arr is not None
+                             else np.zeros(shape + (keep,)))
+            merged[key][fuel] = _to_periods(np.concatenate(parts, axis=-1))
+    last_pe = windows[-1][0]
+    merged["final_storage_levels"] = last_pe.get("final_storage_levels", {})
+    merged["transport_investments"] = last_pe.get("transport_investments", {})
+    merged["storage_investments"] = last_pe.get("storage_investments", {})
+    for cost_key in ("total_fuel_cost", "total_transport_cost", "total_loss_penalty"):
+        merged[cost_key] = sum(float(pe.get(cost_key, 0.0)) for pe, _, _ in windows)
+    units: list = []
+    for pe, _, _ in windows:
+        units.extend(u for u in (pe.get("fuel_for_power") or {}) if u not in units)
+    if units:
+        merged["fuel_for_power"] = {}
+        for unit in units:
+            n_nodes = next(np.asarray(pe["fuel_for_power"][unit]).shape[0] for pe, _, _ in windows
+                           if unit in (pe.get("fuel_for_power") or {}))
+            merged["fuel_for_power"][unit] = np.concatenate([
+                np.asarray(pe["fuel_for_power"][unit], dtype=float)[:, :keep]
+                if unit in (pe.get("fuel_for_power") or {}) else np.zeros((n_nodes, keep))
+                for pe, _, keep in windows], axis=-1)
+    return merged
+
+
+class RunAbortedError(RuntimeError):
+    """A run stopped before it produced its results (e.g. the master problem
+    found no plan): ``esfex run`` reports it and exits with a non-zero code."""
+
+
+@dataclass
+class MasterDayPlan:
+    """The days every master of a run models, chosen once
+    (``Orchestrator._master_day_plan``)."""
+
+    # Representative days (first steps, 0-based, within a year); None with TSAM
+    rep_day_offsets: Optional[list[int]]
+    # Critical days (lowest renewable supply against demand), the most
+    # critical first
+    critical_day_offsets: list[int]
+    # Days of the year each representative day and then each critical day
+    # stands for; empty = equal shares of the representative days (or TSAM)
+    rep_day_weights: list[float]
+    # Hours a battery must sustain to count as firm in the adequacy constraint
+    storage_firm_hours: float
+    # TSAM periods with the critical days appended; None without TSAM
+    tsam: Any = None
+
+
+def _day_plan_digest(plan: MasterDayPlan) -> dict:
+    """The days a :class:`MasterDayPlan` models, as plain data: a resumed
+    myopic run checks that it plans on the interrupted run's days."""
+    tsam = plan.tsam
+    return {
+        "rep_day_offsets": None if plan.rep_day_offsets is None else [int(d) for d in plan.rep_day_offsets],
+        "critical_day_offsets": [int(d) for d in plan.critical_day_offsets],
+        "rep_day_weights": [float(w) for w in plan.rep_day_weights],
+        "storage_firm_hours": float(plan.storage_firm_hours),
+        "tsam_period_start_hours": (None if tsam is None else
+                                    [int(h) for h in tsam.period_start_hours]),
+        "tsam_period_weights": (None if tsam is None else
+                                [float(w) for w in tsam.period_weights]),
+    }
+
+
 @dataclass
 class SimulationState:
     """Tracks state across simulation years."""
@@ -58,6 +522,8 @@ class SimulationState:
     boundary_conditions: dict[str, Any] = field(default_factory=dict)
     cumulative_investments: dict[str, Any] = field(default_factory=dict)
     cumulative_retirements: dict[str, Any] = field(default_factory=dict)
+    # Fuel storage/transport capacity the master built that the current
+    # year's dispatch sees: {kind: {fuel: {node or route index: capacity}}}
     primary_energy_capacities: dict[str, Any] = field(default_factory=lambda: {"storage": {}, "transport": {}})
 
 
@@ -90,11 +556,12 @@ class YearResults:
     co2_emissions: Optional[np.ndarray] = None
     # Network
     power_flow: Optional[dict] = None              # {(from,to): array[hour]}
+    # Line losses [node x hour] (MW): half of each line's loss at each end
+    line_losses: Optional[np.ndarray] = None
     voltage_angle: Optional[np.ndarray] = None     # [node x hour]
     # AC-specific outputs — populated only when power_flow_mode is acopf_*.
     voltage_magnitude: Optional[np.ndarray] = None        # [bus x hour] in p.u.
     reactive_generation: Optional[np.ndarray] = None      # [gen x bus x hour] in MVAr
-    transfer_investment: Optional[dict] = None     # {(from,to): value}
     # Prices [node x hour]
     prices: Optional[np.ndarray] = None
     # Demand [hour x node]
@@ -102,9 +569,6 @@ class YearResults:
     # Investment/retirement decisions
     investments: dict[str, float] = field(default_factory=dict)
     retirements: dict[str, float] = field(default_factory=dict)
-    gen_investment_array: Optional[np.ndarray] = None   # [gen x node]
-    bat_investment_power: Optional[np.ndarray] = None   # [bat x node]
-    bat_investment_capacity: Optional[np.ndarray] = None  # [bat x node]
     # Battery spillage [bat x node x hour]
     bat_spillage: Optional[np.ndarray] = None
     # EV variables [node x hour]
@@ -123,7 +587,9 @@ class YearResults:
     reservoir_level: Optional[np.ndarray] = None
     reservoir_spillage: Optional[np.ndarray] = None
     reservoir_pump: Optional[np.ndarray] = None
-    reservoir_invest_capacity: Optional[np.ndarray] = None  # [gen x node]
+    # Electrolyzers [electrolyzer x node x hour], in config order
+    electrolyzer_power: Optional[np.ndarray] = None       # MW drawn
+    electrolyzer_h2: Optional[np.ndarray] = None          # kg/h of hydrogen
     # Derived metrics (computed post-optimization)
     capacity_factor: Optional[np.ndarray] = None          # [gen x node x hour]
     lcoe: Optional[np.ndarray] = None                     # [gen x node x hour]
@@ -131,7 +597,7 @@ class YearResults:
     bat_capacity_factor: Optional[np.ndarray] = None      # [bat x node x hour]
     bat_lcoe: Optional[np.ndarray] = None                 # [bat x node x hour]
     bat_vallcoe: Optional[np.ndarray] = None              # [bat x node x hour]
-    fuel_for_power: Optional[dict] = None                 # {gen_idx: [node x hour]}
+    fuel_for_power: Optional[dict] = None                 # {unit: [node x hour]} fuel units/step
     technology_selling_prices: Optional[dict] = None      # {tech_name: {prices_weights, ...}}
     price_energy_component: Optional[np.ndarray] = None   # [hour]
     price_congestion_component: Optional[np.ndarray] = None  # [node x hour]
@@ -144,13 +610,364 @@ class YearResults:
     n1_security_cost: float = 0.0                           # Incremental cost of N-1 security ($)
     # System-level scalars
     emissions: float = 0.0
-    re_penetration: float = 0.0
+    re_penetration: float = 0.0   # RE share: renewable over total generation, energy-weighted
     load_shed: float = 0.0
     total_generation: float = 0.0
     total_demand: float = 0.0
-    master_re_target: float = 0.0  # Master problem RE penetration target for this year
+    transmission_losses: float = 0.0  # MWh lost on the lines (DC loss model)
+    master_re_target: float = 0.0  # Operational RE target: the master trajectory capped at what the plan can deliver
+    # Line-loss repair bounds ($): of the master solve that planned this
+    # year, and of the year's dispatch windows summed (adapters.loss_repair_bounds)
+    master_loss_repair: Optional[dict] = None
+    dispatch_loss_repair: Optional[dict] = None
     # Granular cost decomposition (accumulated from operational windows)
     cost_breakdown: Optional[dict] = None
+
+
+
+def re_target_trajectory(initial: float, target: float, num_years: int,
+                         min_inc: float, max_inc: float) -> list[float]:
+    """Yearly RE targets of the planning horizon (RE-1, as the Julia
+    ``calculate_target_ratios``): the initial share in year 1, then a
+    linear path to ``target`` whose yearly step is clamped to
+    ``[min_inc, max_inc]``, never above 1 (100 %)."""
+    path: list[float] = []
+    for y in range(num_years):
+        if y == 0:
+            path.append(initial)
+            continue
+        tau = initial + y / (num_years - 1) * (target - initial)
+        step = tau - path[-1]
+        if step < min_inc:
+            tau = path[-1] + min_inc
+        elif step > max_inc:
+            tau = path[-1] + max_inc
+        path.append(min(tau, 1.0))
+    return path
+
+
+def re_share(renewable_generation: float, total_generation: float) -> float:
+    """The RE share: renewable over total generation (0 without
+    generation), energy-weighted over whatever the two sums cover (a window,
+    a year, several years). Renewable means a unit of type "Renewable"
+    (Julia ``is_renewable_unit``); battery discharge is neither. 100 % means
+    no fossil generation."""
+    total = float(total_generation)
+    return float(renewable_generation) / total if total > 0 else 0.0
+
+
+def sum_loss_repairs(windows: list[dict]) -> Optional[dict]:
+    """A year's dispatch line-loss repair from its windows' bounds
+    (``adapters.loss_repair_bounds``): ``lower_bound`` and ``objective``
+    summed ($, whole windows, look-ahead included), ``gap`` of the sums,
+    ``gap_max`` (the largest window gap), ``rounds``, ``linearised`` and
+    ``released`` summed, ``windows`` and ``windows_repaired`` (with at
+    least one repair round). ``None`` without any window bounds."""
+    if not windows:
+        return None
+    lower = sum(w["lower_bound"] for w in windows)
+    final = sum(w["objective"] for w in windows)
+    return {
+        "lower_bound": lower,
+        "objective": final,
+        "gap": 0.0 if final == lower else (final - lower) / max(abs(final), 1e-12),
+        "gap_max": max(w["gap"] for w in windows),
+        "rounds": sum(w["rounds"] for w in windows),
+        "linearised": sum(w["linearised"] for w in windows),
+        "released": sum(w["released"] for w in windows),
+        "windows": len(windows),
+        "windows_repaired": sum(1 for w in windows if w["rounds"] > 0),
+    }
+
+
+def myopic_re_anchor(initial: float, min_inc: float, y_idx: int) -> float:
+    """Year-0 anchor of the RE minimum-increment floor (RE-3) in myopic
+    year *y_idx* (0-based): where the perfect-foresight chain stands the
+    year before, the initial share plus *y_idx* minimum steps, at most 1
+    (the Julia ``re_increment_floor``). The share reached in earlier years
+    does not move it, so each one-year master gets the floor perfect
+    foresight places on that year. (The maximum increment is measured from
+    the share the previous year achieved: ``re_share_anchor``.)"""
+    start = min(max(float(initial), 0.0), 1.0)
+    return min(start + y_idx * max(float(min_inc), 0.0), 1.0)
+
+
+# Economic lifetime of a build without a positive one (the Julia
+# DEFAULT_ASSET_LIFETIME)
+_DEFAULT_ASSET_LIFETIME = 40.0
+
+
+def earlier_build_annuities(streams: Iterable[tuple], y_idx: int) -> float:
+    """Investment annuities ($) myopic year *y_idx* (0-based) pays on the
+    capacity earlier myopic years built. *streams* holds ``(build year
+    index, life, annuity per year)`` with 0-based build years; a build pays
+    from its build year while its age is below its life, as the Julia
+    ``annuity_years`` (``_DEFAULT_ASSET_LIFETIME`` when not positive). A
+    one-year master charges only the annuities of what that year builds, so
+    these are what its objective leaves out next to a perfect-foresight
+    year."""
+    total = 0.0
+    for build, life, annuity in streams:
+        span = math.ceil(life if life > 0 else _DEFAULT_ASSET_LIFETIME)
+        if build < y_idx <= build + span - 1:
+            total += annuity
+    return total
+
+
+def _warn_flat_renewable(kind: str, key: str) -> None:
+    """Log that a renewable unit without an availability profile is modelled
+    as available in every hour (capacity factor 1.0)."""
+    logger.warning(
+        "%s %r is Renewable but has no availability_file: it is modelled as "
+        "available at full capacity in every hour (capacity factor 1.0). "
+        "Right for dispatchable renewables (biomass, geothermal); set a "
+        "profile for solar, wind and other variable sources.", kind, key)
+
+
+def technology_unit_fields(tech, rep, rep_curve=None) -> dict:
+    """Operating parameters of a generator built from candidate technology *tech*.
+
+    Shared by the dispatch's virtual generators (master investments, per
+    bus) and the myopic master's units built in earlier years (per node).
+    ``rep(arr, default)`` lays a per-node technology list out on the unit's
+    array positions; ``rep_curve(curves)`` does the same for the bidding
+    curves (default: the technology's own list). Capacity, age, lifetime,
+    degradation and investment fields are left to the caller.
+    """
+    return {
+        "name": f"Investment {tech.name}",
+        "type": tech.type,
+        "fuel": tech.fuel,
+        # A fraction of the rated power, like every generator's min_power
+        "min_power": rep(tech.min_output, 0.0),
+        "eff_at_rated": rep(tech.eff_at_rated, 0.0),
+        "eff_at_min": rep(tech.eff_at_min, 0.0),
+        "ramp_up": rep(tech.ramp_up, 0.0),
+        "ramp_down": rep(tech.ramp_down, 0.0),
+        "min_up": rep(tech.min_up, 0),
+        "min_down": rep(tech.min_down, 0),
+        "fuel_cost": rep(tech.fuel_cost, 0.0),
+        "fuel_cost_curve": (rep_curve(tech.fuel_cost_curve) if rep_curve
+                            else (list(tech.fuel_cost_curve) if tech.fuel_cost_curve else None)),
+        "fixed_cost": rep(tech.fixed_cost, 0.0),
+        "maintenance_cost": rep(tech.maintenance_cost, 0.0),
+        "start_up_cost": rep(tech.start_up_cost, 0.0),
+        "inertia": rep(tech.inertia, 0.0),
+        "droop": rep(tech.droop, 0.05),
+        "governor_time_const": rep(tech.governor_time_const, 5.0),
+        "risk_coefficient": rep(tech.risk_coefficient, 1.0),
+        "availability_file": tech.availability_file,
+        "frequency_hz": tech.frequency_hz,
+        "current_type": tech.current_type,
+        "reservable": tech.reservable,
+    }
+
+
+# Master builds (MW, MWh) at or below this are solver noise, not builds: the
+# master's CAPACITY_TOL (master_problem.jl), which already reports them as 0.
+# An interior-point solve without crossover leaves values like 1e-6 MW on
+# capacity it did not build; carried into a later myopic year or the dispatch
+# they made rows like `gen <= 2e-9` (round 36). Anything larger is kept in
+# full: the master paid for it, so the dispatch and the later years' fleet
+# see the same capacity (a battery's power and energy always together).
+MIN_BUILD = 1e-3
+
+
+def remaining_limit(limit: float, used: float) -> float:
+    """Room left under an investment limit after *used* was built: 0 when
+    at most :data:`MIN_BUILD` is left (a master that built up to the limit
+    leaves e.g. 3e-7 MW, which the next myopic year must not see as room)."""
+    left = float(limit) - float(used)
+    return left if left > MIN_BUILD else 0.0
+
+_MASTER_BUILD_CATEGORIES = (
+    'tech_investment', 'bat_tech_power_investment', 'bat_tech_capacity_investment',
+    'transfer_investment', 'converter_investment', 'reservoir_investment')
+
+
+def master_year_builds(year_data: dict) -> dict[str, float]:
+    """One year's master investments ``{key: MW or MWh}`` from the solution's
+    per-year categories, every build above :data:`MIN_BUILD`."""
+    return {key: float(value)
+            for category in _MASTER_BUILD_CATEGORIES
+            for key, value in (year_data.get(category) or {}).items()
+            if value > MIN_BUILD}
+
+
+def units_of_capacity(power_mw: float, unit_size_mw: float) -> int:
+    """Units of *unit_size_mw* MW that *power_mw* MW of a built technology
+    reaches unit commitment as: ``ceil(power / unit_size)`` (no unit larger
+    than the declared size), and one unit when the technology has no unit
+    size or nothing is built."""
+    if unit_size_mw <= 0 or power_mw <= 0:
+        return 1
+    return max(1, math.ceil(power_mw / unit_size_mw - 1e-6))
+
+
+def units_in_service(num_units: int, rated_mw: float, power_mw: float,
+                     degradation_rate: float = 0.0, age: float = 0.0) -> int:
+    """Units of an existing plant of *num_units* units and *rated_mw* MW that
+    are left when the master keeps *power_mw* MW of it.
+
+    Degradation shrinks every unit, so a capacity at or above the degraded
+    rating ``rated × (1 − degradation)^age`` keeps all units. Less (a partial
+    life extension) keeps ``ceil(num_units × power / degraded rating)``
+    units: whole units of the original size, the last one possibly smaller.
+    """
+    n = max(1, int(num_units))
+    if n == 1 or rated_mw <= 0:
+        return n
+    ref = rated_mw * (1.0 - degradation_rate) ** max(age, 0.0)
+    if ref <= 0 or power_mw >= ref * (1 - 1e-6):
+        return n
+    return min(n, max(1, math.ceil(n * power_mw / ref - 1e-6)))
+
+
+def rated_bat_tech_power(builds, y_idx: int, lifetimes: list[float]) -> dict[int, np.ndarray]:
+    """Rated (not degraded) MW of each battery technology in service in
+    master year *y_idx*: the sum of its builds of the years ``y ≤ y_idx``
+    still within the technology's lifetime (``y_idx − y < lifetime``).
+
+    *builds* maps a build year to ``{technology index (1-based): MW per
+    master bus}``, as the master's ``bat_tech_power_investment``;
+    *lifetimes* lists the technologies' lifetimes in that order. The
+    master's ``cumulative_bat_tech_power`` holds the same builds degraded
+    by age; the fixed O&M stays on this rated power (round 12).
+    """
+    out: dict[int, np.ndarray] = {}
+    for y, by_tech in builds.items():
+        y = int(y)
+        if y > y_idx:
+            continue
+        for bt, mw in by_tech.items():
+            bt = int(bt)
+            if not 1 <= bt <= len(lifetimes) or y_idx - y >= lifetimes[bt - 1]:
+                continue
+            mw = np.asarray(mw, dtype=float)
+            out[bt] = out[bt] + mw if bt in out else mw.copy()
+    return out
+
+
+def battery_technology_unit_fields(bat_tech, rep) -> dict:
+    """Operating parameters of a battery built from battery technology *bat_tech*.
+
+    Counterpart of :func:`technology_unit_fields` for storage; power,
+    energy, age, lifetime and investment fields are left to the caller.
+    """
+    return {
+        "_type": "battery",
+        "type": "Storage",
+        "name": f"Investment {bat_tech.name}",
+        "efficiency_charge": rep(bat_tech.efficiency_charge, 0.95),
+        "efficiency_discharge": rep(bat_tech.efficiency_discharge, 0.95),
+        "soc_initial": rep(bat_tech.soc_initial, 0.0),
+        "max_DoD": rep(bat_tech.max_DoD, 0.0),
+        "maintenance_cost": rep(bat_tech.maintenance_cost, 0.0),
+        "inertia": rep(bat_tech.inertia, 0.0),
+        "throughput_degradation_cost": rep(bat_tech.throughput_degradation_cost, 0.0),
+        "risk_coefficient": rep(bat_tech.risk_coefficient, 1.0),
+        "ramp_up": rep(bat_tech.ramp_up, 0.0),
+        "ramp_down": rep(bat_tech.ramp_down, 0.0),
+        "fixed_cost": rep(bat_tech.fixed_cost, 0.0),
+        "reservable": bat_tech.reservable,
+        "availability_file": bat_tech.availability_file,
+        "spillage": bat_tech.spillage,
+        "current_type": bat_tech.current_type,
+    }
+
+
+def _pad_zeros(arr, n: int) -> list:
+    """*arr* as a list of at least *n* floats, padded with zeros (a per-node
+    quantity a unit does not have at the missing nodes)."""
+    out = [float(v) for v in (arr or [])]
+    return out + [0.0] * (n - len(out))
+
+
+# rooftex's initial adoption fraction of a node without one
+_ROOFTEX_DEFAULT_INITIAL_ADOPTION = 0.05
+
+
+def _per_node_list(arr, n: int, default=0.0) -> list:
+    """A per-node list of length *n*: a single value is broadcast, a short
+    list is padded with its last value."""
+    if not arr:
+        return [default] * n
+    if len(arr) >= n:
+        return list(arr[:n])
+    if len(arr) == 1:
+        return [arr[0]] * n
+    return list(arr) + [arr[-1]] * (n - len(arr))
+
+
+def _node_values_on_buses(arr, num_buses: int, bus_to_node, default=0.0) -> list:
+    """A candidate technology's per-node list laid out on the *num_buses*
+    buses of a unit built from it: each bus gets its parent node's value
+    (``bus_to_node[b]``; *default* past the list). Without a node-to-bus
+    mapping the buses are the nodes, in order. A single value is broadcast.
+
+    The list is per node whatever its length: a merged system pads it to
+    every system's nodes (zero at the other systems'), and a network can
+    have fewer buses than nodes, so a list at least as long as the bus list
+    is not per bus. Reading its first *num_buses* entries, or broadcasting
+    the first one, gave the buses another node's value (another system's
+    padding zero: no maintenance or throughput cost)."""
+    if not arr:
+        return [default] * num_buses
+    if len(arr) == 1:
+        return [arr[0]] * num_buses
+    if bus_to_node is None:
+        return (list(arr[:num_buses]) if len(arr) >= num_buses
+                else [arr[0]] * num_buses)
+    return [arr[node] if 0 <= node < len(arr) else default
+            for node in bus_to_node[:num_buses]]
+
+
+def _unit_node_span(offsets: dict, unit_key: str, num_nodes: int) -> tuple[str, int, int]:
+    """``(system, first node, node count)`` of a merged unit key.
+
+    Merged keys are ``{system}__{key}``: the unit's per-node data are its
+    own system's, at that system's offset in the merged node set. A key
+    of no listed system (or no *offsets*) spans all nodes.
+    """
+    names = list(offsets)
+    offs = list(offsets.values())
+    for i, sname in enumerate(names):
+        if str(unit_key).startswith(f"{sname}__"):
+            end = offs[i + 1] if i + 1 < len(offs) else num_nodes
+            return sname, offs[i], end - offs[i]
+    return "", 0, num_nodes
+
+
+def _system_profile_loader(offsets: dict, num_nodes: int, read, fill: float):
+    """``load(key, file) -> [hours x num_nodes]`` for per-node unit profiles.
+
+    A profile file holds one column per node of the unit's own system
+    (*read(node count)*); it was read as if it covered the merged
+    node set, so a second system's units got the first system's columns.
+    Each system's read is placed at its own nodes. Units of different
+    systems sharing a file get one array with each system's columns at
+    its nodes (a unit has capacity only at its own system's nodes);
+    columns no system has read hold *fill*.
+    """
+    merged: dict[str, np.ndarray] = {}
+    placed: set = set()
+
+    def load(unit_key: str, file_key: str) -> np.ndarray:
+        sname, off, cnt = _unit_node_span(offsets, unit_key, num_nodes)
+        arr = merged.get(file_key)
+        if (file_key, sname) not in placed:
+            prof = np.asarray(read(cnt), dtype=float)
+            if prof.ndim == 1:
+                prof = prof[:, None]
+            if arr is None:
+                arr = np.full((prof.shape[0], num_nodes), fill, dtype=float)
+                merged[file_key] = arr
+            rows = np.arange(arr.shape[0]) % prof.shape[0]
+            arr[:, off:off + cnt] = prof[rows, :cnt]
+            placed.add((file_key, sname))
+        return arr
+
+    return load
 
 
 class Orchestrator:
@@ -164,8 +981,8 @@ class Orchestrator:
     def __init__(
         self,
         config: ESFEXConfig,
-        output_dir: Optional[Path] = None,
-        config_path: Optional[Path] = None,
+        output_dir: Optional[Union[str, Path]] = None,
+        config_path: Optional[Union[str, Path]] = None,
     ):
         """
         Initialize the orchestrator.
@@ -198,21 +1015,52 @@ class Orchestrator:
         # Initialize state
         self.state: Optional[SimulationState] = None
         self.results: list[YearResults] = []
+        # Line-loss repair bounds of the master solve, per planned year
+        self._master_loss_repair: dict[int, dict] = {}
+        self.master_solution: Optional[dict] = None  # set by run(master_only=True)
+        # Myopic runs: {year: {"objective", "earlier_annuities", "total"}} ($)
+        self.myopic_year_costs: dict = {}
+        # Binding constraints, duals and paid slacks of each master solve
+        # ({"year_{YYYY}" | "all": group}, esfex.io.master_diagnostics)
+        self.master_diagnostics: dict[str, dict] = {}
 
         logger.debug(f"Orchestrator initialized for system: {self.system_name}")
         logger.debug(f"Mode: {config.simulation_mode}")
         logger.debug(f"Solver: {config.solver.name}")
 
+        # What a myopic run's checkpoint identifies the case by (hash of the
+        # configuration and its input files), taken before the plugins
+        # adjust the configuration, as `esfex run --dry-run --resume` sees it
+        self._case_fingerprint: Optional[dict] = None
+        if (config.simulation_mode == "development"
+                and getattr(config.master_problem, "planning_mode", None) == "myopic"):
+            from esfex.io.checkpoint import fingerprint
+
+            try:
+                self._case_fingerprint = fingerprint(config, self.config_path)
+            except Exception as e:  # never fail a run over its checkpoint
+                logger.warning(f"This run writes no checkpoint and cannot be resumed: "
+                               f"fingerprinting the case failed ({type(e).__name__}: {e})")
+
         # Plugin manager (runtime overlays — never modifies core source)
         from esfex.plugins import get_plugin_manager
         self._pm = get_plugin_manager()
-        self._pm.load_all(config, gui_mode=False, project_dir=config_path.parent if config_path else None)
+        self._pm.load_all(config, gui_mode=False, project_dir=self.config_path.parent if self.config_path else None)
+        plugin_errors = self._pm.apply_config(config)
+        if plugin_errors:
+            raise ValueError(
+                "Invalid plugin configuration:\n  " + "\n  ".join(plugin_errors))
         self._pm.register_julia_modules()
 
         # Progress tracking
         self._progress: Optional[Progress] = None
         self._year_task = None
         self._window_task = None
+
+        # Existing units the NPV-based retirement retired (npv_retirement):
+        # dicts with kind, key, name, bus, node, npv ($), iteration, year,
+        # index, capacity_mw and share (see _record_npv_retirements)
+        self._npv_retirements: list[dict] = []
 
     def _setup_logging(self):
         """Attach the run's file handler and ensure a console handler exists.
@@ -255,9 +1103,14 @@ class Orchestrator:
         batteries / technologies from system *A* have zero entries at
         positions that belong to system *B*, and vice-versa.
 
-        Inter-system links (``config.meta_network.systems_links``) are
-        injected into the merged adjacency matrix so the optimiser
-        "sees" them as regular transmission lines.
+        Inter-system links (``config.meta_network.systems_links``) of
+        type ``transmission`` are injected into the merged adjacency
+        matrix so the optimiser "sees" them as regular transmission lines;
+        ``fuel_route`` links become primary-energy transport routes
+        (``fuel_transport_routes``) between the two systems' nodes.
+
+        Each system keeps its own CO2 budget and violation penalty over
+        its own nodes (``co2_budget_by_system``).
 
         Returns
         -------
@@ -274,6 +1127,7 @@ class Orchestrator:
         from esfex.config.schema import (
             SystemConfig, NodeConfig, TechnologyConfig,
             BatteryTechnologyConfig, GeneratorConfig, BatteryConfig,
+            CO2BudgetConfig, SystemCO2Budget,
         )
 
         sys_names = list(config.meta_network.systems)
@@ -324,8 +1178,13 @@ class Orchestrator:
                 for j in range(nc):
                     merged_adj[(off + i) * total_nodes + (off + j)] = src[i * nc + j]
 
+        # Electrical inter-system links. Fuel-route links carry fuel, not
+        # power: they become primary-energy routes further down.
+        electrical_links = [lk for lk in config.meta_network.systems_links
+                            if lk.link_type == "transmission"]
+
         # Inject inter-system links
-        for link in config.meta_network.systems_links:
+        for link in electrical_links:
             if len(link.systems) < 2:
                 continue
             sa, sb = link.systems[0], link.systems[1]
@@ -359,7 +1218,7 @@ class Orchestrator:
         trans_inv_max = _concat_node_list("transference_invest_max")
 
         # Inject inter-system link investment data (per-node: set at both endpoints)
-        for link in config.meta_network.systems_links:
+        for link in electrical_links:
             if len(link.systems) < 2:
                 continue
             sa, sb = link.systems[0], link.systems[1]
@@ -448,7 +1307,10 @@ class Orchestrator:
                     alias = field_info.alias or field_name
                     val = d.get(alias, d.get(field_name))
                     if isinstance(val, list) and len(val) in (1, node_counts[si]):
-                        if field_name in ("life_time", "initial_age", "min_up", "min_down"):
+                        if field_name == "num_units":
+                            # At least one unit everywhere (no capacity there)
+                            d[alias if alias in d else field_name] = _pad_int(val, si, 1)
+                        elif field_name in ("life_time", "initial_age", "min_up", "min_down"):
                             d[alias if alias in d else field_name] = _pad_int(val, si)
                         else:
                             d[alias if alias in d else field_name] = _pad(val, si)
@@ -557,7 +1419,29 @@ class Orchestrator:
         for sys in systems:
             merged_fuels.update(sys.fuels)
 
+        # CO2 budget: each system keeps its own budget and violation
+        # penalty over its own nodes (the dispatch adds one constraint per
+        # system). The merged ``co2_budget`` is only their total, for display.
+        co2_by_system: list = []
+        if len(systems) > 1:
+            for sname, sys, nc in zip(sys_names, systems, node_counts):
+                co2_by_system.append(SystemCO2Budget(
+                    system=sname,
+                    first_node=offsets[sname],
+                    num_nodes=nc,
+                    enabled=sys.co2_budget.enabled,
+                    annual_budget=sys.co2_budget.annual_budget,
+                    violation_penalty=sys.penalties.co2_budget_violation,
+                ))
+            merged_co2_budget = CO2BudgetConfig(
+                enabled=any(b.enabled for b in co2_by_system),
+                annual_budget=sum(b.annual_budget for b in co2_by_system if b.enabled),
+            )
+        else:
+            merged_co2_budget = base.co2_budget
+
         # Merge penalties: take max of each penalty across systems
+        # (co2_budget_violation is applied per system, see above)
         merged_penalties_d = base.penalties.model_dump()
         for sys in systems[1:]:
             pd2 = sys.penalties.model_dump()
@@ -565,46 +1449,61 @@ class Orchestrator:
                 if isinstance(v, (int, float)) and v > merged_penalties_d.get(k, 0):
                     merged_penalties_d[k] = v
 
-        # Merge EV / rooftop arrays (concat per-node)
+        # Merge EV / rooftop arrays (concat per-node). A rooftop potential
+        # a system leaves unset is None (rooftex's potential at that node);
+        # a system without rooftop solar gets 0 at its nodes.
         merged_ev_soc: list[float] = []
-        merged_rooftop_potential: list[float] = []
+        merged_rooftop_potential: list[Optional[float]] = []
         for si, (sys, nc) in enumerate(zip(systems, node_counts)):
             soc = sys.ev_initial_soc or []
-            merged_ev_soc.extend(soc[:nc] if len(soc) >= nc else soc + [0.5] * (nc - len(soc)))
-            rp = sys.rooftop_max_potential or []
-            merged_rooftop_potential.extend(rp[:nc] if len(rp) >= nc else rp + [0.0] * (nc - len(rp)))
+            # Nodes without a value start at the dispatch default (80 %)
+            merged_ev_soc.extend(soc[:nc] if len(soc) >= nc else soc + [0.8] * (nc - len(soc)))
+            if not (sys.sim_rooftop and sys.rooftop_solar_config is not None):
+                merged_rooftop_potential.extend([0.0] * nc)
+                continue
+            rp = list(sys.rooftop_max_potential or [])[:nc]
+            merged_rooftop_potential.extend(rp + [None] * (nc - len(rp)))
+        if all(v is None for v in merged_rooftop_potential):
+            merged_rooftop_potential = []
 
         # Merge rooftop_solar_config: take the first non-empty config as the
-        # template and concat per-node arrays across systems (zeros padding).
+        # template and concat per-node arrays across systems. A system that
+        # leaves a list unset gets None at its nodes, which the rooftop
+        # generator resolves to rooftex's defaults; a list no system sets
+        # stays unset.
         merged_rooftop_solar_config = None
         rooftop_template = next((s.rooftop_solar_config for s in systems
                                  if s.rooftop_solar_config is not None), None)
         if rooftop_template is not None:
             rsc_d = rooftop_template.model_dump()
             for list_field in ('systems_per_node', 'avg_system_size', 'initial_adoption'):
+                if not any(getattr(s.rooftop_solar_config, list_field, None)
+                           for s in systems if s.rooftop_solar_config is not None):
+                    rsc_d[list_field] = None
+                    continue
                 merged_list: list = []
                 for sys, nc in zip(systems, node_counts):
                     src_cfg = sys.rooftop_solar_config
-                    src_list = list(getattr(src_cfg, list_field, []) or []) if src_cfg else []
-                    if len(src_list) >= nc:
-                        merged_list.extend(src_list[:nc])
-                    else:
-                        zero = 0 if list_field == 'systems_per_node' else 0.0
-                        merged_list.extend(src_list + [zero] * (nc - len(src_list)))
+                    src_list = list(getattr(src_cfg, list_field, []) or [])[:nc] if src_cfg else []
+                    # A short list repeats its last value, as rooftex does
+                    pad = src_list[-1] if src_list else None
+                    merged_list.extend(src_list + [pad] * (nc - len(src_list)))
                 rsc_d[list_field] = merged_list
-            # Re-key per-node dicts (max_adoption, adoption_rates) by global node idx
+            # max_adoption / adoption_rates are keyed by adoption scenario
+            # ("low", "medium", "high"), not by node: the merged run has one
+            # rooftop configuration, so the first system that sets one wins.
             for dict_field in ('max_adoption', 'adoption_rates'):
-                merged_dict: dict = {}
-                for sname, sys in zip(sys_names, systems):
-                    src_cfg = sys.rooftop_solar_config
-                    src_dict = getattr(src_cfg, dict_field, {}) or {} if src_cfg else {}
-                    for k, v in src_dict.items():
-                        try:
-                            local_idx = int(k)
-                        except (TypeError, ValueError):
-                            continue
-                        merged_dict[str(offsets[sname] + local_idx)] = float(v)
-                rsc_d[dict_field] = merged_dict
+                set_by = [(sname, dict(getattr(sys.rooftop_solar_config, dict_field)))
+                          for sname, sys in zip(sys_names, systems)
+                          if sys.rooftop_solar_config is not None
+                          and getattr(sys.rooftop_solar_config, dict_field, None)]
+                rsc_d[dict_field] = set_by[0][1] if set_by else None
+                ignored = [sname for sname, d in set_by[1:] if d != set_by[0][1]]
+                if ignored:
+                    logger.warning(
+                        f"rooftop_solar_config.{dict_field} differs between systems; "
+                        f"the merged run uses {set_by[0][0]!r}'s and ignores "
+                        f"{', '.join(repr(s) for s in ignored)}'s")
             merged_rooftop_solar_config = rooftop_template.__class__(**rsc_d)
 
         # Merge EV categories / quantities (pad per-node arrays)
@@ -679,7 +1578,8 @@ class Orchestrator:
         first_bus_of_node: dict[int, int] = {}
         for bus_idx, bus in enumerate(merged_buses):
             first_bus_of_node.setdefault(bus.parent_node, bus_idx)
-        for link in config.meta_network.systems_links:
+        link_line_ids: set[str] = set()
+        for link in electrical_links:
             if len(link.systems) < 2:
                 continue
             sa, sb = link.systems[0], link.systems[1]
@@ -689,14 +1589,22 @@ class Orchestrator:
             for idx, (na, nb) in enumerate(link.connections):
                 cap = link.existing_capacity_mw[idx] if idx < len(link.existing_capacity_mw) else 0.0
                 dist = link.distance_km[idx] if idx < len(link.distance_km) else 0.0
+                cost_km = link.cost_per_mw_km[idx] if idx < len(link.cost_per_mw_km) else 0.0
                 x_pu = link.reactance_pu[idx] if idx < len(link.reactance_pu) else None
                 r_pu = link.resistance_pu[idx] if idx < len(link.resistance_pu) else None
                 global_node_a = off_a + na
                 global_node_b = off_b + nb
                 from_bus_idx = first_bus_of_node.get(global_node_a)
                 to_bus_idx = first_bus_of_node.get(global_node_b)
+                # Several links between the same two systems each restart idx
+                line_id = f"link_{sa}_{sb}_{idx}"
+                k = 2
+                while line_id in link_line_ids:
+                    line_id = f"link_{sa}_{sb}_{idx}_{k}"
+                    k += 1
+                link_line_ids.add(line_id)
                 merged_lines_geo.append(TransmissionLineGeo(
-                    line_id=f"link_{sa}_{sb}_{idx}",
+                    line_id=line_id,
                     from_node=global_node_a,
                     to_node=global_node_b,
                     from_bus=from_bus_idx,
@@ -705,7 +1613,44 @@ class Orchestrator:
                     length_km=dist,
                     reactance_pu=x_pu,
                     resistance_pu=r_pu,
+                    # The link's flow cost (length × cost per MWh), as in the master
+                    cost_per_mw_km=max(0.0, float(cost_km)),
                 ))
+
+        # A system without per-line data is wired by its nodes_connections.
+        # Once the merged network has any line, the dispatch builds its
+        # network from lines only, so turn those connections into lines
+        # (same reactance and R/X ratio the adjacency fallback uses).
+        if merged_lines_geo:
+            dc = base.dc_power_flow
+            s_base = system_s_base(base)
+            r_to_x = getattr(dc, 'default_r_to_x_ratio', 0.1)
+            for sname, sys, nc in zip(sys_names, systems, node_counts):
+                if sys.transmission_lines_geo:
+                    continue
+                off = offsets[sname]
+                conn = sys.nodes.nodes_connections
+                dist = sys.fuel_transport_distances or []
+                for i in range(nc):
+                    for j in range(i + 1, nc):
+                        cap = max(conn[i * nc + j], conn[j * nc + i])
+                        fb = first_bus_of_node.get(off + i)
+                        tb = first_bus_of_node.get(off + j)
+                        if cap <= 0 or fb is None or tb is None:
+                            continue
+                        d = float(dist[i][j]) if i < len(dist) and j < len(dist[i]) else 0.0
+                        x = derived_reactance_pu(d, None, dc, s_base)
+                        merged_lines_geo.append(TransmissionLineGeo(
+                            line_id=f"{sname}_node_link_{i}_{j}",
+                            from_node=off + i,
+                            to_node=off + j,
+                            from_bus=fb,
+                            to_bus=tb,
+                            capacity_mw=cap,
+                            length_km=d,
+                            reactance_pu=x,
+                            resistance_pu=x * r_to_x,
+                        ))
 
         merged_transformers: list[TransformerConfig] = []
         for sname, sys, nc in zip(sys_names, systems, node_counts):
@@ -801,6 +1746,192 @@ class Orchestrator:
             transport_pipelines=merged_pipelines,
         )
 
+        # --- 9d. Remaining system-level settings -----------------------------
+        # Everything here used to fall back to schema defaults in the merged
+        # config, so any run with more than one node silently lost converters,
+        # electrolyzers, fuel sources, custom constraints, scheduled
+        # interruptions and the frequency / reserve / storage scalars. Node and
+        # bus indices are shifted like the buses above; equipment keys follow
+        # the merged ``{system}__{key}`` scheme of generators and batteries.
+        from esfex.config.schema import ElectrolyzerConfig, PrimaryEnergySourceConfig
+
+        # Scalars: first system wins, as for discount_rate & co. below.
+        # frequency_nominal / frequency_nadir_limit / rocof_limit /
+        # load_damping are not read by the dispatch or the master; the
+        # frequency analysis (SLD gauge, Analysis panel) takes them from each
+        # system's own config, so a 50 Hz + 60 Hz merge keeps both.
+        base_scalars = {f: getattr(base, f) for f in (
+            "frequency_nominal", "frequency_nadir_limit", "rocof_limit",
+            "load_damping", "reserve_margin", "reserve_static_default_ratio",
+            "dynamic_reserve_contribution", "soc_end_tolerance",
+            "min_cycling_ratio", "min_cycling_period_days",
+            "demand_shift_cost_rate",
+            "npv_annual_return_rate", "npv_retirement",
+            "npv_retirement_max_iterations", "npv_retirement_threshold",
+        )}
+
+        def _shift_ends(obj, node_off: int, bus_off: int):
+            upd = {"from_node": obj.from_node + node_off,
+                   "to_node": obj.to_node + node_off}
+            for k in ("from_bus", "to_bus"):
+                v = getattr(obj, k)
+                upd[k] = v + bus_off if v is not None else None
+            return obj.model_copy(update=upd)
+
+        merged_acdc: list = []
+        merged_freq: list = []
+        for sname, sys in zip(sys_names, systems):
+            node_off, bus_off = offsets[sname], bus_offsets[sname]
+            merged_acdc.extend(_shift_ends(c, node_off, bus_off)
+                               for c in (sys.acdc_converters or []))
+            merged_freq.extend(_shift_ends(c, node_off, bus_off)
+                               for c in (sys.freq_converters or []))
+
+        def _pad_node_lists(obj, model, si: int):
+            """Copy of *obj* with every per-node list placed at system *si*."""
+            upd = {}
+            for f in model.model_fields:
+                val = getattr(obj, f)
+                if isinstance(val, list) and len(val) in (1, node_counts[si]):
+                    is_int = f in ("life_time", "initial_age")
+                    upd[f] = _pad_int(val, si) if is_int else _pad(val, si)
+            return obj.model_copy(update=upd)
+
+        merged_electrolyzers: dict[str, ElectrolyzerConfig] = {}
+        for si, (sname, sys) in enumerate(zip(sys_names, systems)):
+            for ekey, elz in (sys.electrolyzers or {}).items():
+                merged_electrolyzers[f"{sname}__{ekey}"] = _pad_node_lists(
+                    elz, ElectrolyzerConfig, si)
+
+        # Fuel sources are keyed by fuel, so systems sharing a fuel fill their
+        # own node range of one entry; scalar fields come from the first.
+        _pe_node_fields = ("max_availability", "import_cost",
+                           "storage_capacity", "initial_storage_level")
+        merged_pe: dict[str, PrimaryEnergySourceConfig] = {}
+        for si, (sname, sys) in enumerate(zip(sys_names, systems)):
+            off, nc = offsets[sname], node_counts[si]
+            for fuel, pe in (sys.primary_energy_sources or {}).items():
+                if fuel not in merged_pe:
+                    merged_pe[fuel] = pe.model_copy(update={
+                        f: [0.0] * total_nodes for f in _pe_node_fields})
+                for f in _pe_node_fields:
+                    padded = _pad(list(getattr(pe, f)), si)
+                    getattr(merged_pe[fuel], f)[off:off + nc] = padded[off:off + nc]
+
+        merged_ftd: list[list[float]] = []
+        if any(s.fuel_transport_distances for s in systems):
+            merged_ftd = [[0.0] * total_nodes for _ in range(total_nodes)]
+            for sname, sys, nc in zip(sys_names, systems, node_counts):
+                off = offsets[sname]
+                for i, row in enumerate((sys.fuel_transport_distances or [])[:nc]):
+                    for j, v in enumerate(row[:nc]):
+                        merged_ftd[off + i][off + j] = float(v)
+
+        merged_routes: list[dict] = []
+        for sname, sys in zip(sys_names, systems):
+            off = offsets[sname]
+            for route in (sys.fuel_transport_routes or []):
+                r = dict(route)
+                for k in ("from_node", "to_node"):
+                    if r.get(k) is not None:
+                        r[k] = int(r[k]) + off
+                merged_routes.append(r)
+        merged_routes.extend(_fuel_link_routes(config.meta_network.systems_links, offsets))
+
+        merged_conv_techs: dict = {}
+        merged_seasonal: dict = {}
+        merged_gui_techs: dict = {}
+        for sname, sys in zip(sys_names, systems):
+            for ckey, ct in (sys.conversion_technologies or {}).items():
+                merged_conv_techs[ckey] = ct.model_copy(update={"units": {
+                    f"{sname}__{u}": frac for u, frac in ct.units.items()}})
+            merged_seasonal.update(sys.seasonal_factors or {})
+            merged_gui_techs.update(sys.gui_technologies or {})
+
+        # Custom constraints name equipment by key and address buses, nodes
+        # and lines by integer index; both must follow the merge. Index
+        # positions per variable mirror ``resolve_term`` in user_constraints.jl.
+        _cc_name_axes = {
+            "gen_output": {0}, "bat_charge": {0}, "bat_discharge": {0},
+            "bat_soc": {0}, "tech_investment": {1},
+            "bat_tech_power_investment": {1},
+            "bat_tech_capacity_investment": {1},
+        }
+        _cc_node_axes = {
+            "curtailment": {0}, "tech_investment": {2},
+            "bat_tech_power_investment": {2},
+            "bat_tech_capacity_investment": {2},
+            "transfer_investment": {1, 2},
+        }
+        _cc_bus_axes = {"load_shed": {0}, "power_flow": {0, 1}}
+
+        def _remap_term(term, sname: str):
+            index = []
+            for pos, entry in enumerate(term.index):
+                if entry == "all" or entry == -1:
+                    index.append(entry)
+                elif pos in _cc_name_axes.get(term.variable, ()):
+                    index.append(f"{sname}__{entry}")
+                elif pos in _cc_node_axes.get(term.variable, ()):
+                    index.append(int(entry) + offsets[sname])
+                elif pos in _cc_bus_axes.get(term.variable, ()):
+                    index.append(int(entry) + bus_offsets[sname])
+                else:
+                    index.append(entry)
+            return term.model_copy(update={"index": index})
+
+        merged_custom: list = []
+        for sname, sys in zip(sys_names, systems):
+            for cc in (sys.custom_constraints or []):
+                merged_custom.append(cc.model_copy(update={
+                    "name": f"{sname}__{cc.name}" if multi_sys else cc.name,
+                    "terms": [_remap_term(t, sname) for t in cc.terms],
+                }))
+
+        # Interruptions address generators, batteries and electrolyzers by
+        # key (renamed above), lines / transformers / converters / fuel routes
+        # by their own id (kept) and fuel tanks by fuel and node: a tank
+        # window without a node covers only its own system's nodes.
+        _outage_keyed = {"generator", "battery", "electrolyzer"}
+        merged_outages: list = []
+        for sname, sys, nc in zip(sys_names, systems, node_counts):
+            off = offsets[sname]
+            for ow in (sys.outage_schedule or []):
+                if ow.element_type in _outage_keyed:
+                    ow = ow.model_copy(update={
+                        "element_id": f"{sname}__{ow.element_id}",
+                        "node": None if ow.node is None else ow.node + off})
+                elif ow.element_type == "fuel_storage":
+                    nodes = range(nc) if ow.node is None else [ow.node]
+                    merged_outages.extend(ow.model_copy(update={"node": n + off})
+                                          for n in nodes)
+                    continue
+                merged_outages.append(ow)
+
+        # Development zones: technology and unit keys follow the merged
+        # ``{system}__{key}`` scheme; a target bus is shifted like the buses.
+        merged_zones: list = []
+        for sname, sys in zip(sys_names, systems):
+            for zone in (sys.development_zones or []):
+                tb = zone.target_bus
+                if tb is not None:
+                    if sys.buses:
+                        tb = tb + bus_offsets[sname]
+                    elif not merged_buses:
+                        tb = tb + offsets[sname]   # one implicit bus per node
+                    else:
+                        tb = None
+                merged_zones.append(zone.model_copy(update={
+                    "name": f"{sname}__{zone.name}" if multi_sys else zone.name,
+                    "target_bus": tb,
+                    "allowed_generators": (
+                        [f"{sname}__{k}" for k in zone.allowed_generators]
+                        if zone.allowed_generators is not None else None),
+                    "allowed_technologies": (
+                        {f"{sname}__{k}": v for k, v in zone.allowed_technologies.items()}
+                        if zone.allowed_technologies is not None else None),
+                }))
+
         # --- 10. Build merged SystemConfigs --------------------------------
         # Common kwargs shared by both master (node-level) and operational
         # (bus-level) versions of the merged config.
@@ -808,16 +1939,14 @@ class Orchestrator:
             name="_".join(sys_names),
             demand_path=None,
             demand_scale=1.0,
-            loss_demand_threshold=max(s.loss_demand_threshold for s in systems),
             life_extension_cost_factor=base.life_extension_cost_factor,
             sim_rooftop=any(s.sim_rooftop for s in systems),
             target_re_penetration=min(s.target_re_penetration for s in systems),
             min_annual_increment=min(s.min_annual_increment for s in systems),
             max_annual_increment=max(s.max_annual_increment for s in systems),
-            max_annual_system_cost=sum(s.max_annual_system_cost for s in systems),
-            max_npv_penalty_per_mw=base.max_npv_penalty_per_mw,
-            max_decommission_cost_per_mw=base.max_decommission_cost_per_mw,
-            force_replacement=base.force_replacement,
+            max_annual_investment=sum(s.max_annual_investment for s in systems),
+            max_annual_operating_cost=_merged_operating_budget(systems),
+            budget_scope=_merged_budget_scope(systems),
             discount_rate=base.discount_rate,
             base_lcoe=base.base_lcoe,
             inertia_limit_threshold=base.inertia_limit_threshold,
@@ -831,7 +1960,8 @@ class Orchestrator:
             battery_technologies=merged_bat_techs,
             fuels=merged_fuels,
             penalties=base.penalties.__class__(**merged_penalties_d),
-            co2_budget=base.co2_budget,
+            co2_budget=merged_co2_budget,
+            co2_budget_by_system=co2_by_system,
             criticality_penalties=base.criticality_penalties,
             ev_initial_soc=merged_ev_soc,
             ev_categories=merged_ev_categories,
@@ -847,13 +1977,31 @@ class Orchestrator:
             fuel_infrastructure=merged_fuel_infra,
             non_electric_demand=merged_ne_demand,
             non_electric_demand_growth=merged_ne_growth,
+            acdc_converters=merged_acdc,
+            freq_converters=merged_freq,
+            electrolyzers=merged_electrolyzers,
+            primary_energy_sources=merged_pe,
+            fuel_transport_distances=merged_ftd,
+            fuel_transport_routes=merged_routes,
+            conversion_technologies=merged_conv_techs,
+            seasonal_factors=merged_seasonal,
+            custom_constraints=merged_custom,
+            outage_schedule=merged_outages,
+            development_zones=merged_zones,
+            **base_scalars,
         )
 
         # Master problem config: node-level network from adjacency matrix.
         # Generate synthetic transmission lines so the master problem DC-OPF
         # can transfer power between nodes (without this, each node is isolated
         # and load shedding dominates the objective).
+        # Each link carries the equivalent impedance of the bus-level lines it
+        # stands for, so the master's flow split and losses (loss_model)
+        # follow the network the dispatch sees.
         master_lines: list[TransmissionLineGeo] = []
+        link_z = _node_link_impedances(merged_lines_geo, merged_buses, base.dc_power_flow,
+                                       system_s_base(base), merged_transformers)
+        link_flow_cost = _link_flow_costs(electrical_links, offsets)
         line_idx = 0
         for i in range(total_nodes):
             for j in range(i + 1, total_nodes):
@@ -871,11 +2019,22 @@ class Orchestrator:
                         from_bus=i,
                         to_bus=j,
                         capacity_mw=cap,
+                        resistance_pu=link_z[(i, j)][0] if (i, j) in link_z else None,
+                        reactance_pu=link_z[(i, j)][1] if (i, j) in link_z else None,
+                        # Inter-system link: its flow cost per MWh
+                        **link_flow_cost.get((i, j), {}),
                     ))
                     line_idx += 1
 
-        merged_master = SystemConfig(**common_kwargs,
-            transmission_lines_geo=master_lines if master_lines else None,
+        # The master has one bus per node: a converter joins its nodes, not
+        # the dispatch-network buses
+        def _node_ends(convs):
+            return [c.model_copy(update={"from_bus": None, "to_bus": None}) for c in convs]
+
+        merged_master = SystemConfig(**{**common_kwargs,
+            "acdc_converters": _node_ends(merged_acdc),
+            "freq_converters": _node_ends(merged_freq)},
+            transmission_lines_geo=master_lines,
         )
 
         # Operational config: full bus-level network for DC-OPF
@@ -888,6 +2047,11 @@ class Orchestrator:
         # Physical bus assignment data (geographic snap source).  Set
         # post-construction to bypass the ``_gui_layout`` pydantic alias.
         merged_operational.gui_layout = merged_gui_layout
+        # Studio technology catalog: the fuel-cost fallback of the derived
+        # metrics reads it. Same alias workaround (``_technologies``).
+        if merged_gui_techs:
+            merged_master.gui_technologies = merged_gui_techs
+            merged_operational.gui_technologies = merged_gui_techs
 
         logger.info(
             f"Merged system: {total_nodes} nodes, "
@@ -903,7 +2067,11 @@ class Orchestrator:
     def run(
         self,
         years: Optional[int] = None,
-        start_year: int = 2025,
+        start_year: Optional[int] = None,
+        master_only: bool = False,
+        dispatch_years: Optional[Iterable[int]] = None,
+        resume_from: Optional[Union[str, Path]] = None,
+        force_resume: bool = False,
     ) -> list[YearResults]:
         """
         Run the full simulation.
@@ -913,27 +2081,169 @@ class Orchestrator:
         2. STEP 2: Run operational subproblems year-by-year using MasterProblem decisions
 
         Args:
-            years: Number of years to simulate (default: 25)
-            start_year: First year of simulation
+            years: Number of years to simulate (default: ``DEFAULT_RUN_YEARS`` = 25)
+            start_year: Label of the first simulated year. Default: the
+                year of ``date_start``. When given, the date labels start
+                on ``date_start``'s day and time in this year. It only
+                relabels: the data are still read from the first row, and
+                the Feb 29 rows dropped are those of the data's own calendar
+                (``date_start``).
+            master_only: Stop after step 1 (development mode only). The
+                decisions are left in ``self.master_solution`` and no year
+                results are returned.
+            dispatch_years: Run the operational dispatch only for these years
+                of the horizon (labels); the others are skipped, while every
+                year keeps its own data block (year index x 8760 h) and the
+                master problem still plans the whole horizon. In
+                ``unit_commitment`` mode the first of them is dispatched
+                instead of the first horizon year. Default: every year (or
+                the ``ESFEX_OPS_ONLY_YEARS`` environment variable).
+            resume_from: Results file of an interrupted myopic development
+                run to continue (:mod:`esfex.io.checkpoint`): the run starts
+                at the first year its checkpoint does not list as completed,
+                with the years, start year and dispatch years of that run,
+                and appends to that file. *years* and *start_year* may be
+                left out (given, they must match).
+            force_resume: Resume although the case, its input files or the
+                ESFEX version changed since the checkpoint was written (each
+                difference is logged as a warning).
 
         Returns:
-            List of YearResults for each simulated year
+            List of YearResults for each simulated year (resumed: the years
+            this call solved)
+
+        Raises:
+            RunAbortedError: the master problem (development mode) found no
+                plan, so nothing was dispatched.
+            esfex.io.checkpoint.ResumeError: *resume_from* cannot be resumed
+                (its ``errors`` say why); nothing was run or written.
+
+        The WARNING and ERROR records logged meanwhile (Julia's ``@warn``
+        included) are grouped by kind: at the end, also after a failure,
+        a summary is logged, kept in ``self.warnings_summary``
+        (:class:`esfex.api.diagnostics.WarningsSummary`) and written to
+        ``/diagnostics/warnings`` of the results file. A resumed run adds
+        its records to those of the run it resumes.
+
+        A myopic development run writes a checkpoint next to its results
+        file after every master year and every dispatched year (see
+        :mod:`esfex.io.checkpoint`), so it can be resumed.
         """
-        years = years or 25
+        from esfex.api.diagnostics import collect_warnings
+
+        self._hdf5_path = None
+        self.warnings_summary = None
+        self.resume_plan = None
+        with collect_warnings() as collector:
+            try:
+                if resume_from is not None:
+                    if master_only or dispatch_years is not None:
+                        raise ValueError("resume_from cannot be combined with master_only "
+                                         "or dispatch_years: the resumed run keeps its own")
+                    self.resume_plan = self._check_resume(
+                        resume_from, years, start_year, force_resume)
+                    collector.merge(self.resume_plan.doc.get("warnings"))
+                return self._run(years=years, start_year=start_year,
+                                 master_only=master_only, dispatch_years=dispatch_years)
+            finally:
+                self._finish_warnings(collector)
+
+    def _check_resume(self, results, years, start_year, force: bool):
+        """The checked :class:`~esfex.io.checkpoint.ResumePlan` of *results*
+        (raises ``ResumeError``); a forced difference is logged loudly."""
+        from esfex.io.checkpoint import check_resume
+
+        plan = check_resume(results, self.config, self.config_path,
+                            years=years, start_year=start_year, force=force,
+                            case=self._case_fingerprint)
+        for change in plan.forced:
+            logger.warning(f"--force-resume: {change}. The years already solved keep the "
+                           "results of the case as it was; the rest use the case as it is now.")
+        at = (f"at {plan.resume_year}" if plan.resume_year is not None
+              else "to finish the file")
+        logger.info(f"Resuming {plan.results.name} {at} ({len(plan.master_years)} master "
+                    f"and {len(plan.dispatch_years)} dispatch years completed)",
+                    extra={"milestone": True})
+        return plan
+
+    def _finish_warnings(self, collector) -> None:
+        """The run's warnings: summary logged (a milestone, so the basic
+        console, which hides warnings, shows it), kept on
+        ``self.warnings_summary`` and written to the results file."""
+        from esfex.api.diagnostics import write_warnings
+
+        summary = collector.summary()
+        self.warnings_summary = summary
+        path = getattr(self, "_hdf5_path", None)
+        if path is not None and Path(path).exists():
+            try:
+                write_warnings(path, summary)
+            except Exception as exc:  # never fail a run over its diagnostics
+                logger.debug(f"Could not write /diagnostics/warnings to {path}: {exc}")
+        if summary.total:
+            logger.info(f"The run logged {summary.text()}", extra={"milestone": True})
+
+    def _run(
+        self,
+        years: Optional[int] = None,
+        start_year: Optional[int] = None,
+        master_only: bool = False,
+        dispatch_years: Optional[Iterable[int]] = None,
+    ) -> list[YearResults]:
+        """Body of :meth:`run`."""
+        if master_only and self.config.simulation_mode != "development":
+            raise ValueError(
+                "master_only needs simulation_mode 'development' "
+                f"(got {self.config.simulation_mode!r})")
+        self.master_solution = None
+        self.master_diagnostics = {}
+        reset_run_warnings()
+        plan = getattr(self, "resume_plan", None)
+        if plan is not None:
+            # The resumed run's own horizon and dispatch years
+            years = int(plan.doc["run"]["years"])
+            start_year = int(plan.doc["run"]["start_year"])
+            stored = plan.doc["run"].get("dispatch_years")
+            dispatch_years = stored if stored is not None else range(start_year, start_year + years)
+        years = years or DEFAULT_RUN_YEARS
+        self._start_date = self._resolve_start_date(start_year)
+        start_year = self._start_date.year
         end_year = start_year + years
         years_range = list(range(start_year, end_year))
 
+        # Years that run the operational dispatch (None: all of them).
+        if dispatch_years is not None:
+            ops_only = {int(y) for y in dispatch_years}
+        else:
+            env_years = os.environ.get("ESFEX_OPS_ONLY_YEARS", "").strip()
+            ops_only = ({int(y) for y in env_years.replace(",", " ").split() if y}
+                        if env_years else None)
+            if ops_only:
+                logger.warning(
+                    f"[DEBUG] ESFEX_OPS_ONLY_YEARS={sorted(ops_only)} "
+                    f"— skipping all other operational years")
+        if ops_only is not None:
+            unknown = sorted(ops_only - set(years_range))
+            if unknown or not ops_only:
+                raise ValueError(
+                    f"dispatch_years {unknown or '[]'} outside the horizon "
+                    f"{years_range[0]}-{years_range[-1]}")
+
         # unit_commitment mode is a single-shot dispatch over the first
-        # ``unit_commitment_hours`` hours starting at ``start_year``;
-        # iterating the full planning horizon would repeat the same
-        # short window N times. Cap years_range to one year here so the
-        # downstream year-by-year operational loop only runs once.
+        # ``unit_commitment_hours`` hours of one year; iterating the full
+        # planning horizon would repeat the same short window N times.
+        # Dispatch one year only: the first horizon year, or the first of
+        # ``dispatch_years`` (years before it keep their data blocks).
         # (development mode plans the whole horizon — unchanged.)
         if self.config.simulation_mode == "unit_commitment":
-            years_range = years_range[:1]
+            uc_year = min(ops_only) if ops_only else years_range[0]
+            years_range = years_range[:years_range.index(uc_year) + 1]
+            ops_only = {uc_year}
             end_year = years_range[-1] + 1
+        run_years = [y for y in years_range if ops_only is None or y in ops_only]
 
-        logger.info(f"Starting simulation: {start_year} to {end_year}")
+        logger.info(f"Starting simulation: {run_years[0]} to {run_years[-1] + 1}")
+        self._log_model_clock()
         start_time = time.time()
 
         # Plugin hook: pre_simulation
@@ -1031,18 +2341,33 @@ class Orchestrator:
         # fuel directly (no name-parsing). The config's ``technology``
         # field is unreliable here (orphan IDs like ``tech_5`` that don't
         # resolve in the ``technologies`` dict), so we rely on fuel only.
-        self._gen_names = [
+        self._gen_names = unique_unit_names([
             gen.name if hasattr(gen, 'name') else key
             for key, gen in self.primary_system.generators.items()
-        ]
+        ])
         self._gen_fuels = [
             (getattr(gen, 'fuel', None) or '') or ''
             for _, gen in self.primary_system.generators.items()
         ]
-        self._bat_names = [
+        # Renewable by the model's rule (type "Renewable"), stamped on each
+        # generation dataset as ``attrs["is_renewable"]`` for the RE share
+        self._gen_renewable = [
+            gen.type == "Renewable" for gen in self.primary_system.generators.values()
+        ]
+        # Committed in unit commitment (not a variable renewable everywhere):
+        # only these get gen_status / gen_startup datasets
+        self._gen_committed = [
+            is_committed_unit(gen.type, gen.fuel, getattr(gen, 'reservoir_capacity', None))
+            for gen in self.primary_system.generators.values()
+        ]
+        self._bat_names = unique_unit_names([
             bat.name if hasattr(bat, 'name') else key
             for key, bat in self.primary_system.batteries.items()
-        ]
+        ])
+        # MW in service per unit, set each year (see _rebuild_unit_names)
+        self._gen_in_service_mw = []
+        self._gen_num_units = []
+        self._bat_in_service_mw = []
 
         # Preload all availability profiles ONCE (cache for operational phase)
         self._availability_cache = self._preload_availability_profiles(num_nodes)
@@ -1050,9 +2375,15 @@ class Orchestrator:
         self._inflow_cache = self._preload_inflow_profiles(num_nodes)
         self._num_nodes = num_nodes
 
-        # Build bus-to-node mapping for aggregating bus-level results to node-level
+        # Build bus-to-node mapping for aggregating bus-level results to
+        # node-level. Needed whenever the bus list is not the identity mapping
+        # over nodes — including the FEWER-buses-than-nodes case a reduced
+        # network produces, which the old ``len(buses) > num_nodes`` test
+        # missed, leaving bus-indexed results exported as if node-indexed
+        # (the Result Viewer then read 289 buses as 289 hours ≈ 13 days).
+        from esfex.bridge.converters import node_bus_mapping_required
         sys_cfg = self.primary_system
-        if sys_cfg.buses and len(sys_cfg.buses) > num_nodes:
+        if sys_cfg.buses and node_bus_mapping_required(sys_cfg.buses, num_nodes):
             self._bus_to_node = [bus.parent_node for bus in sys_cfg.buses]
             self._num_buses = len(sys_cfg.buses)
         else:
@@ -1065,15 +2396,38 @@ class Orchestrator:
             expanded_sys, self._zone_mappings = expand_config_with_zones(
                 self.primary_system,
             )
-            # Replace primary system with expanded version
+            if self.master_system is self.primary_system:
+                self.master_system = expanded_sys
+            else:
+                # The master network is node-level (one bus per node), so a
+                # zone's target bus becomes that bus's node there. Zones get
+                # the same virtual node indices in both networks.
+                op_buses = self.primary_system.buses or []
+                master_zones = [
+                    z.model_copy(update={"target_bus": (
+                        op_buses[z.target_bus].parent_node
+                        if z.target_bus is not None and z.target_bus < len(op_buses)
+                        else None)})
+                    for z in self.primary_system.development_zones
+                ]
+                self.master_system, _ = expand_config_with_zones(
+                    self.master_system.model_copy(
+                        update={"development_zones": master_zones}),
+                )
             self.primary_system = expanded_sys
-            self.master_system = expanded_sys  # master also uses expanded zones
-            self.config.systems[0] = expanded_sys  # update config reference
 
             num_zone_nodes = len(self._zone_mappings)
             old_num_nodes = num_nodes
             num_nodes = expanded_sys.nodes.num_nodes
             self._num_nodes = num_nodes
+
+            # The zone buses join the bus list: refresh the bus → node map.
+            if expanded_sys.buses and node_bus_mapping_required(expanded_sys.buses, num_nodes):
+                self._bus_to_node = [bus.parent_node for bus in expanded_sys.buses]
+                self._num_buses = len(expanded_sys.buses)
+            else:
+                self._bus_to_node = None
+                self._num_buses = num_nodes
 
             # Expand demand arrays with zero columns for zone nodes
             zero_cols = np.zeros((total_demand.shape[0], num_zone_nodes))
@@ -1128,21 +2482,34 @@ class Orchestrator:
 
         # Initialize HDF5 output file
         # Build results filename: <config_stem>_<ddmmyyyy>_<HHMM>.h5
-        _cfg_stem = self.config_path.stem if self.config_path else self.system_name
-        _now = datetime.now()
-        _ts = _now.strftime("%d%m%Y_%H%M")
-        hdf5_path = self.output_dir / f"{_cfg_stem}_{_ts}.h5"
+        if plan is not None:
+            # A resumed run appends to its own file, without what the
+            # interrupted run wrote of the year it did not finish
+            from esfex.io.checkpoint import truncate_results
+
+            hdf5_path = plan.results
+            dropped = truncate_results(hdf5_path, set(plan.dispatch_years))
+            if dropped:
+                logger.info(f"Dropped the unfinished year(s) {dropped} from {hdf5_path.name}")
+        else:
+            _cfg_stem = self.config_path.stem if self.config_path else self.system_name
+            _now = datetime.now()
+            _ts = _now.strftime("%d%m%Y_%H%M")
+            hdf5_path = self.output_dir / f"{_cfg_stem}_{_ts}.h5"
         # Stash on self so deeper methods (MGA export inside the master
         # problem solver) can reach the same file without threading the
         # path through several function signatures.
         self._hdf5_path = hdf5_path
-        self._initialize_hdf5(
-            hdf5_path,
-            num_nodes=num_nodes,
-            num_years=years,
-            start_year=start_year,
-            end_year=end_year,
-        )
+        if plan is None:
+            self._initialize_hdf5(
+                hdf5_path,
+                num_nodes=num_nodes,
+                # Years actually dispatched (unit_commitment runs only one)
+                num_years=len(run_years),
+                start_year=run_years[0],
+                end_year=run_years[-1] + 1,
+            )
+        self._start_checkpoints(hdf5_path, master_only, years_range, ops_only)
 
         # ============================================================
         # STEP 1: SOLVE MASTER PROBLEM (only in development mode)
@@ -1152,14 +2519,31 @@ class Orchestrator:
         master_cumulative_caps = {}
         master_re_targets = {}
 
-        if self.config.simulation_mode == "development":
+        resume_dispatch = plan is not None and plan.phase == PHASE_DISPATCH
+
+        if self.config.simulation_mode == "development" and resume_dispatch:
+            # Every master year was solved before the interruption
+            (master_investments, master_retirements, master_cumulative_caps,
+             master_re_targets) = self._restore_master_plan(plan.state)
+            logger.info(f"Master plan of {len(master_investments)} years restored from "
+                        f"{plan.checkpoint.name}")
+            self._pm.call_hook(
+                "post_master_problem",
+                investments=master_investments,
+                retirements=master_retirements,
+                config=self.config,
+            )
+        elif self.config.simulation_mode == "development":
             logger.info("Step 1: Solving Master Investment Problem for ALL years")
             self._pm.call_hook("pre_master_problem", config=self.config, years=years_range)
 
             with console.status("[bold blue]Solving Master Problem...[/bold blue]") as status:
-                # Pass total demand (base + EV) to MasterProblem
+                # The master has no EV model: it plans with base + EV charging
+                # demand. (With EV optimization total_demand leaves EV out,
+                # since the dispatch serves it through ev_charging.)
+                master_total = total_demand + ev_demand if ev_optimization_enabled else total_demand
                 # Use first year as reference for demand growth calculation
-                first_year_demand = self._extract_year_demand(total_demand, 0, hours_per_year)
+                first_year_demand = self._extract_year_demand(master_total, 0, hours_per_year)
 
                 master_result = self._solve_master_problem(
                     years_range=years_range,
@@ -1167,7 +2551,7 @@ class Orchestrator:
                     hours=hours_per_year,
                     num_nodes=num_nodes,
                     ev_demand=ev_demand,
-                    total_demand=total_demand,
+                    total_demand=master_total,
                 )
                 if master_result is None or master_result[0] is None:
                     master_investments = None
@@ -1177,20 +2561,39 @@ class Orchestrator:
 
             if master_investments is None:
                 logger.error("Master problem failed. Aborting simulation.")
-                console.print("[bold red]Master problem failed. Aborting.[/bold red]")
-                return []
+                # What the years solved before the failure bound
+                self._write_master_diagnostics(hdf5_path)
+                self._pm.teardown_all()
+                raise RunAbortedError(
+                    "the master problem found no plan (see the log above); "
+                    "no operational dispatch was run")
 
             total_inv = sum(len(v) for v in master_investments.values())
             total_ret = sum(len(v) for v in master_retirements.values())
             console.print(f"[green]Master Problem solved[/green] ({total_inv} investments, {total_ret} retirements)")
             logger.info(f"Master problem solved for {len(years_range)} years")
 
+            self._write_npv_retirements(hdf5_path)
+            self._write_master_diagnostics(hdf5_path)
+            self._master_plan = (master_investments, master_retirements,
+                                 master_cumulative_caps, master_re_targets)
+            self._write_checkpoint(PHASE_DISPATCH, run_years[0])
             self._pm.call_hook(
                 "post_master_problem",
                 investments=master_investments,
                 retirements=master_retirements,
                 config=self.config,
             )
+            if master_only:
+                self.master_solution = {
+                    "investments": master_investments,
+                    "retirements": master_retirements,
+                    "cumulative_capacities": master_cumulative_caps,
+                    "re_targets": master_re_targets,
+                }
+                self._finalize_hdf5(hdf5_path)
+                self._pm.teardown_all()
+                return []
         else:
             logger.info(
                 f"{self.config.simulation_mode} mode: skipping Master Problem")
@@ -1228,26 +2631,23 @@ class Orchestrator:
             self._progress = progress
             year_task = progress.add_task(
                 f"[cyan]Operational Dispatch[/cyan]",
-                total=num_years
+                total=len(run_years)
             )
             window_task = progress.add_task(
                 "[dim]Windows[/dim]", total=1, visible=False
             )
 
-            _ops_only = os.environ.get("ESFEX_OPS_ONLY_YEARS", "").strip()
-            _ops_only_set = (
-                {int(y) for y in _ops_only.replace(",", " ").split() if y}
-                if _ops_only else None
-            )
-            if _ops_only_set:
-                logger.warning(
-                    f"[DEBUG] ESFEX_OPS_ONLY_YEARS={sorted(_ops_only_set)} "
-                    f"— skipping all other operational years"
-                )
-
+            # Years an interrupted run dispatched (resumed run): their
+            # results are in the file; the carry-over is where they ended
+            done = set(plan.dispatch_years) if resume_dispatch else set()
+            if done:
+                self._restore_dispatch_state(plan.state)
+                progress.update(year_task, advance=len(done & set(run_years)))
             for year_idx, year in enumerate(years_range):
-                if _ops_only_set is not None and year not in _ops_only_set:
-                    progress.update(year_task, advance=1)
+                if (ops_only is not None and year not in ops_only) or year in done:
+                    # The master's builds are per-year increments: a
+                    # skipped year's must still reach the later years.
+                    self._apply_master_builds(master_investments.get(year, {}))
                     continue
                 logger.debug(f"Year {year} ({year_idx+1}/{num_years})")
                 self.state.year = year
@@ -1260,8 +2660,7 @@ class Orchestrator:
                     year_investments = master_investments.get(year, {})
 
                     # Apply transmission investments to network adjacency matrix
-                    if year_investments:
-                        self._apply_transfer_investments(year_investments)
+                    self._apply_master_builds(year_investments)
 
                     # Build cumulative_units_config from MasterProblem's cumulative
                     # capacities. This correctly handles:
@@ -1271,12 +2670,14 @@ class Orchestrator:
                     year_caps = master_cumulative_caps.get(year, {})
                     if year_caps:
                         cumulative_units_config = self._build_config_from_cumulative(
-                            units_config, year_caps
+                            units_config, year_caps, year_offset=year_idx
                         )
+                        self._apply_npv_retirements(cumulative_units_config, year)
 
                     # Rebuild gen/bat name lists to include virtual units
                     # (must happen BEFORE HDF5 export so all generators are captured)
-                    self._rebuild_unit_names(cumulative_units_config)
+                    self._rebuild_unit_names(cumulative_units_config,
+                                             year_offset=year - self.state.base_year)
 
                     # Log capacity state for debugging
                     cap_summary = []
@@ -1337,8 +2738,10 @@ class Orchestrator:
                     if vgen_info or vbat_info:
                         logger.info(f"Year {year} investments: {', '.join(vgen_info + vbat_info)}")
 
-                    # Run operational dispatch with rolling horizon
-                    # Pass year-specific RE target (not the final target)
+                    # Run operational dispatch with rolling horizon.
+                    # target_re_penetration is a planning target: the dispatch
+                    # gets the master's trajectory value for this year, and
+                    # none in the operations modes (no master).
                     year_re_target = master_re_targets.get(year, 0.0)
                     # Cap at what the fixed plan can physically deliver. The
                     # master's target is an aspirational ramp the least-cost
@@ -1347,7 +2750,7 @@ class Orchestrator:
                     # a phantom fre_penetration slack (see _estimate_achievable_re).
                     if year_re_target > 0:
                         achievable_re = self._estimate_achievable_re(
-                            cumulative_units_config, year_demand
+                            cumulative_units_config, year_demand, year_idx=y_idx
                         )
                         capped = min(year_re_target, achievable_re)
                         if capped < year_re_target - 1e-4:
@@ -1356,7 +2759,8 @@ class Orchestrator:
                                 f"→ achievable={achievable_re:.1%} (plan capacity-limited)"
                             )
                         year_re_target = capped
-                    logger.info(f"Year {year} RE target (operational): {year_re_target:.1%}")
+                    if self.config.simulation_mode == "development":
+                        logger.info(f"Year {year} RE target (operational): {year_re_target:.1%}")
                     year_result = self._run_operational_dispatch(
                         year=year,
                         year_idx=year_idx,
@@ -1365,11 +2769,12 @@ class Orchestrator:
                         hours=len(year_demand),
                         num_nodes=num_nodes,
                         units_config=cumulative_units_config,
-                        re_penetration_target=year_re_target if year_re_target > 0 else None,
+                        re_penetration_target=year_re_target,
                     )
                     year_result.investments = year_investments
                     year_result.retirements = master_retirements.get(year, {})
                     year_result.master_re_target = year_re_target
+                    year_result.master_loss_repair = self._master_loss_repair.get(year)
 
                     self.results.append(year_result)
 
@@ -1398,6 +2803,9 @@ class Orchestrator:
                             config=self.config,
                         )
 
+                    nxt = [y for y in run_years if y > year]
+                    self._write_checkpoint(PHASE_DISPATCH, nxt[0] if nxt else None,
+                                           completed=year_result)
                     logger.info(f"Year {year} completed: objective=${year_result.objective:,.0f}")
                     logger.info(
                         f"  → RE={year_result.re_penetration:.1%} | "
@@ -1420,6 +2828,7 @@ class Orchestrator:
 
         # Finalize HDF5 file
         self._finalize_hdf5(hdf5_path)
+        self._write_checkpoint(PHASE_COMPLETE, None)
 
         # Plugin hook: post_simulation
         self._pm.call_hook(
@@ -1439,6 +2848,40 @@ class Orchestrator:
         logger.info(f"Simulation completed in {total_time/60:.1f} minutes")
 
         return self.results
+
+    def _log_model_clock(self) -> None:
+        """Log the clock the case's hourly series are on (a warning when the
+        case does not record one), and the node time zones when there are
+        several."""
+        from esfex.utils.model_clock import log_case_clock
+
+        coords: list[tuple[float, float]] = []
+        for name in self._system_names:
+            nc = getattr(self.config.systems[name].nodes, "node_coordinates", None)
+            coords.extend((c.latitude, c.longitude) for c in nc or [])
+        try:
+            log_case_clock(self.config.temporal.model_clock, coords)
+        except Exception as exc:  # never block a run on a log line
+            logger.debug(f"Model clock log failed: {exc}")
+
+    def _resolve_start_date(self, start_year: Optional[int] = None) -> datetime:
+        """Timestamp of hour 0: ``date_start``, moved to ``start_year`` if given."""
+        start = parse_date_start(getattr(self.config, 'date_start', "01/01/2025 00:00"))
+        if start_year is None or start_year == start.year:
+            return start
+        try:
+            return start.replace(year=int(start_year))
+        except ValueError:  # 29 Feb in a common year
+            return start.replace(year=int(start_year), month=3, day=1)
+
+    def _data_start(self) -> datetime:
+        """Timestamp of the first data row: ``date_start``.
+
+        This is the data's own calendar, which decides the Feb 29 rows that
+        are dropped; ``run(start_year=...)`` only relabels the years and
+        never changes it.
+        """
+        return self._resolve_start_date()
 
     def _load_demand(
         self,
@@ -1472,9 +2915,12 @@ class Orchestrator:
                     return cand
             return fp
 
-        date_start_str = getattr(self.config, 'date_start', "01/01/2025 00:00")
-        start_date = datetime.strptime(date_start_str, "%d/%m/%Y %H:%M")
-        time_index = [start_date + timedelta(hours=i) for i in range(total_hours_needed)]
+        # Hour 0 is the first data row; labels start at the (possibly
+        # relabelled) start date and skip Feb 29 (every model year is 8760 h).
+        # The Feb 29 rows dropped are those of the data's calendar.
+        start_date = self._data_start()
+        label_start = getattr(self, '_start_date', None) or start_date
+        time_index = list(model_time_index(label_start, total_hours_needed).to_pydatetime())
 
         # Load demand per system and concatenate
         demand_parts: list[np.ndarray] = []
@@ -1494,8 +2940,7 @@ class Orchestrator:
             elif sys.demand_path:
                 dp = _resolve_demand(sys.demand_path)
                 # Single file — check if it's a multi-column file or a single-node file
-                suffix = dp.suffix.lower()
-                test_df = pd.read_csv(dp, header=None, nrows=2) if suffix == ".csv" else pd.read_excel(dp, nrows=2)
+                test_df = _read_tabular(dp, nrows=2)
                 if test_df.shape[1] >= expected_nodes:
                     # Multi-column file covers all nodes
                     file_list = [dp]
@@ -1517,11 +2962,7 @@ class Orchestrator:
                     fp = file_list[0]
                     if not fp.exists():
                         raise FileNotFoundError(f"Demand file not found: {fp}")
-                    suffix = fp.suffix.lower()
-                    df = pd.read_csv(fp, header=None) if suffix == ".csv" else pd.read_excel(fp)
-                    raw = df.values
-                    if raw.ndim == 1:
-                        raw = raw.reshape(-1, 1)
+                    raw = read_hourly_table(fp)
                 else:
                     # Multiple per-node files — load and hstack
                     node_arrays = []
@@ -1530,15 +2971,19 @@ class Orchestrator:
                             raise FileNotFoundError(
                                 f"Per-node demand file missing for '{sname}' node {ni}: {fp}"
                             )
-                        suffix = fp.suffix.lower()
-                        ndf = pd.read_csv(fp, header=None) if suffix == ".csv" else pd.read_excel(fp)
-                        arr = ndf.values
-                        if arr.ndim == 1:
-                            arr = arr.reshape(-1, 1)
+                        arr = read_hourly_table(fp)
                         node_arrays.append(arr[:, :1])  # take first column only
                     min_h = min(a.shape[0] for a in node_arrays)
                     raw = np.hstack([a[:min_h] for a in node_arrays])
 
+                # Model years are 8760 h: drop Feb 29 rows of leap-year data.
+                n_read = raw.shape[0]
+                raw = drop_leap_days(raw, start_date)
+                if raw.shape[0] != n_read:
+                    logger.info(
+                        f"Demand for '{sname}': dropped {n_read - raw.shape[0]} "
+                        f"Feb 29 hours (every model year is {HOURS_STD_YEAR} h)"
+                    )
                 file_hours = raw.shape[0]
                 file_nodes = raw.shape[1]
                 logger.debug(f"Read demand for '{sname}': {file_hours}h × {file_nodes} nodes")
@@ -1611,6 +3056,8 @@ class Orchestrator:
         ev_categories_dict = {
             name: cat.model_dump() for name, cat in sys.ev_categories.items()
         }
+        # _build_ev_config sizes the dispatch fleet on the same S-curve.
+        self._ev_years = (base_year, target_year)
 
         logger.debug(f"Generating EV profiles for {total_hours} hours, {num_nodes} nodes")
         logger.debug(f"EV categories: {list(ev_categories_dict.keys())}")
@@ -1695,11 +3142,205 @@ class Orchestrator:
 
         return sectoral_demand
 
+    # ── Fuel infrastructure and electrolyzers built by the master (#89) ──
+
+    def _pe_enabled(self, system_config) -> bool:
+        """Primary energy is on and the system has fuel sources or entry points.
+
+        The same switch turns on the dispatch's fuel model and the master's
+        fuel block."""
+        return bool(self.config.enable_primary_energy and (
+            system_config.primary_energy_sources
+            or getattr(system_config, 'fuel_entry_points', None)))
+
+    def _pe_inputs(self, system_config, num_nodes: int) -> dict:
+        """Fuel data of ``system_config`` as ``PrimaryEnergyAdapter`` keyword
+        arguments: fuel sources (annual availability × step length, since the
+        fuel model prorates it per step), non-electric demand, fuel
+        infrastructure, routes, penalties, outages. Shared by the dispatch
+        windows and the master's fuel block, so both see the same fuel data."""
+        import copy
+
+        fuels_def = {}
+        for fk, fc in system_config.fuels.items():
+            fuels_def[fk] = fc.model_dump() if hasattr(fc, 'model_dump') else fc.__dict__.copy()
+
+        if system_config.primary_energy_sources:
+            pe_sources = {
+                pk: (pc.model_dump() if hasattr(pc, 'model_dump') else pc.__dict__.copy())
+                for pk, pc in system_config.primary_energy_sources.items()}
+        else:
+            # Auto-build PE sources from fuel_entry_points + storage
+            pe_sources = self._build_pe_sources_from_entries(system_config, num_nodes)
+
+        # Growth per fuel (non_electric_demand_growth, none if absent) and
+        # monthly factors seasonal_factors[fuel][sector]; the sector is the
+        # key's part before the first underscore.
+        ne_demand = {}
+        ne_growth = system_config.non_electric_demand_growth or {}
+        ne_seasonal = system_config.seasonal_factors or {}
+        for nk, nc in system_config.non_electric_demand.items():
+            ne_demand[nk] = nc.model_dump() if hasattr(nc, 'model_dump') else nc.__dict__.copy()
+            fuel_nk = ne_demand[nk].get('fuel')
+            ne_demand[nk]['growth_rate'] = float(ne_growth.get(fuel_nk, 0.0))
+            ne_demand[nk]['seasonal_factors'] = (
+                ne_seasonal.get(fuel_nk, {}).get(nk.split('_')[0]))
+
+        infra = system_config.fuel_infrastructure
+        infra_dict = infra.model_dump() if hasattr(infra, 'model_dump') else infra.__dict__.copy()
+        penalties = system_config.penalties
+        penalties_dict = (penalties.model_dump() if hasattr(penalties, 'model_dump')
+                          else penalties.__dict__.copy())
+
+        # The fuel model prorates annual availability by steps / 8760; with
+        # res_h-hour steps it must be by hours, hence × res_h.
+        res_h = getattr(self.config.temporal, 'resolution_hours', 1)
+        if res_h > 1:
+            pe_sources = copy.deepcopy(pe_sources)
+            for fuel_data in pe_sources.values():
+                avail_list = fuel_data.get('max_availability', [])
+                fuel_data['max_availability'] = [a * res_h for a in avail_list]
+
+        return dict(
+            fuels_config=pe_sources,
+            non_electric_demand=ne_demand,
+            infrastructure_config=infra_dict,
+            transport_distances=system_config.fuel_transport_distances,
+            fuels_definition=fuels_def,
+            penalties_config=penalties_dict,
+            discount_rate=system_config.discount_rate,
+            transport_routes=system_config.fuel_transport_routes,
+            outage_schedule=getattr(system_config, "outage_schedule", None),
+        )
+
+    def _fuel_price_base_year(self, first_year: int) -> int:
+        """Year the ``fuels`` prices hold for, from which ``price_growth_rate``
+        grows them: the run's first year (``state.base_year``; *first_year*
+        when no run has started)."""
+        return self.state.base_year if self.state is not None else first_year
+
+    def _master_fuel_kwargs(self, system_config, last_year: int,
+                            cumulative: Optional[dict] = None) -> Optional[dict]:
+        """``primary_energy`` argument of ``MasterProblemAdapter``: the fuel
+        data, the run's base year (fuel price growth and disruption hours
+        count from it), the last modelled year and the fuel capacity built
+        before the master's first year. None when primary energy is off."""
+        if not self._pe_enabled(system_config):
+            return None
+        return dict(
+            self._pe_inputs(system_config, self._num_nodes),
+            base_year=self.state.base_year,
+            last_year=last_year,
+            cumulative_capacities=deepcopy(cumulative) if cumulative else None,
+        )
+
+    def _store_master_fuel(self, master, result: dict, years: list[int],
+                           carried: Optional[dict] = None) -> None:
+        """Record the fuel storage, route and electrolyzer capacity the
+        master built and that is in service in each of ``years``, on top of
+        ``carried`` (what earlier myopic years built), for the dispatch.
+
+        ``self._master_fuel_by_year[year]`` = {"storage": {fuel: {node: cap}},
+        "transport": {fuel: {route: cap}}, "electrolyzer": {key: [MW per
+        node]}}, 0-based like ``state.primary_energy_capacities``."""
+        to_caps = getattr(master, "fuel_capacities_by_year", None)
+        by_year = to_caps(result) if to_caps is not None else {}
+        store = getattr(self, "_master_fuel_by_year", None)
+        if store is None:
+            store = self._master_fuel_by_year = {}
+        for y_idx, year in enumerate(years, start=1):
+            caps = deepcopy(carried) if carried else {"storage": {}, "transport": {}, "electrolyzer": {}}
+            for kind in ("storage", "transport"):
+                for fuel, by_idx in by_year.get(y_idx, {}).get(kind, {}).items():
+                    tgt = caps.setdefault(kind, {}).setdefault(fuel, {})
+                    for idx, v in by_idx.items():
+                        tgt[idx] = tgt.get(idx, 0.0) + v
+            for key, per_node in by_year.get(y_idx, {}).get("electrolyzer", {}).items():
+                tgt = caps.setdefault("electrolyzer", {}).setdefault(key, [0.0] * len(per_node))
+                for n, v in enumerate(per_node):
+                    tgt[n] += v
+            store[year] = caps
+
+    def _dispatch_pe_capacities(self, year: int) -> dict:
+        """Fuel storage and route capacity built by the master and in service
+        in ``year`` ({kind: {fuel: {index: capacity}}}); empty without a master."""
+        caps = (getattr(self, "_master_fuel_by_year", None) or {}).get(year) or {}
+        current = {"storage": caps.get("storage", {}), "transport": caps.get("transport", {})}
+        self.state.primary_energy_capacities = current
+        return current
+
+    @staticmethod
+    def _system_with_electrolyzers(system_config, added: dict, used: Optional[dict] = None):
+        """``system_config`` with ``added`` ({electrolyzer key: MW per node})
+        added to the electrolyzers' ``rated_power`` and ``used`` (same
+        shape) taken off their ``invest_max_power`` (a myopic year: the
+        builds still in service, and everything built so far, retired or
+        not, since the build limit counts every build)."""
+        def _nz(d):
+            return {k: v for k, v in (d or {}).items() if any(x > 1e-9 for x in v)}
+        added, used = _nz(added), _nz(used)
+        if not added and not used:
+            return system_config
+        elz = dict(system_config.electrolyzers or {})
+
+        def _at(lst, n):
+            return lst[n] if n < len(lst) else 0.0
+        for key in set(added) | set(used):
+            if key not in elz:
+                continue
+            e = elz[key]
+            upd = {}
+            if key in added:
+                upd["rated_power"] = [float(r) + _at(added[key], n)
+                                      for n, r in enumerate(e.rated_power)]
+            if key in used:
+                upd["invest_max_power"] = [remaining_limit(m, _at(used[key], n))
+                                           for n, m in enumerate(e.invest_max_power)]
+            elz[key] = e.model_copy(update=upd)
+        return system_config.model_copy(update={"electrolyzers": elz})
+
+    @staticmethod
+    def _myopic_electrolyzers(builds: dict, system_config, y_idx: int) -> tuple[dict, dict]:
+        """Electrolyzer power earlier myopic years built ({key: {build year
+        index: MW per node}}): ``(in service in year y_idx, built in all)``,
+        {key: MW per node} each. A build retires after the electrolyzer's
+        ``life_time`` at its node (0 = never), as in perfect foresight."""
+        in_service: dict[str, list[float]] = {}
+        total: dict[str, list[float]] = {}
+        elz = system_config.electrolyzers or {}
+        for key, by_year in builds.items():
+            life = list(getattr(elz.get(key), "life_time", None) or [])
+            for b_idx, per_node in by_year.items():
+                tot = total.setdefault(key, [0.0] * len(per_node))
+                cur = in_service.setdefault(key, [0.0] * len(per_node))
+                for n, v in enumerate(per_node):
+                    tot[n] += v
+                    lt = life[n] if n < len(life) else 0
+                    if lt <= 0 or y_idx - b_idx < lt:
+                        cur[n] += v
+        return in_service, total
+
+    def _dispatch_system(self, year: int):
+        """The operational system of ``year``: ``primary_system`` with the
+        electrolyzer power the master built added to each electrolyzer's
+        ``rated_power`` (per node)."""
+        caps = (getattr(self, "_master_fuel_by_year", None) or {}).get(year) or {}
+        if not caps.get("electrolyzer"):
+            return self.primary_system
+        cache = getattr(self, "_dispatch_system_cache", None)
+        if cache is None:
+            cache = self._dispatch_system_cache = {}
+        if year not in cache:
+            cache[year] = self._system_with_electrolyzers(
+                self.primary_system, caps["electrolyzer"])
+        return cache[year]
+
     def _build_ev_config(
         self,
         year_idx: int,
         window_start_hour: int,
         window_hours: int,
+        resolution_hours: int = 1,
     ) -> Optional[Dict]:
         """Build aggregated EV config data for a specific window.
 
@@ -1710,6 +3351,8 @@ class Orchestrator:
             year_idx: Year index (0-based)
             window_start_hour: Start hour within the year
             window_hours: Number of hours in this window
+            resolution_hours: Time step (h); the hourly profiles are averaged
+                to it, since Julia indexes them by step like the demand
 
         Returns:
             Dictionary with EVConfig fields, or None if no EV data
@@ -1725,46 +3368,69 @@ class Orchestrator:
         abs_start = year_idx * hours_per_year + window_start_hour
         abs_end = abs_start + window_hours
 
-        # Aggregate across all EV categories for this window
-        # Use first category as representative for scalar params (weighted average could be better)
-        first_cat = next(iter(sys.ev_categories.values()))
-
-        # Total vehicles per node (sum across categories)
-        total_vehicles = np.zeros(num_nodes)
+        # Fleet of this year: the same S-curve the profiles were generated
+        # with, so the fleet limits (charge power, SOC capacity, V2G) match
+        # the driving consumption. The base-year quantities alone fall far
+        # short of the grown consumption in later years.
+        base_year, target_year = getattr(self, "_ev_years", (2025, 2050))
+        year = base_year + year_idx
+        fleet: dict[str, np.ndarray] = {}
         for cat_name, cat in sys.ev_categories.items():
-            if cat_name in sys.ev_quantity:
-                for n in range(min(len(sys.ev_quantity[cat_name]), num_nodes)):
-                    total_vehicles[n] += sys.ev_quantity[cat_name][n]
+            qty = np.zeros(num_nodes)
+            src = sys.ev_quantity.get(cat_name, [])
+            qty[:min(len(src), num_nodes)] = src[:num_nodes]
+            fleet[cat_name] = qty * fleet_growth_factor(
+                cat.model_dump(), year, base_year, target_year)
+        total_vehicles = sum(fleet.values()) if fleet else np.zeros(num_nodes)
 
         if np.sum(total_vehicles) < 1:
             return None
 
-        # Extract window slice from full-horizon availability/consumption profiles
-        # These are DataFrames with multi-level columns; we need to aggregate to (hours, nodes)
+        # The Julia EVConfig holds one parameter set for the whole fleet:
+        # vehicle-weighted means keep the fleet's total battery energy and
+        # charge / V2G power exact; efficiencies and min SOC are weighted by
+        # battery energy.
+        n_cat = {k: float(v.sum()) for k, v in fleet.items()}
+        n_all = sum(n_cat.values())
+        cats = sys.ev_categories
+
+        def _per_vehicle(attr):
+            return sum(n_cat[k] * getattr(cats[k], attr) for k in cats) / n_all
+
+        battery_kwh = _per_vehicle("battery_capacity")
+        e_cat = {k: n_cat[k] * cats[k].battery_capacity for k in cats}
+        e_all = sum(e_cat.values()) or 1.0
+
+        def _per_energy(attr):
+            return sum(e_cat[k] * getattr(cats[k], attr) for k in cats) / e_all
+
+        charge_kw = _per_vehicle("charging_power")
+        v2g_kw = _per_vehicle("v2g_power")
+
         try:
             avail_profile = self._v2g_availability_profiles
             charge_profile = self._ev_charging_profiles
 
-            # Aggregate profiles to per-node arrays for this window
-            # v2g_availability: fraction of vehicles available at each (hour, node)
+            # Julia caps V2G at v2g_kw · N / 1000 · availability. The profiles
+            # give the available V2G power in MW, so availability is that power
+            # over the fleet's rated V2G power (fraction of the fleet's V2G
+            # capability on offer that hour).
             avail_arr = np.ones((window_hours, num_nodes))
             driving_arr = np.zeros((window_hours, num_nodes))
 
             if avail_profile is not None and len(avail_profile) > abs_start:
-                # Aggregate V2G availability: weighted average across categories
+                slice_end = min(abs_end, len(avail_profile))
+                v2g_mw = np.zeros((window_hours, num_nodes))
                 for n in range(num_nodes):
                     for cat_name in sys.ev_categories:
                         col_key = f"Node_{n+1}_{cat_name}"
                         if col_key in avail_profile.columns:
-                            slice_end = min(abs_end, len(avail_profile))
-                            if abs_start < slice_end:
-                                cat_qty = sys.ev_quantity.get(cat_name, [0] * num_nodes)
-                                qty = cat_qty[n] if n < len(cat_qty) else 0
-                                if qty > 0 and total_vehicles[n] > 0:
-                                    weight = qty / total_vehicles[n]
-                                    avail_arr[:slice_end - abs_start, n] += (
-                                        weight * avail_profile[col_key].values[abs_start:slice_end]
-                                    )
+                            v2g_mw[:slice_end - abs_start, n] += (
+                                avail_profile[col_key].values[abs_start:slice_end]
+                            )
+                rated_mw = v2g_kw * total_vehicles / 1000.0
+                avail_arr = np.divide(v2g_mw, rated_mw,
+                                      out=np.zeros_like(v2g_mw), where=rated_mw > 0)
 
             if charge_profile is not None and len(charge_profile) > abs_start:
                 # Driving consumption from charging profiles
@@ -1774,21 +3440,40 @@ class Orchestrator:
                         if col_key in charge_profile.columns:
                             slice_end = min(abs_end, len(charge_profile))
                             if abs_start < slice_end:
-                                # Convert kW to MW
+                                # generate_ev_profiles already yields MW (MWh
+                                # per hour), the unit Julia expects; dividing
+                                # by 1000 again made EV load ~vanish.
                                 driving_arr[:slice_end - abs_start, n] += (
-                                    charge_profile[col_key].values[abs_start:slice_end] / 1000.0
+                                    charge_profile[col_key].values[abs_start:slice_end]
                                 )
+
+            if resolution_hours > 1:
+                avail_arr = aggregate_to_resolution(avail_arr, target_hours=resolution_hours)
+                driving_arr = aggregate_to_resolution(driving_arr, target_hours=resolution_hours)
+
+            pen = sys.penalties
+            if pen.ev_loss < pen.loss_of_load and not getattr(self, "_ev_loss_warned", False):
+                self._ev_loss_warned = True
+                logger.warning(
+                    f"System '{sys.name}': ev_loss ({pen.ev_loss:g} $/MWh) is below "
+                    f"loss_of_load ({pen.loss_of_load:g} $/MWh). The dispatch leaves EV "
+                    f"driving unsupplied whenever generating costs more than ev_loss."
+                )
 
             return {
                 'num_vehicles': total_vehicles,
-                'battery_capacity_kwh': first_cat.battery_capacity,
-                'max_charge_power_kw': first_cat.charging_power,
-                'max_discharge_power_kw': first_cat.v2g_power,
-                'charge_efficiency': first_cat.efficiency_charge,
-                'discharge_efficiency': first_cat.efficiency_discharge,
-                'min_soc': first_cat.min_soc,
+                'battery_capacity_kwh': battery_kwh,
+                'max_charge_power_kw': charge_kw,
+                'max_discharge_power_kw': v2g_kw,
+                'charge_efficiency': _per_energy("efficiency_charge"),
+                'discharge_efficiency': _per_energy("efficiency_discharge"),
+                'min_soc': _per_energy("min_soc"),
                 'max_soc': 1.0,
                 'target_soc': 0.8,
+                # EV_initial_soc (fraction per node); 80 % where not given
+                'initial_soc_fraction': [
+                    float(sys.ev_initial_soc[n]) if n < len(sys.ev_initial_soc or []) else 0.8
+                    for n in range(num_nodes)],
                 'availability_profile': avail_arr,
                 'driving_consumption_profile': driving_arr,
                 'v2g_compensation': 0.0,
@@ -1824,16 +3509,77 @@ class Orchestrator:
             logger.warning(f"Year index {year_idx} out of range. Using first year.")
             return full_demand[:hours_per_year, :]
 
+    def _renewable_available(
+        self,
+        units,
+        hours: int,
+        num_nodes: int,
+        year_idx: int = 0,
+    ) -> np.ndarray:
+        """Renewable power available per step and node, ``(hours, nodes)``.
+
+        ``units`` yields ``(availability_key, rated_per_node)``. Each unit
+        counts ``rated × availability``, with the profile read like the
+        dispatch reads it: year ``year_idx``'s block (horizon hour, wrapping
+        around a shorter profile), and 1.0 in every hour for a unit without a
+        profile (the dispatch runs such a unit at full capacity), × its
+        scheduled outages in that year (``outage_schedule``, as the dispatch
+        folds them in).
+        """
+        from esfex.bridge.converters import unit_outage_factors
+        cache = getattr(self, '_availability_cache', None) or {}
+        sched = getattr(self.primary_system, "outage_schedule", None) or []
+        re_available = np.zeros((hours, num_nodes))
+        for avail_key, rated in units:
+            rated = np.asarray(rated, dtype=float)[:num_nodes]
+            if not np.any(rated > 0):
+                continue
+            availability = cache.get(avail_key)
+            if availability is None or len(availability) == 0:
+                block = np.ones(hours)
+            else:
+                block = _profile_year_block(np.asarray(availability, dtype=float),
+                                            year_idx, hours)
+            outages = unit_outage_factors(sched, "generator", [avail_key],
+                                          year_idx * HOURS_STD_YEAR, hours)
+            for n in range(len(rated)):
+                if rated[n] <= 0:
+                    continue
+                if block.ndim == 1:
+                    a = block
+                elif n < block.shape[1]:
+                    a = block[:, n]
+                else:
+                    continue
+                for key in ((1, 0), (1, n + 1)):
+                    if key in outages:
+                        a = a * outages[key][:len(a)]
+                re_available[:, n] += rated[n] * a
+        return re_available
+
+    def _existing_renewables(self, num_nodes: int):
+        """``(key, rated_per_node)`` of the configured renewable generators."""
+        return [
+            (key, [gen.rated_power[n] if n < len(gen.rated_power) else 0.0
+                   for n in range(num_nodes)])
+            for key, gen in self.primary_system.generators.items()
+            if gen.type == "Renewable"
+        ]
+
     def _calculate_initial_re_penetration(
         self,
         first_year_demand: np.ndarray,
     ) -> float:
         """Calculate initial RE penetration using per-timestep dispatch estimate.
 
-        For each timestep, the usable RE is ``min(RE_available, demand)``
-        because excess RE above demand is curtailed.  This gives a realistic
-        estimate that accounts for the temporal mismatch between renewable
-        availability and load profiles.
+        The RE share is renewable over total generation (:func:`re_share`).
+        Before any solve, generation is taken to meet the demand each
+        timestep: the renewable part is ``min(RE_available, demand)`` (excess
+        RE above demand is curtailed) and fossil units make up the rest, so
+        the share is Σ usable RE / Σ demand. This accounts for the temporal
+        mismatch between renewable availability and load profiles. A
+        renewable unit without an availability profile counts at full
+        capacity, and scheduled outages apply, as in the dispatch.
 
         Args:
             first_year_demand: Demand array for first year (hours × nodes)
@@ -1841,35 +3587,10 @@ class Orchestrator:
         Returns:
             Initial RE penetration as fraction (0-1)
         """
-        sys = self.primary_system
         hours = first_year_demand.shape[0]
         num_nodes = first_year_demand.shape[1]
-
-        # Build per-timestep RE availability at each node
-        re_available = np.zeros((hours, num_nodes))
-
-        for gen_key, gen in sys.generators.items():
-            if gen.type != "Renewable":
-                continue
-            availability = None
-            if hasattr(self, '_availability_cache'):
-                availability = self._availability_cache.get(gen_key)
-
-            for n in range(num_nodes):
-                rated = gen.rated_power[n] if n < len(gen.rated_power) else 0.0
-                if rated <= 0:
-                    continue
-                if availability is not None and len(availability) > 0:
-                    avail_hours = min(hours, len(availability))
-                    if availability.ndim == 2 and n < availability.shape[1]:
-                        avail_profile = availability[:avail_hours, n]
-                    elif availability.ndim == 1:
-                        avail_profile = availability[:avail_hours]
-                    else:
-                        continue
-                    re_available[:avail_hours, n] += rated * avail_profile
-                else:
-                    continue
+        re_available = self._renewable_available(
+            self._existing_renewables(num_nodes), hours, num_nodes)
 
         # Per-timestep: usable RE = min(RE_available, demand)
         demand = first_year_demand[:hours, :]
@@ -1890,6 +3611,7 @@ class Orchestrator:
         self,
         units_config: dict[str, Any],
         year_demand: np.ndarray,
+        year_idx: int = 0,
     ) -> float:
         """Upper bound on RE penetration the FIXED yearly plan can deliver.
 
@@ -1905,10 +3627,11 @@ class Orchestrator:
         so penalizing it against the aspirational target produces a phantom
         fre_penetration slack. Capping at the achievable level removes it without
         changing physical dispatch (RE is still fully used via curtailment_cost).
+        Profiles are read like the dispatch reads them (``_renewable_available``).
         """
         hours, num_nodes = year_demand.shape
-        re_available = np.zeros((hours, num_nodes))
-        cache = getattr(self, '_availability_cache', {}) or {}
+        b2n = getattr(self, '_bus_to_node', None)
+        units = []
         for ukey, udata in units_config.items():
             if udata.get("type") != "Renewable":
                 continue
@@ -1919,16 +3642,12 @@ class Orchestrator:
             # lives in the cache under the bare technology key. Existing units
             # use their own gen_key directly.
             avail_key = ukey[4:] if ukey.startswith("inv_") else ukey
-            availability = cache.get(avail_key)
-            if availability is None:
-                continue
             # rated_power may be per-node (existing gens, len == num_nodes) or
             # per-bus (investment units, len == num_buses). Availability and
             # demand here are per-node, so aggregate rated to per-node first —
             # otherwise per-bus arrays get indexed as if they were per-node,
             # reading only the first num_nodes buses and grossly undercounting.
             arr = list(rated)
-            b2n = getattr(self, '_bus_to_node', None)
             rated_per_node = np.zeros(num_nodes)
             if len(arr) == num_nodes:
                 rated_per_node = np.asarray(arr[:num_nodes], dtype=float)
@@ -1940,15 +3659,8 @@ class Orchestrator:
             else:
                 m = min(len(arr), num_nodes)
                 rated_per_node[:m] = arr[:m]
-            ah = min(hours, len(availability))
-            for n in range(num_nodes):
-                r = rated_per_node[n]
-                if r <= 0:
-                    continue
-                if availability.ndim == 2 and n < availability.shape[1]:
-                    re_available[:ah, n] += r * availability[:ah, n]
-                elif availability.ndim == 1:
-                    re_available[:ah, n] += r * availability[:ah]
+            units.append((avail_key, rated_per_node))
+        re_available = self._renewable_available(units, hours, num_nodes, year_idx)
         usable_re = float(np.minimum(re_available, year_demand[:hours]).sum())
         total_demand = float(year_demand.sum())
         return usable_re / total_demand if total_demand > 0 else 0.0
@@ -1960,8 +3672,9 @@ class Orchestrator:
         """Calculate initial RE penetration per system using dispatch estimate.
 
         For each system and timestep, usable RE = ``min(RE_available, demand)``
-        to account for temporal mismatch.  Consistent with the energy-based
-        RE constraints in the master problem.
+        to account for temporal mismatch, over the demand: the system's RE
+        share (renewable over total generation) with generation meeting the
+        demand, as ``_calculate_initial_re_penetration``.
 
         Args:
             first_year_demand: Demand array for first year (hours × nodes)
@@ -1973,34 +3686,14 @@ class Orchestrator:
             sname = list(self._system_node_offsets.keys())[0] if self._system_node_offsets else self.system_name
             return {sname: self._calculate_initial_re_penetration(first_year_demand)}
 
-        sys = self.primary_system
         hours = first_year_demand.shape[0]
         num_nodes = first_year_demand.shape[1]
         sys_names = list(self._system_node_offsets.keys())
         result = {}
 
-        # Build per-timestep RE availability at each node (global)
-        re_available = np.zeros((hours, num_nodes))
-        for gen_key, gen in sys.generators.items():
-            if gen.type != "Renewable":
-                continue
-            availability = None
-            if hasattr(self, '_availability_cache'):
-                availability = self._availability_cache.get(gen_key)
-
-            for n in range(num_nodes):
-                rated = gen.rated_power[n] if n < len(gen.rated_power) else 0.0
-                if rated <= 0:
-                    continue
-                if availability is not None and len(availability) > 0:
-                    avail_hours = min(hours, len(availability))
-                    if availability.ndim == 2 and n < availability.shape[1]:
-                        avail_profile = availability[:avail_hours, n]
-                    elif availability.ndim == 1:
-                        avail_profile = availability[:avail_hours]
-                    else:
-                        continue
-                    re_available[:avail_hours, n] += rated * avail_profile
+        # Per-timestep RE availability at each node (global)
+        re_available = self._renewable_available(
+            self._existing_renewables(num_nodes), hours, num_nodes)
 
         for i, sname in enumerate(sys_names):
             off = self._system_node_offsets[sname]
@@ -2023,6 +3716,35 @@ class Orchestrator:
                         f"demand: {total_dem:.0f})")
 
         return result
+
+    def _bus_pairs_to_node_flows(self, pair_series: dict, num_nodes: int) -> np.ndarray:
+        """Sum ``{(from_bus, to_bus): series}`` into a ``[from_node, to_node, step]`` array.
+
+        The LP keys power flows and transfer margins by operational bus
+        index; map both ends through ``bus_to_node`` and drop lines inside
+        a node.
+        """
+        n_steps = max((len(v) for v in pair_series.values()), default=0)
+        out = np.zeros((num_nodes, num_nodes, n_steps))
+        for (i, j), series in pair_series.items():
+            nodes = self._bus_pair_nodes(i, j)
+            if nodes is None or nodes[0] >= num_nodes or nodes[1] >= num_nodes:
+                continue
+            out[nodes[0], nodes[1], :len(series)] += series
+        return out
+
+    def _bus_pair_nodes(self, i: int, j: int) -> Optional[tuple[int, int]]:
+        """(from_node, to_node) of a bus pair; None for intra-node or unknown buses."""
+        b2n = self._bus_to_node
+        if b2n is None:
+            ni, nj = i, j
+        else:
+            if not (0 <= i < len(b2n) and 0 <= j < len(b2n)):
+                return None
+            ni, nj = b2n[i], b2n[j]
+        if ni == nj or ni < 0 or nj < 0:
+            return None
+        return ni, nj
 
     def _aggregate_buses_to_nodes(self, arr, method="sum"):
         """Aggregate bus-level array to node-level.
@@ -2072,102 +3794,74 @@ class Orchestrator:
     def _preload_availability_profiles(self, num_nodes: int) -> dict:
         """Preload all availability profiles once at startup.
 
+        A configured ``availability_file`` that cannot be resolved or found
+        is an error (a generator used to be dropped from the dispatch, a
+        technology to crash with a KeyError). A renewable unit with no file
+        at all runs at capacity factor 1.0 in every hour, which is right for
+        dispatchable renewables (biomass, geothermal, reservoir hydro) but
+        not for solar or wind: it is logged once per unit
+        (:func:`_warn_flat_renewable`).
+
         Args:
             num_nodes: Number of nodes in the system
 
         Returns:
             Dictionary mapping gen_key -> availability array
         """
-        from esfex.io.demand import load_availability_profile
+        from esfex.io.demand import load_run_availability
         from pathlib import Path
 
         cache = {}
         sys = self.primary_system
         config_dir = Path(self.config_path).parent if self.config_path else Path('.')
+        date_start = self._data_start().strftime("%d/%m/%Y %H:%M")
+        offsets = getattr(self, "_system_node_offsets", None) or {}
+        loaders: dict = {}
 
-        # Track unique files to avoid loading the same file multiple times
-        file_cache = {}
+        def _load(kind: str, key: str, avail_file: str, unit_key: Optional[str] = None):
+            # Same reader as the dispatch's fallback (load_run_availability):
+            # path resolved like demand paths, hourly, data calendar; the
+            # columns are the unit's own system's nodes (_system_profile_loader)
+            file_key = str(avail_file)
+            if file_key not in loaders:
+                loaders[file_key] = _system_profile_loader(
+                    offsets, num_nodes, lambda cnt: load_run_availability(
+                        config_dir, avail_file, cnt, date_start,
+                        owner=f"{kind} {key!r}"), fill=1.0)
+            cache[key] = loaders[file_key](unit_key or key, file_key)
+            # Also index by the original availability_file string so that
+            # virtual generators can look up by file path directly.
+            cache[avail_file] = cache[key]
 
         for gen_key, gen in sys.generators.items():
             avail_file = getattr(gen, 'availability_file', None)
-            if not avail_file:
-                continue
-
-            # Resolve path under config_dir, refusing escapes (e.g.
-            # `../../etc/passwd` in a yaml authored elsewhere). The
-            # old code happily passed `..` straight to Path then
-            # `.resolve()`, letting hostile configs read arbitrary
-            # files. See utils/paths.safe_resolve_under.
-            from esfex.utils.paths import safe_resolve_under
-            try:
-                avail_path = safe_resolve_under(config_dir, avail_file)
-            except ValueError:
-                logger.warning(
-                    "Skipping generator %r: availability_file %r resolves "
-                    "outside config directory %s (refusing path traversal)",
-                    gen_key, avail_file, config_dir,
-                )
-                continue
-            if not avail_path.exists():
-                logger.warning(
-                    "Skipping generator %r: availability_file %r not found "
-                    "under %s",
-                    gen_key, avail_file, config_dir,
-                )
-                continue
-
-            # Use file path as cache key (same file = same data)
-            file_key = str(avail_path)
-
-            if file_key in file_cache:
-                # Reuse already loaded data
-                cache[gen_key] = file_cache[file_key]
-            else:
-                # Load and cache
-                try:
-                    availability = load_availability_profile(
-                        avail_path,
-                        temporal_resolution_hours=1,  # Load at full resolution
-                        num_nodes=num_nodes
-                    )
-                    file_cache[file_key] = availability
-                    cache[gen_key] = availability
-                except Exception as e:
-                    logger.warning(f"Failed to load availability for {gen.name}: {e}")
-
-            # Also index by the original availability_file string so that
-            # virtual generators can look up by file path directly.
-            cache[avail_file] = cache[gen_key]
+            if avail_file:
+                _load("Generator", gen_key, avail_file)
+            elif (gen.type == "Renewable"
+                  and not any(c > 0 for c in (gen.reservoir_capacity or []))
+                  and any(p > 0 for p in gen.rated_power)):
+                _warn_flat_renewable("Generator", gen_key)
 
         # Also preload technology availability profiles
         for tech_key, tech in sys.technologies.items():
             avail_file = getattr(tech, 'availability_file', None)
-            if not avail_file:
-                continue
+            if avail_file:
+                _load("Technology", tech_key, avail_file)
+            elif tech.type == "Renewable" and any(p > 0 for p in tech.invest_max_power):
+                _warn_flat_renewable("Technology", tech_key)
 
-            avail_path = config_dir / avail_file
-            if not avail_path.exists():
-                avail_path = Path(avail_file)
+        # Batteries and battery technologies (factor on charge/discharge
+        # power), under their own keys so they cannot shadow a generator's
+        for bat_key, bat in sys.batteries.items():
+            if bat.availability_file:
+                _load("Battery", battery_availability_key(bat_key), bat.availability_file,
+                      unit_key=bat_key)
+        for bt_key, bat_tech in sys.battery_technologies.items():
+            if bat_tech.availability_file:
+                _load("Battery technology", battery_technology_availability_key(bt_key),
+                      bat_tech.availability_file, unit_key=bt_key)
 
-            file_key = str(avail_path.resolve())
-
-            if file_key in file_cache:
-                cache[tech_key] = file_cache[file_key]
-            else:
-                try:
-                    availability = load_availability_profile(
-                        avail_path,
-                        temporal_resolution_hours=1,
-                        num_nodes=num_nodes
-                    )
-                    file_cache[file_key] = availability
-                    cache[tech_key] = availability
-                except Exception as e:
-                    logger.warning(f"Failed to load availability for tech {tech.name}: {e}")
-
-            cache[avail_file] = cache[tech_key]
-
-        logger.debug(f"Loaded {len(file_cache)} unique availability files for {len(cache)} generators/technologies")
+        logger.debug(f"Loaded {len(loaders)} unique availability files for {len(cache)} units/technologies")
         return cache
 
     def _preload_inflow_profiles(self, num_nodes: int) -> dict:
@@ -2177,16 +3871,17 @@ class Orchestrator:
             num_nodes: Number of nodes in the system
 
         Returns:
-            Dictionary mapping gen_key -> inflow array (hours x nodes)
+            Dictionary mapping gen_key -> inflow array (hours x nodes, MW-eq)
         """
-        from esfex.io.demand import load_availability_profile
+        from esfex.io.demand import load_inflow_profile
         from pathlib import Path
 
         cache = {}
         sys = self.primary_system
         config_dir = Path(self.config_path).parent if self.config_path else Path('.')
-
-        file_cache = {}
+        date_start = self._data_start().strftime("%d/%m/%Y %H:%M")
+        offsets = getattr(self, "_system_node_offsets", None) or {}
+        loaders: dict = {}
 
         for gen_key, gen in sys.generators.items():
             inflow_file = getattr(gen, 'reservoir_inflow_file', None)
@@ -2198,23 +3893,19 @@ class Orchestrator:
                 inflow_path = Path(inflow_file)
 
             file_key = str(inflow_path.resolve())
-
-            if file_key in file_cache:
-                cache[gen_key] = file_cache[file_key]
-            else:
-                try:
-                    inflow = load_availability_profile(
-                        inflow_path,
-                        temporal_resolution_hours=1,
-                        num_nodes=num_nodes
-                    )
-                    file_cache[file_key] = inflow
-                    cache[gen_key] = inflow
-                except Exception as e:
-                    logger.warning(f"Failed to load inflow for {gen.name}: {e}")
+            if file_key not in loaders:
+                # Columns are the unit's own system's nodes; no inflow elsewhere
+                loaders[file_key] = _system_profile_loader(
+                    offsets, num_nodes, lambda cnt, path=inflow_path: load_inflow_profile(
+                        path, temporal_resolution_hours=1, num_nodes=cnt,
+                        date_start=date_start), fill=0.0)
+            try:
+                cache[gen_key] = loaders[file_key](gen_key, file_key)
+            except Exception as e:
+                logger.warning(f"Failed to load inflow for {gen.name}: {e}")
 
         if cache:
-            logger.debug(f"Loaded {len(file_cache)} unique inflow files for {len(cache)} generators")
+            logger.debug(f"Loaded {len(loaders)} unique inflow files for {len(cache)} generators")
         return cache
 
     def _generate_rooftop_solar(
@@ -2238,6 +3929,16 @@ class Orchestrator:
         sys = self.primary_system
         cfg = sys.rooftop_solar_config
 
+        # A None entry (a merged run's node of a system that leaves the list
+        # unset) takes rooftex's default there: initial adoption 0.05, and
+        # the potential rooftex draws when the systems/size lists are unset.
+        systems_pn = list(cfg.systems_per_node or [])
+        sizes = list(cfg.avg_system_size or [])
+        partial_size = None in systems_pn or None in sizes
+        init = cfg.initial_adoption or None
+        if init is not None:
+            init = [_ROOFTEX_DEFAULT_INITIAL_ADOPTION if v is None else v for v in init]
+
         # Generate base availability profile and adoption factors
         _rooftop_cfg = RooftopConfig(
             num_nodes=num_nodes,
@@ -2247,6 +3948,14 @@ class Orchestrator:
             adoption_scenario=cfg.adoption_scenario,
             weather_variability=cfg.weather_variability,
             seed=cfg.simulation_seed,
+            performance_ratio=cfg.performance_ratio,
+            # Unset (or empty, as the Studio writes them) → rooftex defaults:
+            # potential drawn per node, default scenario rates and caps.
+            initial_adoption=init,
+            systems_per_node=None if partial_size else (systems_pn or None),
+            avg_system_size_kw=None if partial_size else (sizes or None),
+            adoption_rates=cfg.adoption_rates or None,
+            max_adoption=cfg.max_adoption or None,
         )
         _rooftop_result = generate_profiles(_rooftop_cfg)
         rooftop_availability = _rooftop_result.availability
@@ -2256,10 +3965,18 @@ class Orchestrator:
             if hasattr(_rooftop_result.max_potential_mw, '__iter__')
             else [_rooftop_result.max_potential_mw] * num_nodes
         )
+        if partial_size:
+            # Nodes with both values keep systems × size; the rest keep the
+            # potential rooftex drew.
+            for n in range(min(num_nodes, len(systems_pn), len(sizes))):
+                if systems_pn[n] is not None and sizes[n] is not None:
+                    rooftop_potential[n] = systems_pn[n] * sizes[n] / 1000.0
 
-        # Use configured max potential if available
+        # Configured max potential where set (None: rooftex's)
         if sys.rooftop_max_potential:
-            rooftop_potential = list(sys.rooftop_max_potential)
+            for n, v in enumerate(sys.rooftop_max_potential[:num_nodes]):
+                if v is not None:
+                    rooftop_potential[n] = float(v)
 
         target_year = cfg.target_year
         base_year = cfg.base_year if hasattr(cfg, 'base_year') else start_year
@@ -2341,16 +4058,31 @@ class Orchestrator:
         master_cfg = getattr(self.config, 'master_problem', None)
         planning_mode = getattr(master_cfg, 'planning_mode', 'perfect_foresight')
 
-        if planning_mode == "myopic":
-            return self._solve_master_problem_myopic(
-                years_range, demand, hours, num_nodes,
-                ev_demand=ev_demand, total_demand=total_demand,
-            )
+        self._npv_retirements = []
+        self._master_loss_repair = {}
+        solve = (self._solve_master_problem_myopic if planning_mode == "myopic"
+                 else self._solve_master_problem_foresight)
+        result = solve(years_range, demand, hours, num_nodes,
+                       ev_demand=ev_demand, total_demand=total_demand)
+        if result is not None and len(result) > 2 and result[0] is not None and result[2] is not None:
+            self._add_reservoir_caps(result[0], result[2])
+        return result
 
-        return self._solve_master_problem_foresight(
-            years_range, demand, hours, num_nodes,
-            ev_demand=ev_demand, total_demand=total_demand,
-        )
+    def _add_reservoir_caps(self, investments_by_year: dict, caps_by_year: dict) -> None:
+        """Add the reservoir capacity built up to each year (MWh, summed over
+        the ``reservoir_investment_{g}_{n}`` keys of that year and the earlier
+        ones) to ``caps_by_year[year]["reservoir"]`` as ``{(g, node): MWh}``,
+        for :meth:`_build_config_from_cumulative`. Reservoirs do not retire.
+        """
+        built: dict[tuple[int, int], float] = {}
+        for year in sorted(caps_by_year):
+            for key, value in (investments_by_year.get(year) or {}).items():
+                gn = _reservoir_investment_key(key)
+                if gn is not None:
+                    at = (gn[0], self._master_index_node(gn[1]))
+                    built[at] = built.get(at, 0.0) + float(value)
+            if built and caps_by_year.get(year) is not None:
+                caps_by_year[year]["reservoir"] = dict(built)
 
     def _solve_master_problem_myopic(
         self,
@@ -2395,7 +4127,6 @@ class Orchestrator:
             primary = self.primary_system
             resolution_hours = getattr(temporal, 'resolution_hours', 1)
             hours_per_year_raw = HOURS_STD_YEAR
-            hours_per_year_agg = HOURS_STD_YEAR // resolution_hours
 
             # Per-system RE targets
             target_re = getattr(primary, 'target_re_penetration', 1.0)
@@ -2421,35 +4152,127 @@ class Orchestrator:
                     system_node_ranges.append((sname, off + 1, cnt, sys_init_re))
                 logger.debug(f"Per-system RE: {per_system_initial_re}")
 
-            # Per-system current RE tracking
-            current_re_per_system: dict[str, float] = dict(per_system_initial_re)
+            # Achieved RE share per system, for the log
+            current_re_per_system: dict[str, float] = {
+                name: init for name, _, _, init in system_node_ranges}
+
+            # Each year's RE target follows the perfect-foresight trajectory
+            # (RE-1: initial -> TARGET_RE_PENETRATION over the horizon, steps
+            # clamped to the annual increments), not last year's outcome.
+            min_inc = getattr(primary, 'min_annual_increment', 0.01)
+            max_inc = getattr(primary, 'max_annual_increment', 0.10)
+            re_paths = [re_target_trajectory(overall_initial_re, target_re, num_years,
+                                             min_inc, max_inc)]
+            if system_node_ranges:
+                re_paths = [re_target_trajectory(init, target_re, num_years, min_inc, max_inc)
+                            for _, _, _, init in system_node_ranges]
+
+            # The representative days (or TSAM periods) and the critical
+            # days, chosen once for the horizon: every annual master models
+            # the same calendar days with its own year's demand and profiles
+            use_tsam = master_cfg.use_tsam if master_cfg else False
+            horizon_demand_agg = (aggregate_demand_to_resolution(
+                master_demand[:hours_needed], target_hours=resolution_hours)
+                if resolution_hours > 1 else master_demand[:hours_needed])
+            day_plan = self._master_day_plan(horizon_demand_agg, num_years, resolution_hours)
+            tsam = day_plan.tsam
 
             # Accumulation state
             investments_by_year: dict[int, dict] = {}
             retirements_by_year: dict[int, dict] = {}
-            cumulative_gen_inv: dict[str, list[float]] = {}  # gen_key -> [MW per node]
-            cumulative_bat_pow_inv: dict[str, list[float]] = {}
-            cumulative_bat_cap_inv: dict[str, list[float]] = {}
+            cumulative_caps_by_year: dict[int, dict] = {}
+            # Capacity built so far: {"tech" | "bat_tech_power" |
+            # "bat_tech_capacity": {(technology key, build year index): per-node array}}
+            built: dict[str, dict[tuple[str, int], np.ndarray]] = {
+                "tech": {}, "bat_tech_power": {}, "bat_tech_capacity": {}}
+            # Electrolyzer power the master built: {key: {year index: MW per node}}
+            elz_builds: dict[str, dict[int, list[float]]] = {}
             current_re = overall_initial_re
+            # NPV-based retirement: the original units retired by earlier
+            # years stay retired; built units are not checked
+            npv_retired: list[tuple] = []
+            npv_unit_keys = (set(self.master_system.generators)
+                             | set(self.master_system.batteries))
+            # Annuity streams of the years solved so far, (0-based build
+            # year, life, $/year), for the reported yearly cost
+            annuity_streams: list[tuple[int, float, float]] = []
+            self.myopic_year_costs = {}
+
+            # A resumed run: the loop state where the interrupted run's
+            # last completed year left it (written below, after each year)
+            plan = getattr(self, "resume_plan", None)
+            carried = (plan.state.get("master") if plan is not None
+                       and plan.phase == PHASE_MASTER else None)
+            first_idx = 0
+            if carried:
+                if carried.get("day_plan") != _day_plan_digest(day_plan):
+                    raise ResumeError([ApiError(
+                        "day_plan_changed",
+                        "The master's representative days differ from the interrupted "
+                        "run's: the remaining years would not plan on the same days",
+                        key="master_problem", fix="Start a new run.")])
+                investments_by_year = carried["investments_by_year"]
+                retirements_by_year = carried["retirements_by_year"]
+                cumulative_caps_by_year = carried["cumulative_caps_by_year"]
+                built = carried["built"]
+                elz_builds = carried["elz_builds"]
+                current_re = carried["current_re"]
+                current_re_per_system = carried["current_re_per_system"]
+                npv_retired = list(carried["npv_retired"])
+                annuity_streams = list(carried["annuity_streams"])
+                self.myopic_year_costs = carried["myopic_year_costs"]
+                self._master_fuel_by_year = carried["master_fuel_by_year"]
+                self._npv_retirements = list(carried["npv_retirements"])
+                self.master_diagnostics = carried["master_diagnostics"]
+                first_idx = len(investments_by_year)
+                logger.info(f"Myopic master: years {years_range[0]}-{years_range[first_idx - 1]} "
+                            "restored from the checkpoint")
 
             for y_idx, year in enumerate(years_range):
+                if y_idx < first_idx:
+                    continue
                 logger.debug(f"\n--- Myopic: Year {year} ({y_idx+1}/{num_years}) ---")
 
-                # 1. Compute interpolated RE target for this year
-                if num_years > 1:
-                    progress = y_idx / (num_years - 1)
-                else:
-                    progress = 1.0
-                year_target_re = overall_initial_re + progress * (target_re - overall_initial_re)
-                logger.debug(f"  RE target: {year_target_re:.2%} (current: {current_re:.2%})")
+                # 1. This year's RE target on the horizon trajectory
+                year_targets = {(s + 1, 1): path[y_idx] for s, path in enumerate(re_paths)}
+                year_target_re = re_paths[0][y_idx]
+                # The minimum-increment floor (RE-3) perfect foresight places
+                # on this year: anchored where its chain stands the year
+                # before (initial share + y_idx minimum steps, at most 100 %)
+                year_anchor = myopic_re_anchor(overall_initial_re, min_inc, y_idx)
+                # The maximum increment caps the growth over the share the
+                # previous year achieved (year 0: the initial share), in [0, 1]
+                share_anchor = ([min(max(current_re_per_system[name], 0.0), 1.0)
+                                 for name, _, _, _ in system_node_ranges]
+                                if system_node_ranges else
+                                [min(max(current_re, 0.0), 1.0)])
+                logger.debug(f"  RE target: {year_target_re:.2%} (achieved last year: "
+                             f"{current_re:.2%}, floor anchor: {year_anchor:.2%})")
 
-                # 2. Prepare modified system config with accumulated investments
-                modified_config = self._prepare_system_for_myopic_year(
-                    y_idx=y_idx,
-                    cumulative_gen_inv=cumulative_gen_inv,
-                    cumulative_bat_pow_inv=cumulative_bat_pow_inv,
-                    cumulative_bat_cap_inv=cumulative_bat_cap_inv,
-                )
+                # 2. The master system as this year sees it: units aged,
+                # earlier years' builds as existing units, limits reduced
+                year_system, built_gens, built_bats = self._prepare_system_for_myopic_year(
+                    y_idx, built)
+                # Fuel storage, routes and electrolyzers earlier years built
+                # (#89): existing capacity now, less room to build. Storage
+                # and routes never retire; an electrolyzer build retires
+                # after its life_time, as in perfect foresight.
+                fuel_carried = ((getattr(self, "_master_fuel_by_year", None) or {})
+                                .get(years_range[y_idx - 1]) if y_idx > 0 else None)
+                elz_live, elz_used = self._myopic_electrolyzers(elz_builds, year_system, y_idx)
+                if fuel_carried:
+                    fuel_carried = dict(fuel_carried, electrolyzer=elz_live)
+                year_system = self._system_with_electrolyzers(year_system, elz_live, elz_used)
+                # Built units read their technology's profile
+                year_avail_cache = dict(self._availability_cache or {})
+                for unit_key, tech_key in built_gens:
+                    if tech_key in year_avail_cache:
+                        year_avail_cache[unit_key] = year_avail_cache[tech_key]
+                for unit_key, bt_key in built_bats:
+                    bt_cache_key = battery_technology_availability_key(bt_key)
+                    if bt_cache_key in year_avail_cache:
+                        year_avail_cache[battery_availability_key(unit_key)] = \
+                            year_avail_cache[bt_cache_key]
 
                 # 3. Extract this year's demand
                 yr_start_raw = y_idx * hours_per_year_raw
@@ -2464,48 +4287,10 @@ class Orchestrator:
                 else:
                     year_demand_agg = year_demand_raw
 
-                # 4. TSAM clustering for this single year
-                use_tsam = master_cfg.use_tsam if master_cfg else False
-                tsam_starts_y = []
-                tsam_weights_y = []
-                tsam_order_y = []
-
-                if use_tsam:
-                    from esfex.models.tsam import compute_tsam_periods
-
-                    tsam_num_periods = master_cfg.tsam_num_periods if master_cfg else 10
-                    tsam_method = master_cfg.tsam_method if master_cfg else "kmedoids"
-
-                    # Build RE availability for this year's clustering
-                    year_availability = None
-                    if self._availability_cache:
-                        year_avail_dict: dict[str, np.ndarray] = {}
-                        for gen_key, gen in self.primary_system.generators.items():
-                            if gen.type != "Renewable" or gen_key not in self._availability_cache:
-                                continue
-                            avail = self._availability_cache[gen_key]
-                            if resolution_hours > 1:
-                                avail = aggregate_to_resolution(avail, target_hours=resolution_hours)
-                            yr_start_agg = y_idx * hours_per_year_agg
-                            yr_end_agg = min((y_idx + 1) * hours_per_year_agg, avail.shape[0])
-                            if yr_end_agg > yr_start_agg:
-                                year_avail_dict[gen_key] = avail[yr_start_agg:yr_end_agg, :]
-                            else:
-                                year_avail_dict[gen_key] = avail[:hours_per_year_agg, :]
-                        if year_avail_dict:
-                            year_availability = year_avail_dict
-
-                    tsam_result = compute_tsam_periods(
-                        demand=year_demand_agg,
-                        num_periods=tsam_num_periods,
-                        method=tsam_method,
-                        period_length_hours=24 // resolution_hours,
-                        availability=year_availability,
-                    )
-                    # 1-indexed for Julia (no year offset since single year)
-                    tsam_starts_y = [[s + 1 for s in tsam_result.period_start_hours]]
-                    tsam_weights_y = [tsam_result.period_weights]
-                    tsam_order_y = [[i + 1 for i in tsam_result.chronological_order]]
+                # 4. TSAM periods: the ones chosen once for the horizon
+                tsam_starts_y = [[st + 1 for st in tsam.period_start_hours]] if tsam else []
+                tsam_weights_y = [list(tsam.period_weights)] if tsam else []
+                tsam_day_period_y = [[k + 1 for k in tsam.day_period]] if tsam else []
 
                 # 5. Stochastic scenarios
                 use_stochastic = master_cfg.stochastic if master_cfg else False
@@ -2530,44 +4315,67 @@ class Orchestrator:
                 # 6. Build per-system node ranges with current RE for this year
                 year_sys_ranges: list[tuple] = []
                 if system_node_ranges:
-                    for name, first_bus, n_bus, _ in system_node_ranges:
-                        sys_current_re = current_re_per_system.get(name, current_re)
-                        year_sys_ranges.append((name, first_bus, n_bus, sys_current_re))
+                    for name, first_bus, n_bus, init in system_node_ranges:
+                        year_sys_ranges.append(
+                            (name, first_bus, n_bus, myopic_re_anchor(init, min_inc, y_idx)))
 
                 # 7. Create single-year MasterProblem
                 master = MasterProblemAdapter(
-                    config=modified_config,
+                    config=self.config,
                     years=[year],
                     base_year=year,
                     demand=year_demand_agg,
                     demand_growth=0.0,  # No growth within single year
                     discount_rate=getattr(primary, 'discount_rate', 0.05),
-                    max_annual_investment=getattr(primary, 'max_annual_system_cost', 1e9),
+                    max_annual_investment=getattr(primary, 'max_annual_investment', 1e9),
+                    budget_scope=getattr(primary, 'budget_scope', 'investment'),
                     target_re_penetration=year_target_re,
-                    initial_re_penetration=current_re,
-                    min_re_increment=getattr(primary, 'min_annual_increment', 0.01),
-                    max_re_increment=getattr(primary, 'max_annual_increment', 0.10),
+                    initial_re_penetration=year_anchor,
+                    min_re_increment=min_inc,
+                    max_re_increment=max_inc,
                     system_node_ranges=year_sys_ranges,
+                    re_target_override=year_targets,
+                    re_share_anchor=share_anchor,
+                    # Fuel prices grow from the run's first year, not this one
+                    fuel_price_base_year=self._fuel_price_base_year(years_range[0]),
                     temporal_resolution_hours=resolution_hours,
                     investment_resolution_hours=getattr(temporal, 'investment_resolution', HOURS_STD_YEAR),
                     representative_days_per_year=master_cfg.representative_days if master_cfg else 5,
                     min_day_separation=master_cfg.min_day_separation if master_cfg else 5,
+                    rep_day_offsets=day_plan.rep_day_offsets,
+                    critical_day_offsets=day_plan.critical_day_offsets,
+                    rep_day_weights=day_plan.rep_day_weights,
+                    storage_firm_hours=day_plan.storage_firm_hours,
                     solver_method=master_cfg.solver_method if master_cfg else "monolithic",
                     benders_max_iterations=master_cfg.benders_max_iterations if master_cfg else 50,
                     benders_tolerance=master_cfg.benders_tolerance if master_cfg else 1e-4,
-                    benders_lol_penalty_cap=master_cfg.benders_lol_penalty_cap if master_cfg else 1000.0,
                     use_tsam=use_tsam,
                     tsam_period_start_hours=tsam_starts_y,
                     tsam_period_weights=tsam_weights_y,
-                    tsam_chronological_order=tsam_order_y,
+                    tsam_day_period=tsam_day_period_y,
                     tsam_inter_period_linking=(
                         master_cfg.tsam_inter_period_linking if master_cfg else True
                     ),
+                    tsam_critical_periods=tsam.critical_periods if tsam else None,
                     use_stochastic=use_stochastic,
                     stochastic_scenarios=stochastic_scenario_dicts,
                     config_path=str(self.config_path) if self.config_path else None,
-                    availability_cache=self._availability_cache,
-                    system_config=self.master_system,
+                    availability_cache=year_avail_cache,
+                    inflow_cache=getattr(self, "_inflow_cache", None),
+                    date_start=self._data_start().strftime("%d/%m/%Y %H:%M"),
+                    # This year's block of multi-year profiles (horizon hour
+                    # y_idx × 8760, wrapping around), as in the dispatch
+                    profile_start_hour=y_idx * hours_per_year_raw,
+                    system_config=year_system,
+                    primary_energy=self._master_fuel_kwargs(
+                        year_system, year,
+                        cumulative=fuel_carried and {k: fuel_carried.get(k, {})
+                                                     for k in ("storage", "transport")}),
+                    retired_units=list(npv_retired),
+                    npv_unit_keys=npv_unit_keys,
+                    # The NPV covers the unit's years up to the horizon end
+                    npv_horizon_end=years_range[-1],
+                    debug_lp_dir=self._benders_debug_lp_dir(),
                 )
 
                 # 7. Solve
@@ -2575,68 +4383,93 @@ class Orchestrator:
                 status = master.solve()
 
                 if status != 1:
-                    logger.error(f"Myopic year {year}: not optimal (status={status})")
-                    # Continue with empty investments for this year
-                    investments_by_year[year] = {}
-                    retirements_by_year[year] = {}
-                    continue
+                    # Later years build on this one: without its plan they
+                    # would plan from a stale fleet, so the run stops
+                    self._report_myopic_failure(master, year, years_range[:y_idx])
+                    return None, None, None, None
 
+                self._record_master_diagnostics(master, f"Master {year}")
                 result = master.get_solution_values()
+                if isinstance(getattr(master, "loss_repair", None), dict):
+                    self._master_loss_repair[year] = master.loss_repair
+                self._report_myopic_year_cost(year, y_idx, result, annuity_streams)
+                self._store_master_fuel(master, result, [year], carried=fuel_carried)
+                for r in self._record_npv_retirements(master, year):
+                    npv_retired.append((r["kind"], r["key"], r["bus"]))
+                to_caps = getattr(master, "fuel_capacities_by_year", None)
+                year_elz = ((to_caps(result) if to_caps is not None else {})
+                            .get(1, {}).get("electrolyzer", {}))
+                for key, per_node in year_elz.items():
+                    elz_builds.setdefault(key, {})[y_idx] = list(per_node)
                 solution = result.get('solution', {})
                 year_data = solution.get(year, {})
 
-                # 8. Extract investments
-                year_inv: dict[str, float] = {}
-                for category in ['tech_investment', 'bat_tech_power_investment',
-                                 'bat_tech_capacity_investment', 'transfer_investment']:
-                    for key, value in year_data.get(category, {}).items():
-                        if value > 0.1:
-                            year_inv[key] = float(value)
+                # 8. Extract investments (all of them: the later years
+                # inherit exactly what this year's dispatch ran with)
+                year_inv = master_year_builds(year_data)
 
                 investments_by_year[year] = year_inv
 
-                # 9. Extract retirements
+                # 9. Extract retirements (of the original units; the built
+                # ones retire at their technology's lifetime)
+                n_gen0 = len(self.master_system.generators)
                 year_ret: dict[str, float] = {}
                 gen_life_ext = result.get('gen_life_extension', {})
                 if 1 in gen_life_ext:  # year_idx=1 for single year
                     for gen_idx, node_values in gen_life_ext[1].items():
-                        vals = np.array(node_values) if hasattr(node_values, '__len__') else np.array([node_values])
-                        retired = float(np.mean(1 - vals)) if len(vals) > 0 else 0.0
+                        if int(gen_idx) > n_gen0:
+                            continue
+                        py_idx = int(gen_idx) - 1
+                        retired = self._retired_share(py_idx, node_values, year)
                         if retired > 0.01:
-                            py_idx = int(gen_idx) - 1
                             year_ret[f'gen_{py_idx}'] = retired
                 retirements_by_year[year] = year_ret
 
-                # 10. Accumulate investments for next year
-                self._accumulate_myopic_investments(
-                    year_inv, cumulative_gen_inv,
-                    cumulative_bat_pow_inv, cumulative_bat_cap_inv,
-                    num_nodes,
-                )
+                # 10. Capacity in service this year, for the dispatch
+                cumulative_caps_by_year[year] = self._myopic_year_caps(
+                    result, built_gens, built_bats, built, y_idx)
 
-                # 11. Update current RE penetration (global + per-system)
-                re_pen = result.get('re_penetration_by_year', [])
-                if re_pen:
-                    current_re = float(re_pen[0]) if isinstance(re_pen, list) else float(re_pen)
-                else:
-                    current_re = year_target_re
+                # 11. Accumulate investments for next year
+                self._accumulate_myopic_investments(year_inv, y_idx, built)
 
-                # Update per-system RE tracking
-                re_per_sys = result.get('re_penetration_by_system', {})
-                for sname, re_vals in re_per_sys.items():
-                    if isinstance(re_vals, (list, tuple)) and re_vals:
+                # 12. Achieved RE share (global + per system), for the log
+                re_pen = np.atleast_1d(result.get('re_penetration_by_year', []))
+                current_re = float(re_pen[0]) if re_pen.size else year_target_re
+                for sname, re_vals in result.get('re_penetration_by_system', {}).items():
+                    re_vals = np.atleast_1d(re_vals)
+                    if sname in current_re_per_system and re_vals.size:
                         current_re_per_system[sname] = float(re_vals[0])
-                    elif isinstance(re_vals, (int, float)):
-                        current_re_per_system[sname] = float(re_vals)
 
                 total_year_inv = sum(year_inv.values())
-                re_sys_str = ", ".join(f"{s}={v:.1%}" for s, v in current_re_per_system.items())
+                re_sys_str = ""
+                if current_re_per_system:
+                    re_sys_str = " (per system: " + ", ".join(
+                        f"{s}={v:.1%}" for s, v in current_re_per_system.items()) + ")"
                 logger.debug(
                     f"  Year {year}: {len(year_inv)} investments "
                     f"({total_year_inv:.0f} MW total), "
                     f"{len(year_ret)} retirements, "
-                    f"RE achieved: {current_re:.2%} (per-system: {re_sys_str})"
+                    f"RE achieved: {current_re:.2%}{re_sys_str}"
                 )
+
+                # 13. Checkpoint: what the next year starts from
+                last = y_idx + 1 == num_years
+                self._write_checkpoint(
+                    PHASE_MASTER, None if last else years_range[y_idx + 1],
+                    master_year=year, master_state={
+                        "day_plan": _day_plan_digest(day_plan),
+                        "investments_by_year": investments_by_year,
+                        "retirements_by_year": retirements_by_year,
+                        "cumulative_caps_by_year": cumulative_caps_by_year,
+                        "built": built, "elz_builds": elz_builds,
+                        "current_re": current_re,
+                        "current_re_per_system": current_re_per_system,
+                        "npv_retired": npv_retired, "annuity_streams": annuity_streams,
+                        "myopic_year_costs": self.myopic_year_costs,
+                        "master_fuel_by_year": getattr(self, "_master_fuel_by_year", None) or {},
+                        "npv_retirements": self._npv_retirements,
+                        "master_diagnostics": self.master_diagnostics,
+                    })
 
             # Summary
             total_inv = sum(len(v) for v in investments_by_year.values())
@@ -2645,18 +4478,20 @@ class Orchestrator:
                 f"\nMyopic planning complete: {total_inv} investments, "
                 f"{total_ret} retirements across {num_years} years"
             )
+            if self.myopic_year_costs:
+                logger.info(
+                    "Myopic plan cost, sum of the yearly costs with the earlier "
+                    "builds' annuities (undiscounted): $%s",
+                    f"{sum(c['total'] for c in self.myopic_year_costs.values()):,.0f}")
 
-            # Build RE targets from tracked values
-            re_targets_by_year = {}
-            for y_idx, year in enumerate(years_range):
-                if y_idx == 0:
-                    re_targets_by_year[year] = overall_initial_re
-                else:
-                    progress = y_idx / (num_years - 1) if num_years > 1 else 1.0
-                    re_targets_by_year[year] = overall_initial_re + progress * (target_re - overall_initial_re)
+            # Each year's RE target, as its master had it
+            re_targets_by_year = {year: re_paths[0][y_idx]
+                                  for y_idx, year in enumerate(years_range)}
 
-            return investments_by_year, retirements_by_year, {}, re_targets_by_year
+            return investments_by_year, retirements_by_year, cumulative_caps_by_year, re_targets_by_year
 
+        except ResumeError:
+            raise
         except Exception as e:
             import traceback
             tb = traceback.format_exc()
@@ -2665,117 +4500,634 @@ class Orchestrator:
             console.print(f"[dim]{tb}[/dim]")
             return None, None, None, None
 
+    def _rep_day_dates(self, offsets: Iterable[int], resolution_hours: int) -> str:
+        """Calendar dates ("15 Jan") of master steps *offsets* within a year,
+        on the data's calendar (``date_start``, Feb 29 skipped)."""
+        steps = HOURS_STD_YEAR // max(1, resolution_hours)
+        index = model_time_index(self._data_start(), steps, resolution_hours)
+        return ", ".join(index[int(o) % steps].strftime("%d %b") for o in offsets)
+
+    def _master_re_profiles(self, resolution_hours: int,
+                            transform=None) -> list[tuple[str, np.ndarray, np.ndarray]]:
+        """The distinct availability profiles of the renewable generators
+        and candidate technologies the master uses (the run's preloaded
+        profiles, ``_availability_cache``), at the master's resolution, as
+        ``(label, profile [steps × nodes], series)``. *series* is the mean
+        over the nodes where the units sharing the profile have capacity
+        (``rated_power`` / ``invest_max_power`` > 0; all nodes if none).
+        Units with the same profile (same file or same values) share one
+        entry, labelled with their keys. *transform*, when given, maps each
+        profile to the one returned (and its series)."""
+        return [entry[:3] for entry in
+                self._master_re_profiles_with_capacity(resolution_hours, transform)]
+
+    def _master_re_profiles_with_capacity(
+            self, resolution_hours: int,
+            transform=None) -> list[tuple[str, np.ndarray, np.ndarray, float]]:
+        """``_master_re_profiles`` with, for each profile, the renewable
+        capacity behind it (MW): the rated power of the existing units plus
+        the investment limit of the candidate technologies sharing it, over
+        all nodes. It weighs the profile in the renewable supply of the
+        critical days (``master_critical_days``)."""
+        cache = self._availability_cache or {}
+        groups: dict[bytes, list] = {}
+        units = [(k, g.rated_power) for k, g in self.primary_system.generators.items()
+                 if g.type == "Renewable"]
+        units += [(k, t.invest_max_power) for k, t in self.primary_system.technologies.items()
+                  if t.type == "Renewable"]
+        for key, cap in units:
+            avail = cache.get(key)
+            if avail is None or len(avail) == 0:
+                continue
+            avail = np.asarray(avail, dtype=float)
+            if avail.ndim == 1:
+                avail = avail[:, None]
+            if resolution_hours > 1:
+                avail = aggregate_to_resolution(avail, target_hours=resolution_hours)
+            cap = np.asarray(cap or [], dtype=float)
+            mask = np.zeros(avail.shape[1], dtype=bool)
+            if len(cap) == avail.shape[1]:
+                mask = cap > 0
+            avail = np.ascontiguousarray(avail)
+            digest = hashlib.blake2b(memoryview(avail).cast("B"),
+                                     person=str(avail.shape).encode()[:16]).digest()
+            entry = groups.setdefault(digest,
+                                      [[], avail, np.zeros(avail.shape[1], dtype=bool), 0.0])
+            entry[0].append(key)
+            entry[2] |= mask
+            entry[3] += float(np.clip(cap, 0.0, None).sum())
+        out = []
+        for keys, avail, mask, capacity in groups.values():
+            label = ", ".join(keys[:3]) + (f" (+{len(keys) - 3})" if len(keys) > 3 else "")
+            weights = (mask if mask.any() else np.ones_like(mask)).astype(float)
+            if transform is not None:
+                avail = transform(avail)
+            series = avail @ (weights / weights.sum())
+            out.append((label, avail, series, capacity))
+        return out
+
+    def _log_rep_day_ratios(self, kind: str, demand_agg: np.ndarray, num_years: int,
+                            offsets: list[int], resolution_hours: int, profiles: list,
+                            weights: Optional[list[float]] = None,
+                            warn: bool = True) -> list[float]:
+        """Log, per series, the representative days' (or TSAM periods')
+        mean over the annual mean, for the demand and each renewable profile
+        (``master_rep_day_ratios``): how far the master's year is from the
+        real one. Warns (when *warn*) when one is off by more than 10 %,
+        advising more representative days or TSAM. Returns the ratios
+        (demand first)."""
+        from esfex.bridge.adapters import master_rep_day_ratios
+        ratios = master_rep_day_ratios(demand_agg, num_years, offsets, resolution_hours,
+                                       [s for _, _, s in profiles], weights)
+        names = ["demand"] + [label for label, _, _ in profiles]
+        text = ", ".join(f"{n} {r:.3f}" for n, r in zip(names, ratios) if np.isfinite(r))
+        logger.info("%s mean / annual mean: %s", kind, text)
+        off = [n for n, r in zip(names, ratios) if np.isfinite(r) and abs(r - 1.0) > 0.10]
+        if off and warn:
+            logger.warning(
+                "%s misrepresent the year by more than 10 %% for: %s. The master "
+                "sees more or less energy than the year has; use more representative "
+                "days (master_problem.representative_days) or TSAM (use_tsam).",
+                kind, ", ".join(off))
+        return ratios
+
+    def _log_tsam_rescaling(self, demand_agg: np.ndarray, num_years: int, tsam,
+                            resolution_hours: int) -> None:
+        """Log what the master's TSAM periods (critical days included) give
+        each series once the renewable profiles are rescaled to each year's
+        energy (``rescale_profile_periods``, as ``MasterProblemAdapter``
+        rescales the master's profiles): the periods' weighted mean of the
+        horizon-mean series over the annual mean of the original one. The
+        residual is ~0 unless the cap at full availability stopped a profile
+        (said which); the demand is not rescaled. Warns, advising more TSAM
+        periods, when a series is still off by more than 10 %."""
+        from esfex.models.tsam import rescale_profile_periods
+
+        res = max(1, resolution_hours)
+        steps, period = HOURS_STD_YEAR // res, 24 // res
+        n_years = max(1, num_years)
+        starts = list(tsam.period_start_hours)
+        weights = np.asarray(tsam.period_weights, dtype=float)
+        years = [(y * steps, starts, list(weights)) for y in range(n_years)]
+
+        def horizon_mean(x: np.ndarray) -> np.ndarray:
+            return np.mean([_profile_year_block(np.asarray(x, dtype=float), y, steps)
+                            for y in range(n_years)], axis=0)
+
+        def ratio(on_periods: np.ndarray, reference: np.ndarray) -> float:
+            annual = float(horizon_mean(reference).mean())
+            if annual <= 1e-12:
+                return float("nan")
+            mean = horizon_mean(on_periods)
+            days = np.array([mean[s:s + period].mean() for s in starts])
+            return float(weights @ days / weights.sum() / annual)
+
+        total = np.asarray(demand_agg, dtype=float).sum(axis=1)
+        names, ratios = ["demand"], [ratio(total, total)]
+        rescaled = self._master_re_profiles(res, transform=lambda avail: (
+            rescale_profile_periods(avail, years, period, steps, tsam.critical_periods)[0]))
+        for (label, _, before), (_, _, after) in zip(self._master_re_profiles(res), rescaled):
+            names.append(label)
+            ratios.append(ratio(after, before))
+        logger.info("TSAM periods with the renewable profiles rescaled to the year's energy, "
+                    "mean / annual mean: %s", ", ".join(
+                        f"{n} {r:.3f}" for n, r in zip(names, ratios) if np.isfinite(r)))
+        capped = [f"{n} {r:.3f}" for n, r in zip(names[1:], ratios[1:])
+                  if np.isfinite(r) and r < 1.0 - 1e-3]
+        if capped:
+            logger.info("The cap at full availability kept the TSAM periods short of the "
+                        "year's energy for: %s", ", ".join(capped))
+        off = [n for n, r in zip(names, ratios) if np.isfinite(r) and abs(r - 1.0) > 0.10]
+        if off:
+            logger.warning(
+                "TSAM periods misrepresent the year by more than 10 %% for: %s, after "
+                "rescaling the renewable profiles to the year's energy (the demand is "
+                "not rescaled; a profile at full availability on the periods cannot "
+                "rise further). Use more TSAM periods (master_problem.tsam_num_periods).",
+                ", ".join(off))
+
+    def _master_rep_day_offsets(self, demand_agg: np.ndarray, num_years: int,
+                                resolution_hours: int) -> list[int]:
+        """The representative days every master of this run models, as
+        steps within a year (0-based): chosen ONCE, from the horizon-mean
+        demand and the renewable profiles (``master_rep_day_offsets``: the
+        peak day, then days that give the year's mean demand and mean
+        availability of each profile), so each year differs from the others
+        only by its demand (and its block of multi-year profiles), never by
+        the weather sample. Logged with their dates and their bias per
+        profile."""
+        from esfex.bridge.adapters import master_rep_day_offsets
+        master_cfg = getattr(self.config, 'master_problem', None)
+        profiles = self._master_re_profiles(resolution_hours)
+        offsets = master_rep_day_offsets(
+            demand_agg, num_years,
+            master_cfg.representative_days if master_cfg else 5,
+            master_cfg.min_day_separation if master_cfg else 5,
+            resolution_hours, [s for _, _, s in profiles])
+        logger.info("Representative days, the same for every planning year: %s",
+                    self._rep_day_dates(offsets, resolution_hours))
+        self._log_rep_day_ratios("Representative days", demand_agg, num_years, offsets,
+                                 resolution_hours, profiles)
+        return offsets
+
+    def _master_tsam_periods(self, demand_agg: np.ndarray, num_years: int,
+                             resolution_hours: int):
+        """TSAM periods every master of this run models, chosen ONCE: the
+        clustering (``compute_tsam_periods``) of the horizon-mean demand and
+        the availability of the renewable generators and candidate
+        technologies (``_master_re_profiles``; the mean over the years of
+        each step, each year's block as the dispatch reads it,
+        ``_profile_year_block``). Start steps are 0-based within a year.
+        Logged with their dates and their bias per profile before the
+        renewable profiles are rescaled to the year's energy (the bias
+        that remains is logged by ``_log_tsam_rescaling``)."""
+        from esfex.models.tsam import compute_tsam_periods
+
+        master_cfg = getattr(self.config, 'master_problem', None)
+        steps = HOURS_STD_YEAR // max(1, resolution_hours)
+        n_years = max(1, num_years)
+
+        def horizon_mean(arr: np.ndarray) -> np.ndarray:
+            return np.mean([_profile_year_block(arr, y, steps) for y in range(n_years)],
+                           axis=0)
+
+        profiles = self._master_re_profiles(resolution_hours)
+        availability = {label: horizon_mean(avail) for label, avail, _ in profiles}
+        result = compute_tsam_periods(
+            demand=horizon_mean(demand_agg),
+            num_periods=master_cfg.tsam_num_periods if master_cfg else 10,
+            method=master_cfg.tsam_method if master_cfg else "kmedoids",
+            period_length_hours=24 // resolution_hours,
+            availability=availability or None,
+        )
+        logger.info("TSAM periods, the same for every planning year: %s",
+                    self._rep_day_dates(result.period_start_hours, resolution_hours))
+        self._log_rep_day_ratios("TSAM periods (before rescaling the renewable profiles)",
+                                 demand_agg, num_years, list(result.period_start_hours),
+                                 resolution_hours, profiles, list(result.period_weights),
+                                 warn=False)
+        return result
+
+    def _master_day_plan(self, demand_agg: np.ndarray, num_years: int,
+                         resolution_hours: int) -> MasterDayPlan:
+        """The days every master of this run models, chosen ONCE: the
+        representative days (``_master_rep_day_offsets``) or TSAM periods
+        (``_master_tsam_periods``), plus ``master_problem.critical_days``
+        critical days, the days of the horizon with the largest net load
+        (``master_critical_days``: horizon-mean demand against the renewable
+        profiles weighted by the capacity behind each). Each critical day
+        stands for one day of the year. The representative days share the
+        rest, reweighted so the year keeps their demand and renewable energy
+        (``master_day_weights``); a critical day leaves its TSAM cluster
+        instead (``with_critical_days``), so every TSAM weight stays the
+        period's count of days in the year, the days the master's seasonal
+        storage runs through (the renewable profiles are then rescaled to
+        the year's energy). Also the storage firm hours of the adequacy
+        constraint: ``master_problem.storage_firm_hours`` or the longest
+        stretch without solar on the critical days. Logged with their
+        dates."""
+        from esfex.bridge.adapters import master_critical_days, master_day_weights
+        from esfex.models.tsam import with_critical_days
+
+        master_cfg = getattr(self.config, 'master_problem', None)
+        use_tsam = master_cfg.use_tsam if master_cfg else False
+        tsam = rep_offsets = None
+        if use_tsam:
+            tsam = self._master_tsam_periods(demand_agg, num_years, resolution_hours)
+            base = list(tsam.period_start_hours)
+        else:
+            rep_offsets = self._master_rep_day_offsets(demand_agg, num_years, resolution_hours)
+            base = rep_offsets
+
+        profiles = self._master_re_profiles_with_capacity(resolution_hours)
+        series = [s for _, _, s, _ in profiles]
+        critical, firm_hours = master_critical_days(
+            demand_agg, num_years, master_cfg.critical_days if master_cfg else 3,
+            master_cfg.min_day_separation if master_cfg else 5, resolution_hours,
+            series, [c for _, _, _, c in profiles], exclude=base)
+        weights: list[float] = []
+        if critical and tsam is not None:
+            tsam = with_critical_days(tsam, critical, 24 // max(1, resolution_hours))
+            weights = list(tsam.period_weights)
+        elif critical:
+            weights = master_day_weights(demand_agg, num_years, base, critical,
+                                         resolution_hours, series)
+        if critical:
+            logger.info("Critical days (lowest renewable supply against demand), the same "
+                        "for every planning year, one day of the year each: %s",
+                        self._rep_day_dates(critical, resolution_hours))
+            self._log_rep_day_ratios(
+                "TSAM periods with critical days (before rescaling the renewable "
+                "profiles)" if use_tsam else "Representative and critical days",
+                demand_agg, num_years, base + critical, resolution_hours,
+                [p[:3] for p in profiles], weights, warn=not use_tsam)
+        configured = master_cfg.storage_firm_hours if master_cfg else None
+        if configured:
+            firm_hours = float(configured)
+        logger.info("Storage firm hours in the capacity adequacy: %.1f h (%s); a battery "
+                    "counts min(power, usable energy / %.1f h)", firm_hours,
+                    "configured" if configured else "longest stretch without solar on "
+                    "the critical days", firm_hours)
+
+        if tsam is not None:
+            weights = []
+            # The masters rescale the renewable profiles on the TSAM periods
+            # to each year's energy (MasterProblemAdapter._tsam_energy_matched)
+            self._log_tsam_rescaling(demand_agg, num_years, tsam, resolution_hours)
+        return MasterDayPlan(rep_day_offsets=rep_offsets, critical_day_offsets=(
+            [] if use_tsam else critical), rep_day_weights=weights,
+            storage_firm_hours=firm_hours, tsam=tsam)
+
+    def _benders_debug_lp_dir(self) -> Optional[str]:
+        """The run's ``logs`` folder when ``ESFEX_BENDERS_DEBUG_LP=1``: Benders
+        writes the master and subproblem LPs that fail there. None (no LP
+        written) otherwise."""
+        if os.environ.get("ESFEX_BENDERS_DEBUG_LP") != "1":
+            return None
+        lp_dir = self.output_dir / "logs"
+        lp_dir.mkdir(parents=True, exist_ok=True)
+        return str(lp_dir)
+
+    def _master_debug_lp_path(self) -> Optional[Path]:
+        """``<output>/logs/master_problem_debug.lp`` when
+        ``ESFEX_MASTER_DEBUG_LP=1``: the perfect-foresight monolithic master
+        is written there before it is solved. None (no LP written)
+        otherwise."""
+        if os.environ.get("ESFEX_MASTER_DEBUG_LP") != "1":
+            return None
+        lp_dir = self.output_dir / "logs"
+        lp_dir.mkdir(parents=True, exist_ok=True)
+        return lp_dir / "master_problem_debug.lp"
+
+    def _report_myopic_year_cost(self, year: int, y_idx: int, result: dict,
+                                 streams: list) -> None:
+        """Log myopic year *year*'s cost comparable with a perfect-foresight
+        year and keep it in ``myopic_year_costs[year]``: its master's
+        objective, which charges only the annuities of what this year builds,
+        plus the annuities this year pays on what earlier years built
+        (``earlier_build_annuities``). Reporting only: the optimisation is
+        unchanged. Then adds this year's annuity streams to *streams*."""
+        objective = result.get("objective")
+        if objective is not None:
+            earlier = earlier_build_annuities(streams, y_idx)
+            self.myopic_year_costs[year] = {
+                "objective": float(objective), "earlier_annuities": earlier,
+                "total": float(objective) + earlier}
+            logger.info(
+                f"Myopic year {year}: master objective ${objective:,.0f} + "
+                f"${earlier:,.0f} annuities of capacity built in earlier years "
+                f"= ${objective + earlier:,.0f}")
+        # One-year master: its builds are of year index 1
+        streams.extend((y_idx, life, annuity)
+                       for _, life, annuity in result.get("annuity_streams", []))
+
+    @staticmethod
+    def _report_myopic_failure(master, year: int, solved_years: list[int]) -> None:
+        """Log why a myopic run stops at *year*: the master's termination
+        status, the years already planned and, for an infeasible master,
+        the constraints that cannot hold together (when the solver can
+        compute them)."""
+        status = getattr(master, "_last_status", "") or "unknown status"
+        done = (f"years {solved_years[0]}-{solved_years[-1]} were planned"
+                if solved_years else "no year was planned")
+        lines = [
+            f"Myopic year {year}: the master problem is not optimal ({status}). "
+            f"Each year plans from the fleet the years before it built, so the "
+            f"run stops here ({done}); no dispatch is run on a partial plan."]
+        conflict = master.conflict() if "INFEASIBLE" in status.upper() else []
+        if conflict:
+            lines.append("Constraints that cannot hold together:")
+            lines.extend(f"  {c}" for c in conflict)
+        elif "INFEASIBLE" in status.upper():
+            lines.append(
+                "The RE target, budget and capacity adequacy are priced, so a hard "
+                "limit cannot be met: check the investment limits, the life-extension "
+                "and retirement settings and the custom constraints (the solver "
+                "reported no infeasible subsystem).")
+        logger.error("\n".join(lines))
+
     def _prepare_system_for_myopic_year(
         self,
         y_idx: int,
-        cumulative_gen_inv: dict[str, list[float]],
-        cumulative_bat_pow_inv: dict[str, list[float]],
-        cumulative_bat_cap_inv: dict[str, list[float]],
-    ) -> 'ESFEXConfig':
-        """
-        Create a modified ESFEXConfig for a myopic year.
+        built: dict[str, dict[tuple[str, int], np.ndarray]],
+    ) -> tuple[SystemConfig, list[tuple[str, str]], list[tuple[str, str]]]:
+        """The merged master system as myopic year *y_idx* sees it.
 
-        Applies cumulative investments from previous years as existing capacity
-        and reduces invest_max accordingly. Ages existing units.
+        Starts from ``self.master_system`` (node-level, keys
+        ``{system}__{key}`` in a multi-system run):
+
+        * existing generators and batteries are *y_idx* years older;
+        * capacity built in earlier years (*built*, see
+          :meth:`_accumulate_myopic_investments`) becomes existing units with
+          their technology's parameters (:func:`technology_unit_fields`), at
+          the nodes where it was built, one unit per technology and build
+          year, aged from the build year with the technology's degradation
+          and retired at its lifetime, as perfect foresight counts its
+          investments. On a bus-level master (a system with buses: one node,
+          or development zones) each bus with capacity gets its own unit,
+          pinned to that bus (``bus_id_per_node``); the adapter would place a
+          node-level unit at the node's first bus;
+        * each technology's ``invest_max`` is reduced by what was built (the
+          limit holds for the whole horizon, as in perfect foresight).
 
         Returns:
-            Modified ESFEXConfig with updated primary system.
+            ``(system, built_gens, built_bats)``: the year's system and the
+            ``(unit key, technology key)`` of the built units it holds, in
+            the order they follow the original units.
         """
-        modified = self.config.model_copy(deep=True)
-        sys = modified.primary_system
+        from esfex.config.schema import BatteryConfig, GeneratorConfig
 
-        # Apply cumulative generator investments
-        for gen_key, gen in sys.generators.items():
-            # Age existing units
-            if y_idx > 0:
-                gen.initial_age = [age + y_idx for age in gen.initial_age]
+        base = self.master_system
+        sys = base.model_copy(deep=True)
+        n = base.num_nodes
 
-            # Apply accumulated investments to rated_power
-            if gen_key in cumulative_gen_inv:
-                inv_per_node = cumulative_gen_inv[gen_key]
-                for n in range(len(gen.rated_power)):
-                    if n < len(inv_per_node):
-                        gen.rated_power[n] += inv_per_node[n]
-                        # Reduce invest_max by already-invested capacity
-                        if n < len(gen.invest_max_power):
-                            gen.invest_max_power[n] = max(
-                                0.0, gen.invest_max_power[n] - inv_per_node[n]
-                            )
+        for gen in sys.generators.values():
+            gen.initial_age = [age + y_idx for age in gen.initial_age]
+        for bat in sys.batteries.values():
+            bat.initial_age = [age + y_idx for age in bat.initial_age]
 
-        # Apply cumulative battery investments
-        for bat_key, bat in sys.batteries.items():
-            if y_idx > 0:
-                bat.initial_age = [age + y_idx for age in bat.initial_age]
+        def rep(arr, default=0.0):
+            return _per_node_list(arr, n, default)
 
-            if bat_key in cumulative_bat_pow_inv:
-                inv_per_node = cumulative_bat_pow_inv[bat_key]
-                for n in range(len(bat.MaxChargePower)):
-                    if n < len(inv_per_node):
-                        bat.MaxChargePower[n] += inv_per_node[n]
-                        bat.MaxDischargePower[n] += inv_per_node[n]
-                        if n < len(bat.invest_max_power):
-                            bat.invest_max_power[n] = max(
-                                0.0, bat.invest_max_power[n] - inv_per_node[n]
-                            )
+        def _reduce(limits, used):
+            return [remaining_limit(lim, used[i]) for i, lim in enumerate(rep(limits))]
 
-            if bat_key in cumulative_bat_cap_inv:
-                inv_per_node = cumulative_bat_cap_inv[bat_key]
-                for n in range(len(bat.capacity)):
-                    if n < len(inv_per_node):
-                        bat.capacity[n] += inv_per_node[n]
-                        if n < len(bat.invest_max_capacity):
-                            bat.invest_max_capacity[n] = max(
-                                0.0, bat.invest_max_capacity[n] - inv_per_node[n]
-                            )
+        # *built* arrays are per master bus: one per node on a node-level
+        # master, the system's buses otherwise
+        from esfex.bridge.converters import node_bus_mapping_required
+        buses = base.buses if node_bus_mapping_required(base.buses, n) else []
 
-        return modified
+        def per_node(arr):
+            if not buses:
+                return arr
+            out = np.zeros(n)
+            for b, bus in enumerate(buses[:len(arr)]):
+                out[bus.parent_node] += arr[b]
+            return out
+
+        def pieces(*arrays):
+            """``(key suffix, bus_id_per_node, per-node arrays)`` of each unit
+            to build from per-master-bus *arrays*."""
+            if not buses:
+                yield "", None, arrays
+                return
+            for b, bus in enumerate(buses):
+                if any(b < len(a) and a[b] > 0 for a in arrays):
+                    node_arrays = []
+                    for a in arrays:
+                        na = np.zeros(n)
+                        na[bus.parent_node] = a[b] if b < len(a) else 0.0
+                        node_arrays.append(na)
+                    yield f"__{bus.bus_id}", {bus.parent_node: bus.bus_id}, node_arrays
+
+        built_gens: list[tuple[str, str]] = []
+        used: dict[str, np.ndarray] = {}
+        for (tech_key, build_y), power in sorted(built["tech"].items(), key=lambda kv: kv[0][1]):
+            tech = base.technologies.get(tech_key)
+            if tech is None:
+                continue
+            used[tech_key] = used.get(tech_key, np.zeros(n)) + per_node(power)
+            age = y_idx - build_y
+            if age >= tech.lifetime or not np.any(power > 0):
+                continue
+            for suffix, bus_ids, (node_power,) in pieces(power):
+                unit_key = f"{tech_key}__built_y{build_y + 1}{suffix}"
+                fields = technology_unit_fields(tech, rep)
+                fields.update(
+                    name=f"{tech.name} (built in year {build_y + 1})",
+                    technology=tech_key,
+                    rated_power=[float(p) for p in node_power],
+                    life_time=[tech.lifetime] * n,
+                    initial_age=[age] * n,
+                    degradation_rate=rep(tech.degradation_rate),
+                    # Life extension is priced like a new build
+                    invest_cost=rep(tech.invest_cost),
+                    decommissioning_cost=rep(tech.decommissioning_cost),
+                    bus_id_per_node=bus_ids,
+                )
+                sys.generators[unit_key] = GeneratorConfig(**fields)
+                built_gens.append((unit_key, tech_key))
+        for tech_key, total in used.items():
+            tech = sys.technologies[tech_key]
+            tech.invest_max_power = _reduce(tech.invest_max_power, total)
+
+        built_bats: list[tuple[str, str]] = []
+        used_pow: dict[str, np.ndarray] = {}
+        used_cap: dict[str, np.ndarray] = {}
+        bat_keys = sorted(set(built["bat_tech_power"]) | set(built["bat_tech_capacity"]),
+                          key=lambda k: k[1])
+        for bt_key, build_y in bat_keys:
+            bat_tech = base.battery_technologies.get(bt_key)
+            if bat_tech is None:
+                continue
+            n_master = len(buses) or n
+            power = built["bat_tech_power"].get((bt_key, build_y), np.zeros(n_master))
+            energy = built["bat_tech_capacity"].get((bt_key, build_y), np.zeros(n_master))
+            used_pow[bt_key] = used_pow.get(bt_key, np.zeros(n)) + per_node(power)
+            used_cap[bt_key] = used_cap.get(bt_key, np.zeros(n)) + per_node(energy)
+            age = y_idx - build_y
+            if age >= bat_tech.lifetime or not (np.any(power > 0) or np.any(energy > 0)):
+                continue
+            for suffix, bus_ids, (node_power, node_energy) in pieces(power, energy):
+                unit_key = f"{bt_key}__built_y{build_y + 1}{suffix}"
+                fields = battery_technology_unit_fields(bat_tech, rep)
+                fields.pop("_type")
+                pow_list = [float(p) for p in node_power]
+                zeros = [0.0] * n
+                fields.update(
+                    name=f"{bat_tech.name} (built in year {build_y + 1})",
+                    technology=bt_key,
+                    capacity=[float(e) for e in node_energy],
+                    MaxChargePower=pow_list,
+                    MaxDischargePower=pow_list,
+                    rated_power=pow_list,
+                    life_time=[bat_tech.lifetime] * n,
+                    initial_age=[age] * n,
+                    # Degraded from its build year, as perfect foresight
+                    # degrades a battery technology's builds
+                    degradation_rate=rep(bat_tech.degradation_rate),
+                    # Life extension is priced like a new build
+                    invest_cost=rep(bat_tech.invest_cost_power),
+                    invest_max_power=zeros,
+                    decommissioning_cost=rep(bat_tech.decommissioning_cost),
+                    bus_id_per_node=bus_ids,
+                )
+                sys.batteries[unit_key] = BatteryConfig(**fields)
+                built_bats.append((unit_key, bt_key))
+        for bt_key in used_pow:
+            bat_tech = sys.battery_technologies[bt_key]
+            bat_tech.invest_max_power = _reduce(bat_tech.invest_max_power, used_pow[bt_key])
+            bat_tech.invest_max_capacity = _reduce(bat_tech.invest_max_capacity, used_cap[bt_key])
+
+        # Converter capacity built so far is existing capacity; the limit
+        # holds for the whole horizon
+        for (kind, idx), mw in built.get("converter", {}).items():
+            convs = getattr(sys, f"{kind}_converters", None) or []
+            if idx < len(convs):
+                convs[idx].rated_power_mva += mw
+                convs[idx].invest_max_power = remaining_limit(convs[idx].invest_max_power, mw)
+
+        # Reservoir capacity built so far, likewise (MWh, at its node)
+        gens = list(sys.generators.values())
+        for (g, loc), mwh in built.get("reservoir", {}).items():
+            node = self._master_index_node(loc)
+            if g < len(gens) and 0 <= node < n:
+                gen = gens[g]
+                cap = _pad_zeros(gen.reservoir_capacity, n)
+                lim = _pad_zeros(gen.reservoir_invest_max, n)
+                cap[node] += mwh
+                lim[node] = remaining_limit(lim[node], mwh)
+                gen.reservoir_capacity, gen.reservoir_invest_max = cap, lim
+
+        return sys, built_gens, built_bats
+
+    def _myopic_year_caps(
+        self,
+        result: dict,
+        built_gens: list[tuple[str, str]],
+        built_bats: list[tuple[str, str]],
+        built: Optional[dict] = None,
+        y_idx: int = 0,
+    ) -> dict[str, dict]:
+        """Capacity in service in a one-year myopic master, for the dispatch.
+
+        Same layout as the perfect-foresight ``cumulative_capacities_by_year``
+        entries (read by :meth:`_build_config_from_cumulative`): the original
+        units under ``gen`` / ``bat`` / ``bat_power``, and per technology the
+        capacity built this year plus what is left (degraded, not yet
+        retired) of the units built from it in earlier years. With *built*
+        (the earlier years' builds, see :meth:`_accumulate_myopic_investments`)
+        and the year index *y_idx*, ``bat_tech_power_rated`` holds the same
+        battery power undegraded, for its fixed O&M.
+        """
+        n_gen0 = len(self.master_system.generators)
+        n_bat0 = len(self.master_system.batteries)
+        tech_idx = {k: i + 1 for i, k in enumerate(self.master_system.technologies)}
+        bt_idx = {k: i + 1 for i, k in enumerate(self.master_system.battery_technologies)}
+
+        def _year(name):
+            return result.get(name, {}).get(1, {})
+
+        def _arrays(name):
+            return {k: np.array(v, dtype=float) for k, v in _year(name).items()}
+
+        cumul_gen = _year('cumulative_gen_capacity')
+        cumul_bat = _year('cumulative_bat_capacity')
+        cumul_bat_pow = _year('cumulative_bat_power')
+        caps = {
+            'gen': {g: v for g, v in cumul_gen.items() if int(g) <= n_gen0},
+            'bat': {b: v for b, v in cumul_bat.items() if int(b) <= n_bat0},
+            'bat_power': {b: v for b, v in cumul_bat_pow.items() if int(b) <= n_bat0},
+            'tech': _arrays('cumulative_tech_capacity'),
+            'bat_tech_power': _arrays('cumulative_bat_tech_power'),
+            'bat_tech_capacity': _arrays('cumulative_bat_tech_capacity'),
+        }
+
+        def _add(target, t_jl, values):
+            if values is None:
+                return
+            values = np.array(values, dtype=float)
+            target[t_jl] = target[t_jl] + values if t_jl in target else values
+
+        for g, (_, tech_key) in enumerate(built_gens, start=n_gen0 + 1):
+            _add(caps['tech'], tech_idx[tech_key], cumul_gen.get(g))
+        for b, (_, bt_key) in enumerate(built_bats, start=n_bat0 + 1):
+            _add(caps['bat_tech_power'], bt_idx[bt_key], cumul_bat_pow.get(b))
+            _add(caps['bat_tech_capacity'], bt_idx[bt_key], cumul_bat.get(b))
+        if built is not None:
+            # This year's builds (build year y_idx) and the earlier ones
+            builds = {y_idx: _year('bat_tech_power_investment')}
+            for (bt_key, build_y), mw in built["bat_tech_power"].items():
+                if bt_key in bt_idx:
+                    by = builds.setdefault(build_y, {})
+                    _add(by, bt_idx[bt_key], mw)
+            caps['bat_tech_power_rated'] = rated_bat_tech_power(
+                builds, y_idx,
+                [bt.lifetime for bt in self.master_system.battery_technologies.values()])
+        return caps
 
     def _accumulate_myopic_investments(
         self,
         year_inv: dict[str, float],
-        cumulative_gen_inv: dict[str, list[float]],
-        cumulative_bat_pow_inv: dict[str, list[float]],
-        cumulative_bat_cap_inv: dict[str, list[float]],
-        num_nodes: int,
+        y_idx: int,
+        built: dict[str, dict[tuple[str, int], np.ndarray]],
     ) -> None:
-        """Accumulate per-node investments from a year's solution."""
-        tech_keys = list(self.primary_system.technologies.keys())
-        bat_tech_keys = list(self.primary_system.battery_technologies.keys())
+        """Record a myopic year's technology investments in *built*.
 
+        Keys of *year_inv* index the master's technologies and its network
+        buses: one per node in the merged master system, the system's own
+        buses on a bus-level master (one node, or development zones; the
+        adapter lays a reduced network's results out on them). Entries go to
+        ``built[kind][(technology key, y_idx)]`` as per-master-bus arrays, so
+        :meth:`_prepare_system_for_myopic_year` can keep each build at its bus.
+        """
+        sys = self.master_system
+        buses = sys.buses or []
+        n = len(buses) or sys.num_nodes
+        prefixes = (
+            ("tech_investment_power_", "tech", list(sys.technologies)),
+            ("bat_tech_investment_power_", "bat_tech_power", list(sys.battery_technologies)),
+            ("bat_tech_investment_capacity_", "bat_tech_capacity", list(sys.battery_technologies)),
+        )
         for inv_key, capacity in year_inv.items():
-            if capacity <= 0.1:
+            conv_kind, conv_idx = _converter_investment_key(inv_key)
+            if conv_kind is not None:
+                conv = built.setdefault("converter", {})
+                conv[(conv_kind, conv_idx)] = conv.get((conv_kind, conv_idx), 0.0) + capacity
                 continue
-            parts = inv_key.split("_")
-
-            if inv_key.startswith("tech_investment_power_") and len(parts) >= 5:
-                tech_idx = int(parts[3])
-                node_idx = int(parts[4])
-                if tech_idx < len(tech_keys):
-                    tech_key = tech_keys[tech_idx]
-                    if tech_key not in cumulative_gen_inv:
-                        cumulative_gen_inv[tech_key] = [0.0] * num_nodes
-                    if node_idx < num_nodes:
-                        cumulative_gen_inv[tech_key][node_idx] += capacity
-
-            elif inv_key.startswith("bat_tech_investment_power_") and len(parts) >= 6:
-                bt_idx = int(parts[4])
-                node_idx = int(parts[5])
-                if bt_idx < len(bat_tech_keys):
-                    bt_key = bat_tech_keys[bt_idx]
-                    if bt_key not in cumulative_bat_pow_inv:
-                        cumulative_bat_pow_inv[bt_key] = [0.0] * num_nodes
-                    if node_idx < num_nodes:
-                        cumulative_bat_pow_inv[bt_key][node_idx] += capacity
-
-            elif inv_key.startswith("bat_tech_investment_capacity_") and len(parts) >= 6:
-                bt_idx = int(parts[4])
-                node_idx = int(parts[5])
-                if bt_idx < len(bat_tech_keys):
-                    bt_key = bat_tech_keys[bt_idx]
-                    if bt_key not in cumulative_bat_cap_inv:
-                        cumulative_bat_cap_inv[bt_key] = [0.0] * num_nodes
-                    if node_idx < num_nodes:
-                        cumulative_bat_cap_inv[bt_key][node_idx] += capacity
+            res_at = _reservoir_investment_key(inv_key)
+            if res_at is not None:
+                res = built.setdefault("reservoir", {})
+                res[res_at] = res.get(res_at, 0.0) + capacity
+                continue
+            for prefix, kind, keys in prefixes:
+                if not inv_key.startswith(prefix):
+                    continue
+                t_idx, bus_idx = (int(p) for p in inv_key[len(prefix):].split("_")[:2])
+                if t_idx < len(keys) and 0 <= bus_idx < n:
+                    arr = built[kind].setdefault((keys[t_idx], y_idx), np.zeros(n))
+                    arr[bus_idx] += capacity
+                break
 
     def _solve_master_problem_foresight(
         self,
@@ -2874,84 +5226,23 @@ class Orchestrator:
             use_tsam = master_cfg.use_tsam if master_cfg else False
             tsam_starts = []
             tsam_weights = []
-            tsam_order = []
+            tsam_day_period = []
 
+            # The representative days (or TSAM periods) and the critical
+            # days: the same for every year (chosen once)
+            day_plan = self._master_day_plan(master_demand_aggregated, num_years,
+                                             resolution_hours)
             if use_tsam:
-                from esfex.models.tsam import compute_tsam_periods
-
-                tsam_num_periods = master_cfg.tsam_num_periods if master_cfg else 10
-                tsam_method = master_cfg.tsam_method if master_cfg else "kmedoids"
+                # Each year on its own block of the demand and profiles
                 hours_per_year = HOURS_STD_YEAR // resolution_hours
-
-                logger.debug(
-                    f"  Running TSAM clustering: {tsam_num_periods} periods, "
-                    f"method={tsam_method}"
-                )
-
-                # Build RE availability profiles for TSAM clustering
-                # This adds renewable capacity factor features so the clustering
-                # captures correlations between demand and RE availability
-                re_availability_for_tsam: dict[str, np.ndarray] | None = None
-                if self._availability_cache:
-                    re_avail_arrays: dict[str, np.ndarray] = {}
-                    for gen_key, gen in self.primary_system.generators.items():
-                        if gen.type != "Renewable":
-                            continue
-                        if gen_key not in self._availability_cache:
-                            continue
-                        avail = self._availability_cache[gen_key]
-                        # Aggregate to same resolution as demand (MEAN for CF)
-                        if resolution_hours > 1:
-                            avail = aggregate_to_resolution(
-                                avail, target_hours=resolution_hours
-                            )
-                        re_avail_arrays[gen_key] = avail
-                    if re_avail_arrays:
-                        re_availability_for_tsam = re_avail_arrays
-                        logger.debug(
-                            f"  TSAM: using {len(re_avail_arrays)} RE availability "
-                            f"profiles as clustering features"
-                        )
-
+                tsam = day_plan.tsam
                 for y_idx in range(num_years):
-                    year_start = y_idx * hours_per_year
-                    year_end = min(
-                        (y_idx + 1) * hours_per_year,
-                        master_demand_aggregated.shape[0],
-                    )
-                    year_demand = master_demand_aggregated[year_start:year_end, :]
-
-                    # Extract year slice of RE availability profiles
-                    year_availability = None
-                    if re_availability_for_tsam:
-                        year_availability = {}
-                        for name, avail in re_availability_for_tsam.items():
-                            if year_end <= avail.shape[0]:
-                                year_avail = avail[year_start:year_end, :]
-                            else:
-                                # Tile if availability data is shorter than horizon
-                                year_avail = avail[:hours_per_year, :]
-                            if year_avail.shape[0] > 0:
-                                year_availability[name] = year_avail
-                        if not year_availability:
-                            year_availability = None
-
-                    result = compute_tsam_periods(
-                        demand=year_demand,
-                        num_periods=tsam_num_periods,
-                        method=tsam_method,
-                        period_length_hours=24 // resolution_hours,
-                        availability=year_availability,
-                    )
-                    # Offset start hours to absolute position + convert to 1-indexed for Julia
-                    tsam_starts.append(
-                        [s + year_start + 1 for s in result.period_start_hours]
-                    )
-                    tsam_weights.append(result.period_weights)
-                    # Convert chronological order to 1-indexed for Julia
-                    tsam_order.append([i + 1 for i in result.chronological_order])
-
-                logger.debug(f"  TSAM clustering complete for {num_years} years")
+                    # Absolute position, 1-indexed for Julia
+                    tsam_starts.append([s + y_idx * hours_per_year + 1
+                                        for s in tsam.period_start_hours])
+                    tsam_weights.append(list(tsam.period_weights))
+                    # The period of each day of the year (1-indexed)
+                    tsam_day_period.append([k + 1 for k in tsam.day_period])
 
             # --- Stochastic scenarios (if enabled) ---
             use_stochastic = master_cfg.stochastic if master_cfg else False
@@ -2998,31 +5289,40 @@ class Orchestrator:
                 years=years_range,
                 base_year=years_range[0],
                 demand=master_demand_aggregated,  # Pass aggregated demand for operational validation
-                demand_growth=getattr(self.config, 'demand_growth', 0.02),
+                # The demand above already holds every year (multi-year file,
+                # tiled first year, EV S-curve); growing it again here made the
+                # master plan for more demand than the dispatch serves.
+                demand_growth=0.0,
                 discount_rate=getattr(primary, 'discount_rate', 0.05),
-                max_annual_investment=getattr(primary, 'max_annual_system_cost', 1e9),
+                max_annual_investment=getattr(primary, 'max_annual_investment', 1e9),
+                budget_scope=getattr(primary, 'budget_scope', 'investment'),
                 target_re_penetration=getattr(primary, 'target_re_penetration', 0.5),
                 initial_re_penetration=initial_re,
                 min_re_increment=getattr(primary, 'min_annual_increment', 0.0),
                 max_re_increment=getattr(primary, 'max_annual_increment', 0.10),
                 system_node_ranges=foresight_sys_ranges,
+                fuel_price_base_year=self._fuel_price_base_year(years_range[0]),
                 # Use configured temporal resolution (e.g., 6 hours reduces model size 6x)
                 temporal_resolution_hours=resolution_hours,
                 investment_resolution_hours=getattr(temporal, 'investment_resolution', HOURS_STD_YEAR),
                 representative_days_per_year=master_cfg.representative_days if master_cfg else 5,
                 min_day_separation=master_cfg.min_day_separation if master_cfg else 5,
+                rep_day_offsets=day_plan.rep_day_offsets,
+                critical_day_offsets=day_plan.critical_day_offsets,
+                rep_day_weights=day_plan.rep_day_weights,
+                storage_firm_hours=day_plan.storage_firm_hours,
                 solver_method=master_cfg.solver_method if master_cfg else "monolithic",
                 benders_max_iterations=master_cfg.benders_max_iterations if master_cfg else 50,
                 benders_tolerance=master_cfg.benders_tolerance if master_cfg else 1e-4,
-                benders_lol_penalty_cap=master_cfg.benders_lol_penalty_cap if master_cfg else 1000.0,
                 # TSAM parameters
                 use_tsam=use_tsam,
                 tsam_period_start_hours=tsam_starts,
                 tsam_period_weights=tsam_weights,
-                tsam_chronological_order=tsam_order,
+                tsam_day_period=tsam_day_period,
                 tsam_inter_period_linking=(
                     master_cfg.tsam_inter_period_linking if master_cfg else True
                 ),
+                tsam_critical_periods=day_plan.tsam.critical_periods if use_tsam else None,
                 # Stochastic parameters
                 use_stochastic=use_stochastic,
                 stochastic_scenarios=stochastic_scenario_dicts,
@@ -3030,7 +5330,12 @@ class Orchestrator:
                 config_path=str(self.config_path) if self.config_path else None,
                 # Pre-loaded availability cache (includes zone-extended profiles)
                 availability_cache=self._availability_cache,
+                inflow_cache=getattr(self, "_inflow_cache", None),
+                date_start=self._data_start().strftime("%d/%m/%Y %H:%M"),
                 system_config=self.master_system,
+                # Fuel balance, fuel infrastructure and electrolyzers (#89)
+                primary_energy=self._master_fuel_kwargs(self.master_system, years_range[-1]),
+                debug_lp_dir=self._benders_debug_lp_dir(),
             )
 
             # --- MGA mode ---
@@ -3039,6 +5344,14 @@ class Orchestrator:
 
             if use_mga:
                 from esfex.bridge.adapters import MGAAdapter
+
+                if master.npv_retirement:
+                    # The NPV retirement first; the alternatives keep the
+                    # units it retires
+                    master.build_model(use_representative_days=True)
+                    if master.solve() != 1:
+                        logger.error("Master problem not optimal (NPV retirement before MGA)")
+                        return None, None
 
                 logger.info("=" * 60)
                 logger.info(
@@ -3058,12 +5371,12 @@ class Orchestrator:
             else:
                 master.build_model(use_representative_days=True)
 
-                # Export LP file for debugging
-                lp_dir = self.output_dir / "logs"
-                lp_dir.mkdir(parents=True, exist_ok=True)
-                lp_file = lp_dir / "master_problem_debug.lp"
-                master.write_lp(str(lp_file))
-                logger.debug(f"Master problem LP exported to: {lp_file}")
+                # LP file for debugging and the LP-level sensitivity analysis,
+                # only on request: a large master's LP takes GB and minutes
+                lp_file = self._master_debug_lp_path()
+                if lp_file is not None and master.solver_method != "benders":
+                    master.write_lp(str(lp_file))
+                    logger.info(f"Master problem LP exported to: {lp_file}")
 
                 status = master.solve()
 
@@ -3071,11 +5384,20 @@ class Orchestrator:
                     logger.error(f"Master problem not optimal (status={status})")
                     return None, None
 
+                self._record_master_diagnostics(master, "Master")
                 # Extract investment decisions for each year
                 result = master.get_solution_values()
+                # One solve plans every year (MGA's alternatives record none)
+                if isinstance(getattr(master, "loss_repair", None), dict):
+                    self._master_loss_repair = dict.fromkeys(years_range, master.loss_repair)
 
             # Use the legacy-compatible solution structure keyed by actual year
             solution = result.get('solution', {})
+            # Fuel storage, routes and electrolyzers, for the dispatch (#89)
+            self._store_master_fuel(master, result, list(years_range))
+            # Units the NPV-based retirement retired: out of service from
+            # the first year
+            self._record_npv_retirements(master, years_range[0])
 
             investments_by_year = {}
             retirements_by_year = {}
@@ -3086,34 +5408,9 @@ class Orchestrator:
             for year in years_range:
                 year_data = solution.get(year, {})
 
-                # Collect technology investments - preserve per-node detail
-                # key format: 'tech_investment_power_{t}_{n}'
-                year_inv = {}
-                tech_inv_data = year_data.get('tech_investment', {})
-                for key, value in tech_inv_data.items():
-                    if value > 0.1:
-                        year_inv[key] = float(value)
-
-                # Collect battery technology power investments
-                # key format: 'bat_tech_investment_power_{bt}_{n}'
-                bat_tech_pow_data = year_data.get('bat_tech_power_investment', {})
-                for key, value in bat_tech_pow_data.items():
-                    if value > 0.1:
-                        year_inv[key] = float(value)
-
-                # Collect battery technology capacity investments
-                # key format: 'bat_tech_investment_capacity_{bt}_{n}'
-                bat_tech_cap_data = year_data.get('bat_tech_capacity_investment', {})
-                for key, value in bat_tech_cap_data.items():
-                    if value > 0.1:
-                        year_inv[key] = float(value)
-
-                # Collect transmission investments
-                # Keys already in format: 'transfer_investment_{i}_{j}'
-                trans_inv_data = year_data.get('transfer_investment', {})
-                for key, value in trans_inv_data.items():
-                    if value > 0.1:
-                        year_inv[key] = float(value)
+                # Technology, battery (power and energy), transmission,
+                # converter and reservoir investments, per node / pair
+                year_inv = master_year_builds(year_data)
 
                 investments_by_year[year] = year_inv
 
@@ -3124,13 +5421,11 @@ class Orchestrator:
 
                 if year_key in gen_life_ext:
                     for gen_idx, node_values in gen_life_ext[year_key].items():
-                        # node_values is array of 0.0/1.0 per bus (1=active, 0=retired)
-                        # Use MEAN to get proper 0-1 fraction (not sum, which gives 0-n_buses)
-                        vals = np.array(node_values) if hasattr(node_values, '__len__') else np.array([node_values])
-                        # Fraction retired = mean of (1 - status) across buses
-                        retired = float(np.mean(1 - vals)) if len(vals) > 0 else 0.0
+                        # node_values: 1.0/0.0 per master location (bus on
+                        # a bus-level master); share of the unit's capacity
+                        py_idx = int(gen_idx) - 1  # Convert to 0-indexed
+                        retired = self._retired_share(py_idx, node_values, year)
                         if retired > 0.01:  # threshold to avoid floating point noise
-                            py_idx = int(gen_idx) - 1  # Convert to 0-indexed
                             year_ret[f'gen_{py_idx}'] = retired
 
                 retirements_by_year[year] = year_ret
@@ -3154,6 +5449,7 @@ class Orchestrator:
             cumul_tech = result.get('cumulative_tech_capacity', {})
             cumul_bat_tech_pow = result.get('cumulative_bat_tech_power', {})
             cumul_bat_tech_cap = result.get('cumulative_bat_tech_capacity', {})
+            bt_lifetimes = [bt.lifetime for bt in self.master_system.battery_technologies.values()]
             for year in years_range:
                 y_idx = years_range.index(year)
                 year_key = y_idx + 1  # Julia 1-based
@@ -3164,6 +5460,9 @@ class Orchestrator:
                     'tech': cumul_tech.get(year_key, {}),
                     'bat_tech_power': cumul_bat_tech_pow.get(year_key, {}),
                     'bat_tech_capacity': cumul_bat_tech_cap.get(year_key, {}),
+                    # Rated, for the fixed O&M (the two above are degraded)
+                    'bat_tech_power_rated': rated_bat_tech_power(
+                        result.get('bat_tech_power_investment', {}), year_key, bt_lifetimes),
                 }
 
             # Extract RE penetration targets per year from master solution
@@ -3280,9 +5579,9 @@ class Orchestrator:
                     for key, val in year_data.get('tech_investment', {}).items():
                         parts = key.split('_')
                         t_idx = int(parts[-2])
-                        n_idx = int(parts[-1])
+                        n_idx = self._master_index_node(int(parts[-1]))
                         if t_idx < len(tech_names) and n_idx < num_nodes:
-                            tech_inv_arr[y_idx, t_idx, n_idx] = val
+                            tech_inv_arr[y_idx, t_idx, n_idx] += val
                 grp.create_dataset("tech_investment", data=tech_inv_arr)
 
                 # Battery technology power investments: (years, bat_techs, nodes)
@@ -3293,9 +5592,9 @@ class Orchestrator:
                     for key, val in year_data.get('bat_tech_power_investment', {}).items():
                         parts = key.split('_')
                         bt_idx = int(parts[-2])
-                        n_idx = int(parts[-1])
+                        n_idx = self._master_index_node(int(parts[-1]))
                         if bt_idx < len(bat_tech_names) and n_idx < num_nodes:
-                            bat_tech_pow_arr[y_idx, bt_idx, n_idx] = val
+                            bat_tech_pow_arr[y_idx, bt_idx, n_idx] += val
                 grp.create_dataset("bat_tech_power_investment", data=bat_tech_pow_arr)
 
                 # Battery technology capacity investments: (years, bat_techs, nodes)
@@ -3305,16 +5604,18 @@ class Orchestrator:
                     for key, val in year_data.get('bat_tech_capacity_investment', {}).items():
                         parts = key.split('_')
                         bt_idx = int(parts[-2])
-                        n_idx = int(parts[-1])
+                        n_idx = self._master_index_node(int(parts[-1]))
                         if bt_idx < len(bat_tech_names) and n_idx < num_nodes:
-                            bat_tech_cap_arr[y_idx, bt_idx, n_idx] = val
+                            bat_tech_cap_arr[y_idx, bt_idx, n_idx] += val
                 grp.create_dataset("bat_tech_capacity_investment", data=bat_tech_cap_arr)
 
                 # Transmission investments: stored as variable-length records
                 trans_records = []
                 for y_idx, year in enumerate(years_range):
                     year_data = solution.get(year, {})
-                    for key, val in year_data.get('transfer_investment', {}).items():
+                    node_transfers = self._master_investments_by_node(
+                        year_data.get('transfer_investment', {}))
+                    for key, val in node_transfers.items():
                         parts = key.split('_')
                         i_idx = int(parts[-2])
                         j_idx = int(parts[-1])
@@ -3444,6 +5745,350 @@ class Orchestrator:
             f"[bold green]MGA results exported to:[/bold green] {hdf5_path} (mga group)"
         )
 
+    def _master_index_node(self, idx: int) -> int:
+        """Node of index *idx* of the master's per-location results.
+
+        The master solves on the system's buses when they are not one per
+        node (``node_bus_mapping_required``: a node with several buses,
+        development zones), so ``tech_investment_power_{t}_{n}``,
+        ``transfer_investment_{i}_{j}`` and the life-extension arrays are
+        indexed by bus there and by node otherwise.
+        """
+        buses = self.master_system.buses or []
+        if self._master_on_buses() and 0 <= idx < len(buses):
+            return buses[idx].parent_node
+        return idx
+
+    def _master_on_buses(self) -> bool:
+        """Whether the master's per-location results (investments, life
+        extension, cumulative capacities) are indexed by the buses of its
+        network rather than by node: it solves on its own buses when they
+        are not one per node, in node order (``node_bus_mapping_required``).
+        The array length cannot tell: a network can have as many buses as
+        nodes without being one bus per node."""
+        from esfex.bridge.converters import node_bus_mapping_required
+
+        base = self.master_system
+        buses = base.buses or []
+        return bool(buses) and node_bus_mapping_required(buses, base.num_nodes)
+
+    def _master_values_by_node(self, values, num_nodes: int) -> np.ndarray:
+        """One unit's or technology's per-location master values (MW, MWh)
+        as a per-node array: the values of a node's buses are summed on a
+        bus-level master (see :meth:`_master_on_buses`)."""
+        arr = np.asarray(values, dtype=float)
+        out = np.zeros(num_nodes)
+        if not self._master_on_buses():
+            out[:min(len(arr), num_nodes)] = arr[:num_nodes]
+            return out
+        for idx, v in enumerate(arr):
+            node = self._master_index_node(idx)
+            if 0 <= node < num_nodes:
+                out[node] += v
+        return out
+
+    def _master_investments_by_node(self, investments: dict) -> dict:
+        """*investments* (``{key: value}`` of the master) with each key's
+        location index turned into its node, values of a node's buses summed
+        (``transfer_investment`` within one node dropped). Identity on a
+        node-level master."""
+        out: dict = {}
+        for key, value in investments.items():
+            parts = str(key).split("_")
+            try:
+                if key.startswith("transfer_investment_") and len(parts) >= 4:
+                    i, j = self._master_index_node(int(parts[2])), self._master_index_node(int(parts[3]))
+                    if i == j:
+                        continue
+                    key = f"transfer_investment_{i}_{j}"
+                elif key.startswith(("tech_investment_", "bat_tech_investment_",
+                                     "reservoir_investment_")):
+                    parts[-1] = str(self._master_index_node(int(parts[-1])))
+                    key = "_".join(parts)
+            except ValueError:
+                pass
+            out[key] = out[key] + float(value) if key in out else value
+        return out
+
+    def _record_npv_retirements(self, master, year: int) -> list[dict]:
+        """Add the units *master*'s NPV-based retirement retired to
+        ``self._npv_retirements``, out of service from *year* on, with the
+        configured MW at their node (``capacity_mw``) and its share of the
+        unit's configured MW (``share``). Returns the added records."""
+        added = []
+        for r in getattr(master, "npv_retirements", None) or []:
+            units = (self.master_system.generators if r["kind"] == "generator"
+                     else self.master_system.batteries)
+            unit = units.get(r["key"])
+            if unit is None:
+                continue
+            field = "rated_power" if r["kind"] == "generator" else "MaxDischargePower"
+            per_node = [float(v) for v in (getattr(unit, field, None) or [])]
+            node = int(r["node"])
+            mw = per_node[node] if 0 <= node < len(per_node) else 0.0
+            total = sum(per_node)
+            rec = dict(r, year=int(year), index=list(units).index(r["key"]),
+                       capacity_mw=mw,
+                       share=min(1.0, mw / total) if total > 0 else 0.0)
+            self._npv_retirements.append(rec)
+            added.append(rec)
+        return added
+
+    def _apply_npv_retirements(self, units_config: dict[str, Any], year: int) -> None:
+        """Batteries the NPV-based retirement retired by *year*: no power or
+        energy at their node in the dispatch. (A retired generator already
+        has no capacity there: the master's cumulative capacity is 0.)"""
+        num_nodes = self.primary_system.nodes.num_nodes or 1
+        for r in self._npv_retirements:
+            if r["kind"] != "battery" or r["year"] > year:
+                continue
+            unit = units_config.get(r["key"])
+            node = int(r["node"])
+            if unit is None or not 0 <= node < num_nodes:
+                continue
+            for f in ("MaxChargePower", "MaxDischargePower", "capacity", "rated_power"):
+                if f in unit:
+                    vals = [float(x) for x in _per_node_list(unit.get(f, [0.0]), num_nodes)]
+                    vals[node] = 0.0
+                    unit[f] = vals
+
+    def _record_master_diagnostics(self, master, prefix: str) -> None:
+        """Keep the solved *master*'s binding constraints, duals and paid
+        slacks (:meth:`MasterProblemAdapter.diagnostics`) in
+        ``master_diagnostics`` and log their digest (a few INFO lines).
+        Nothing under Benders or when the extraction fails."""
+        from esfex.io.master_diagnostics import digest_lines
+
+        diagnostics = getattr(master, "diagnostics", None)
+        groups = diagnostics() if callable(diagnostics) else None
+        if not groups:
+            return
+        self.master_diagnostics.update(groups)
+        for line in digest_lines(groups, prefix=prefix):
+            logger.info(line)
+
+    def _write_master_diagnostics(self, path: Optional[Path]) -> None:
+        """Write ``master_diagnostics`` under ``/diagnostics/master`` of the
+        results file (``esfex.io.master_diagnostics``); nothing without
+        any."""
+        if path is None or not self.master_diagnostics:
+            return
+        from esfex.io.master_diagnostics import write_master_diagnostics
+
+        master_cfg = getattr(self.config, "master_problem", None)
+        try:
+            write_master_diagnostics(
+                path, self.master_diagnostics,
+                planning_mode=str(getattr(master_cfg, "planning_mode", "perfect_foresight")))
+        except Exception as e:  # diagnosis only: never fail the run
+            logger.warning(f"Writing the master diagnostics failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Checkpoints of a myopic run (esfex.io.checkpoint)
+    # ------------------------------------------------------------------
+    def _start_checkpoints(self, hdf5_path: Path, master_only: bool,
+                           years_range: list[int], ops_only: Optional[set]) -> None:
+        """Checkpoint this run (``self._ckpt``) when it is a myopic
+        development run: the case's fingerprint and the run's years now,
+        then after every master year and every dispatched year
+        (:meth:`_write_checkpoint`). A resumed run continues the checkpoint
+        of the run it resumes."""
+        from esfex.io.checkpoint import checkpoint_path
+
+        self._ckpt = None
+        master_cfg = getattr(self.config, "master_problem", None)
+        case = getattr(self, "_case_fingerprint", None)
+        if (master_only or case is None or self.config.simulation_mode != "development"
+                or getattr(master_cfg, "planning_mode", None) != "myopic"):
+            return
+        now = datetime.now().isoformat(timespec="seconds")
+        plan = getattr(self, "resume_plan", None)
+        if plan is not None:
+            ckpt = {k: deepcopy(v) for k, v in plan.doc.items() if k != "state"}
+            ckpt["case"] = case
+            ckpt["resumes"] = list(ckpt.get("resumes") or []) + [
+                {"time": now, "from_year": plan.resume_year, "phase": plan.phase,
+                 "forced": list(plan.forced)}]
+        else:
+            ckpt = {
+                "status": "running", "phase": PHASE_MASTER, "created": now,
+                "results_file": hdf5_path.name,
+                "config_file": str(Path(self.config_path).resolve()) if self.config_path else "",
+                "case": case,
+                "run": {"years": len(years_range), "start_year": years_range[0],
+                        "dispatch_years": sorted(ops_only) if ops_only is not None else None},
+                "master": {"completed_years": []},
+                "dispatch": {"completed": []},
+            }
+        self._ckpt = ckpt
+        self._ckpt_path = checkpoint_path(hdf5_path)
+        self._ckpt_dispatch_start = min(ops_only) if ops_only else years_range[0]
+        try:
+            import h5py
+
+            with h5py.File(hdf5_path, "a") as f:
+                f.attrs["checkpoint"] = self._ckpt_path.name
+        except Exception as e:
+            logger.debug(f"Could not name the checkpoint in {hdf5_path}: {e}")
+        if plan is None:
+            self._write_checkpoint(PHASE_MASTER, years_range[0])
+
+    def _write_checkpoint(self, phase: str, resume_year: Optional[int], *,
+                          completed: Optional["YearResults"] = None,
+                          master_year: Optional[int] = None,
+                          master_state: Optional[dict] = None) -> None:
+        """Rewrite the run's checkpoint (nothing when it keeps none): *phase*
+        reached, the year a resume starts at (*resume_year*; None after the
+        last master year: the first dispatch year; after the last dispatched
+        year: none left), the master year or
+        dispatched year (*completed*) just finished, and the state the next
+        year needs: the myopic master loop's (*master_state*) in phase
+        ``master``, the master plan and the dispatch carry-over in phase
+        ``dispatch``, none once complete. A failed write is logged and the
+        run goes on: a resume then repeats the years after the last
+        checkpoint written."""
+        ckpt = getattr(self, "_ckpt", None)
+        if ckpt is None:
+            return
+        from esfex.api.diagnostics import active_collector
+        from esfex.io.checkpoint import write_checkpoint
+
+        if master_year is not None:
+            ckpt["master"]["completed_years"].append(int(master_year))
+        if completed is not None:
+            ckpt["dispatch"]["completed"].append({
+                "year": int(completed.year), "feasible": bool(completed.feasible),
+                "objective": float(completed.objective)})
+        done = ckpt["dispatch"]["completed"]
+        ckpt["phase"] = phase
+        ckpt["status"] = "complete" if phase == PHASE_COMPLETE else "running"
+        ckpt["last_completed_year"] = done[-1]["year"] if done else None
+        if resume_year is not None:
+            ckpt["resume_at"] = {"phase": phase, "year": int(resume_year)}
+        elif phase == PHASE_MASTER:
+            ckpt["resume_at"] = {"phase": PHASE_DISPATCH, "year": self._ckpt_dispatch_start}
+        else:
+            ckpt["resume_at"] = None
+        collector = active_collector()
+        ckpt["warnings"] = collector.summary().to_dict() if collector is not None else None
+        if phase == PHASE_DISPATCH:
+            state = self._dispatch_checkpoint_state()
+        elif phase == PHASE_COMPLETE:
+            state = None
+        else:
+            state = {"master": master_state} if master_state is not None else None
+        try:
+            write_checkpoint(self._ckpt_path, dict(ckpt, state=state))
+        except Exception as e:  # never fail a run over its checkpoint
+            logger.warning(f"Checkpoint not written ({type(e).__name__}: {e}); a resumed "
+                           f"run would repeat the years after the previous one")
+
+    def _dispatch_checkpoint_state(self) -> dict:
+        """What the dispatch of the remaining years needs: the master plan
+        of every year and what the master recorded besides (fuel capacity,
+        NPV retirements, yearly costs, diagnostics), and the carry-over of
+        the last dispatched year (``state.boundary_conditions``: fuel tank
+        levels and fuel in transit; the unit-indexed entries are reset at
+        each year's start)."""
+        investments, retirements, caps, re_targets = self._master_plan
+        return {
+            "master_plan": {"investments": investments, "retirements": retirements,
+                            "cumulative_caps": caps, "re_targets": re_targets},
+            "master_fuel_by_year": getattr(self, "_master_fuel_by_year", None) or {},
+            "npv_retirements": self._npv_retirements,
+            "myopic_year_costs": self.myopic_year_costs,
+            "master_diagnostics": self.master_diagnostics,
+            "boundary_conditions": self.state.boundary_conditions if self.state else {},
+            "primary_energy_capacities": (self.state.primary_energy_capacities
+                                          if self.state else {}),
+        }
+
+    def _restore_master_plan(self, state: dict) -> tuple:
+        """The master plan a dispatch-phase checkpoint holds, with what the
+        master recorded besides restored on ``self``: ``(investments,
+        retirements, cumulative capacities, RE targets)`` by year."""
+        mp = state["master_plan"]
+        self._master_fuel_by_year = state.get("master_fuel_by_year") or {}
+        self._npv_retirements = list(state.get("npv_retirements") or [])
+        self.myopic_year_costs = state.get("myopic_year_costs") or {}
+        self.master_diagnostics = state.get("master_diagnostics") or {}
+        self._master_plan = (mp["investments"], mp["retirements"],
+                             mp["cumulative_caps"], mp["re_targets"])
+        return self._master_plan
+
+    def _restore_dispatch_state(self, state: dict) -> None:
+        """The carry-over of the last year a dispatch-phase checkpoint lists."""
+        self.state.boundary_conditions = state.get("boundary_conditions") or {}
+        pe = state.get("primary_energy_capacities")
+        if pe:
+            self.state.primary_energy_capacities = pe
+
+    def _write_npv_retirements(self, path: Optional[Path]) -> None:
+        """Write the NPV-based retirements to the results file, group
+        ``npv_retirements`` (only when the system's ``npv_retirement`` is on):
+        one entry per retired unit location with its kind, key, name, index
+        (0-based, in the system's generators or batteries, as the
+        ``retirement_gen_{index}`` attributes), node, the year it is out of
+        service from, its NPV ($), the round that retired it, its configured
+        MW there and that MW's share of the unit."""
+        if path is None or not getattr(self.master_system, "npv_retirement", False):
+            return
+        import h5py
+
+        recs = self._npv_retirements
+        with h5py.File(path, "a") as f:
+            if "npv_retirements" in f:
+                del f["npv_retirements"]
+            grp = f.create_group("npv_retirements")
+            grp.attrs["description"] = (
+                "Existing units retired for the whole horizon because their NPV "
+                "in the master's plan was below npv_retirement_threshold")
+            grp.attrs["threshold"] = float(getattr(
+                self.master_system, "npv_retirement_threshold", 0.0))
+            grp.attrs["max_iterations"] = int(getattr(
+                self.master_system, "npv_retirement_max_iterations", 5))
+            str_dt = h5py.string_dtype()
+            for col in ("kind", "key", "name"):
+                grp.create_dataset(col, data=[str(r[col]) for r in recs], dtype=str_dt)
+            for col in ("index", "node", "year", "iteration"):
+                grp.create_dataset(col, data=np.array([int(r[col]) for r in recs], dtype=np.int64))
+            for col in ("npv", "capacity_mw", "share"):
+                grp.create_dataset(col, data=np.array([float(r[col]) for r in recs], dtype=float))
+            grp["npv"].attrs["units"] = "$"
+            grp["capacity_mw"].attrs["units"] = "MW"
+
+    def _retired_share(self, gen_idx: int, flags, year: Optional[int] = None) -> float:
+        """Share of existing master generator *gen_idx* (0-based) retired.
+
+        *flags* is its share in service per master location (1 within its
+        lifetime; past it, the share the master keeps by life extension, 0
+        when it retires it), per bus on a bus-level master. With *year*, the
+        nodes where the NPV-based retirement retired it by then
+        (``self._npv_retirements``) are retired in full. Each
+        node is retired as far as its locations are, weighted by the unit's
+        ``rated_power`` there; a unit without capacity takes the plain share
+        of retired nodes.
+        """
+        vals = np.atleast_1d(np.asarray(flags, dtype=float))
+        base = self.master_system
+        n = base.num_nodes
+        retired = np.zeros(n)
+        for i, status in enumerate(vals):
+            node = self._master_index_node(i)
+            if 0 <= node < n:
+                retired[node] = max(retired[node], 1.0 - status)
+        if year is not None:
+            for r in self._npv_retirements:
+                if (r["kind"] == "generator" and r["index"] == gen_idx
+                        and r["year"] <= year and 0 <= r["node"] < n):
+                    retired[r["node"]] = 1.0
+        gens = list(base.generators.values())
+        rated = (np.array(_per_node_list(gens[gen_idx].rated_power, n), dtype=float)
+                 if 0 <= gen_idx < len(gens) else np.zeros(n))
+        if rated.sum() > 0:
+            return float((retired * rated).sum() / rated.sum())
+        return float(retired.mean()) if n else 0.0
+
     def _log_master_problem_details(
         self,
         result: dict,
@@ -3489,11 +6134,17 @@ class Orchestrator:
             for n in range(min(len(rated_c), num_nodes)):
                 bat_rated_cap[b, n] = rated_c[n]
 
-        # Per-node investment accumulators
-        gen_inv = np.zeros((len(gen_names), num_nodes))
-        bat_inv_pow = np.zeros((len(bat_names), num_nodes))
-        bat_inv_cap = np.zeros((len(bat_names), num_nodes))
-        trans_inv = {}  # {(from, to): MW}
+        # Per-node investment accumulators. Investments are per candidate
+        # technology (not per existing unit); the master's last index is a
+        # bus on a bus-level master, summed onto its node here.
+        tech_names = [t.name or k for k, t in self.master_system.technologies.items()]
+        bat_tech_names = [t.name or k
+                          for k, t in self.master_system.battery_technologies.items()]
+        master_node = self._master_index_node
+        gen_inv = np.zeros((len(tech_names), num_nodes))
+        bat_inv_pow = np.zeros((len(bat_tech_names), num_nodes))
+        bat_inv_cap = np.zeros((len(bat_tech_names), num_nodes))
+        trans_inv = {}  # {(from node, to node): MW}
         gen_ret_frac = np.zeros((len(gen_names), num_nodes))  # Retirement fraction
         bat_ret_frac = np.zeros((len(bat_names), num_nodes))  # Retirement fraction
 
@@ -3504,37 +6155,38 @@ class Orchestrator:
             for key, value in year_data.get('tech_investment', {}).items():
                 parts = key.split('_')
                 if len(parts) >= 5:
-                    t_idx, n_idx = int(parts[3]), int(parts[4])
-                    if 0 <= t_idx < len(gen_names) and 0 <= n_idx < num_nodes:
+                    t_idx, n_idx = int(parts[3]), master_node(int(parts[4]))
+                    if 0 <= t_idx < len(tech_names) and 0 <= n_idx < num_nodes:
                         gen_inv[t_idx, n_idx] += float(value)
 
             # Battery technology power investments: key = 'bat_tech_investment_power_{bt}_{n}'
             for key, value in year_data.get('bat_tech_power_investment', {}).items():
                 parts = key.split('_')
                 if len(parts) >= 6:
-                    bt_idx, n_idx = int(parts[4]), int(parts[5])
-                    if 0 <= bt_idx < len(bat_names) and 0 <= n_idx < num_nodes:
+                    bt_idx, n_idx = int(parts[4]), master_node(int(parts[5]))
+                    if 0 <= bt_idx < len(bat_tech_names) and 0 <= n_idx < num_nodes:
                         bat_inv_pow[bt_idx, n_idx] += float(value)
 
             # Battery technology capacity investments: key = 'bat_tech_investment_capacity_{bt}_{n}'
             for key, value in year_data.get('bat_tech_capacity_investment', {}).items():
                 parts = key.split('_')
                 if len(parts) >= 6:
-                    bt_idx, n_idx = int(parts[4]), int(parts[5])
-                    if 0 <= bt_idx < len(bat_names) and 0 <= n_idx < num_nodes:
+                    bt_idx, n_idx = int(parts[4]), master_node(int(parts[5]))
+                    if 0 <= bt_idx < len(bat_tech_names) and 0 <= n_idx < num_nodes:
                         bat_inv_cap[bt_idx, n_idx] += float(value)
 
             # Transmission investments: key = 'transfer_investment_{i}_{j}'
             for key, value in year_data.get('transfer_investment', {}).items():
                 parts = key.split('_')
                 if len(parts) >= 4:
-                    i_idx, j_idx = int(parts[2]), int(parts[3])
+                    i_idx, j_idx = master_node(int(parts[2])), master_node(int(parts[3]))
                     link = (i_idx, j_idx)
                     trans_inv[link] = trans_inv.get(link, 0.0) + float(value)
 
             # Generator retirements from life extension data
             # FIXED: Use max instead of sum to count each retirement only ONCE
-            # (life_ext is binary: 1=keep, 0=retire; once retired, stays retired)
+            # (life_ext is the share in service: 1 = kept, 0 = retired; the kept
+            # share never grows again)
             y_idx = years_range.index(year)
             year_key = y_idx + 1  # Julia 1-based indexing
             if year_key in gen_life_ext:
@@ -3543,9 +6195,10 @@ class Orchestrator:
                     if 0 <= gen_idx_int < len(gen_names):
                         if hasattr(node_values, '__len__'):
                             arr = np.array(node_values, dtype=float)
-                            for n in range(min(len(arr), num_nodes)):
-                                retired = 1.0 - arr[n]
-                                if retired > 0:
+                            for i, status in enumerate(arr):
+                                n = master_node(i)
+                                retired = 1.0 - status
+                                if retired > 0 and 0 <= n < num_nodes:
                                     gen_ret_frac[gen_idx_int, n] = max(gen_ret_frac[gen_idx_int, n], retired)
                         else:
                             retired = 1.0 - float(node_values)
@@ -3561,9 +6214,10 @@ class Orchestrator:
                     if 0 <= bat_idx_int < len(bat_names):
                         if hasattr(node_values, '__len__'):
                             arr = np.array(node_values, dtype=float)
-                            for n in range(min(len(arr), num_nodes)):
-                                retired = 1.0 - arr[n]
-                                if retired > 0:
+                            for i, status in enumerate(arr):
+                                n = master_node(i)
+                                retired = 1.0 - status
+                                if retired > 0 and 0 <= n < num_nodes:
                                     bat_ret_frac[bat_idx_int, n] = max(bat_ret_frac[bat_idx_int, n], retired)
                         else:
                             retired = 1.0 - float(node_values)
@@ -3578,7 +6232,7 @@ class Orchestrator:
         # Aggregate transmission investment per node (outgoing capacity)
         trans_per_node = np.zeros(num_nodes)
         for (i, j), power in trans_inv.items():
-            if power > 0.1 and 0 <= i < num_nodes:
+            if power > 0.1 and 0 <= i < num_nodes and i != j:
                 trans_per_node[i] += power
 
         has_gen_inv = np.any(gen_inv > 0.1)
@@ -3677,20 +6331,20 @@ class Orchestrator:
 
         if has_gen_inv or has_bat_inv or has_trans_inv:
             # Collect technologies with investments
-            inv_gen_indices = [g for g in range(len(gen_names)) if np.any(gen_inv[g] > 0.1)]
-            inv_bat_indices = [b for b in range(len(bat_names)) if np.any(bat_inv_pow[b] > 0.1) or np.any(bat_inv_cap[b] > 0.1)]
+            inv_gen_indices = [g for g in range(len(tech_names)) if np.any(gen_inv[g] > 0.1)]
+            inv_bat_indices = [b for b in range(len(bat_tech_names)) if np.any(bat_inv_pow[b] > 0.1) or np.any(bat_inv_cap[b] > 0.1)]
 
             table = Table(title=f"Investments - {system_name}", show_header=True, title_style="bold green")
             table.add_column("Node", style="bold")
 
             # Add generator columns
             for g in inv_gen_indices:
-                table.add_column(f"[green]{gen_names[g]}[/green] (MW)", justify="right")
+                table.add_column(f"[green]{tech_names[g]}[/green] (MW)", justify="right")
 
             # Add battery columns (MW and MWh)
             for b in inv_bat_indices:
-                table.add_column(f"[blue]{bat_names[b]}[/blue] (MW)", justify="right")
-                table.add_column(f"[blue]{bat_names[b]}[/blue] (MWh)", justify="right")
+                table.add_column(f"[blue]{bat_tech_names[b]}[/blue] (MW)", justify="right")
+                table.add_column(f"[blue]{bat_tech_names[b]}[/blue] (MWh)", justify="right")
 
             # Add transmission column if exists
             if has_trans_inv:
@@ -3734,10 +6388,10 @@ class Orchestrator:
 
             # Log to file
             for g in inv_gen_indices:
-                logger.debug(f"GEN_INV | {system_name} | {gen_names[g]}: " + " | ".join(
+                logger.debug(f"GEN_INV | {system_name} | {tech_names[g]}: " + " | ".join(
                     f"N{n}={gen_inv[g, n]:,.0f}MW" for n in range(num_nodes)))
             for b in inv_bat_indices:
-                logger.debug(f"BAT_INV | {system_name} | {bat_names[b]}: " + " | ".join(
+                logger.debug(f"BAT_INV | {system_name} | {bat_tech_names[b]}: " + " | ".join(
                     f"N{n}={bat_inv_pow[b, n]:,.0f}MW/{bat_inv_cap[b, n]:,.0f}MWh" for n in range(num_nodes)))
             for (i, j), power in sorted(trans_inv.items()):
                 if power > 0.1:
@@ -3804,6 +6458,44 @@ class Orchestrator:
 
         console.print()
 
+    def _warn_short_overlap(self, overlap_hours: int) -> None:
+        """Warn once when storage dispatch is myopic because the look-ahead is short.
+
+        Stored energy has no value at the end of a window, so a window whose
+        look-ahead does not reach the next daily peak will not charge for it.
+        """
+        if getattr(self, "_short_overlap_warned", False):
+            return
+        sys = self.primary_system
+        has_storage = bool(sys.batteries) or bool(getattr(sys, "battery_technologies", None)) or any(
+            any(c > 0 for c in (getattr(g, "reservoir_capacity", None) or []))
+            for g in sys.generators.values()
+        )
+        if not has_storage:
+            return
+        self._short_overlap_warned = True
+        logger.warning(
+            f"Rolling-horizon overlap is {overlap_hours} h (< 24 h) and the system has storage. "
+            "Each window only sees that far past its kept hours, so storage may not charge "
+            "for a peak just beyond it; set temporal.overlap_hours to 24 or more."
+        )
+
+    @staticmethod
+    def _warn_operating_budget_excess(year: int, budget: float, breakdown: dict,
+                                      load_shed_mwh: float) -> None:
+        """One warning when the year's dispatch spent more than its operating
+        budget (``max_annual_operating_cost``): the excess, its penalty and
+        the year's unserved energy."""
+        excess = breakdown.get("operating_budget_excess", 0.0)
+        if excess <= 1e-6 * max(budget, 1.0):
+            return
+        logger.warning(
+            f"Year {year}: the dispatch spent {excess / 1e6:,.3f} M$ above "
+            f"max_annual_operating_cost ({budget / 1e6:,.3f} M$), penalised "
+            f"{breakdown.get('operating_budget_penalty', 0.0) / 1e6:,.3f} M$; "
+            f"unserved energy {load_shed_mwh:,.1f} MWh. The budget does not cover "
+            "the fuel, maintenance and fixed O&M the year needs.")
+
     def _run_operational_dispatch(
         self,
         year: int,
@@ -3819,7 +6511,9 @@ class Orchestrator:
         Run operational dispatch using rolling horizon.
 
         Args:
-            re_penetration_target: Year-specific RE target (0-1). If None, uses config default.
+            re_penetration_target: Year-specific RE target (0-1), from the
+                development master's trajectory. None or 0: no RE-penetration
+                constraint (operations modes).
 
         Returns:
             YearResults for this year
@@ -3835,11 +6529,14 @@ class Orchestrator:
         # MEAN preserves energy balance: sum(mean_demand × Δt) == sum(hourly_demand × 1h).
         # MAX is only used for MasterProblem strategic capacity planning.
         # Matches legacy main.py line 1718.
+        if temporal.use_rolling_horizon and overlap < 24:
+            self._warn_short_overlap(overlap)
+
         if resolution_hours > 1:
             demand = aggregate_to_resolution(demand, target_hours=resolution_hours)
             hours = len(demand)
             # Convert rolling horizon parameters to aggregated timesteps
-            rolling_hours = rolling_hours // resolution_hours
+            rolling_hours = max(1, rolling_hours // resolution_hours)
             overlap = overlap // resolution_hours
             logger.debug(
                 f"Temporal aggregation: resolution={resolution_hours}h, "
@@ -3849,6 +6546,8 @@ class Orchestrator:
         if not temporal.use_rolling_horizon:
             rolling_hours = hours
             overlap = 0
+        # Step rounding can make the overlap reach the window; keep at least one kept step.
+        overlap = min(overlap, rolling_hours - 1)
 
         # Calculate number of windows.
         # Use ceiling division so the last window always reaches the end of the year.
@@ -3873,12 +6572,14 @@ class Orchestrator:
         all_loss_reserve_static = []
         all_loss_reserve_dynamic = []
         all_load_shed = []
+        all_unattached_shed = []
         all_co2_emissions = []
         all_prices = []
         all_voltage_angle = []
         all_voltage_magnitude = []
         all_reactive_generation = []
         all_power_flow = []
+        all_line_losses = []
         all_bat_spillage = []
         all_ev_charging = []
         all_ev_v2g = []
@@ -3889,28 +6590,35 @@ class Orchestrator:
         all_reservoir_level = []
         all_reservoir_spillage = []
         all_reservoir_pump = []
+        all_electrolyzer_power = []
+        all_electrolyzer_h2 = []
         all_pe_results: list[dict] = []
         all_n1_gen_duals = []
         all_n1_binding: list[str] = []
         all_n1_trans_duals: list[dict] = []
         total_n1_security_cost = 0.0
-        # Investment arrays (from last window only, not time-dependent)
-        last_reservoir_invest = None
-        last_gen_investment = None
-        last_bat_inv_power = None
-        last_bat_inv_capacity = None
-        last_transfer_investment = None
         total_objective = 0.0
         total_solve_time = 0.0
         total_load_shed = 0.0
         total_curtailment = 0.0
-        total_re_penetration = 0.0
+        total_re_generation = 0.0
         total_emissions = 0.0
         total_generation = 0.0
         total_demand_val = 0.0
+        total_losses = 0.0
+        window_loss_repairs: list[dict] = []
         accumulated_cost_breakdown: dict[str, float] = {}
         feasible = True
         num_solved = 0
+
+        # Annual operating budget (max_annual_operating_cost, $/yr): each
+        # window gets what is left of it in proportion to its committed
+        # steps' demand, and what those steps spent is carried
+        op_budget = getattr(self.primary_system, 'max_annual_operating_cost', None)
+        op_budget_left = op_budget
+        # Demand of the year from each step on (MW, summed over nodes)
+        step_demand = np.asarray(demand, dtype=float).reshape(len(demand), -1).sum(axis=1)
+        demand_from = np.concatenate([np.cumsum(step_demand[::-1])[::-1], [0.0]])
 
         boundary_conditions = self.state.boundary_conditions.copy()
         # Battery / generator / reservoir rosters can change between years
@@ -3921,7 +6629,11 @@ class Orchestrator:
         boundary_conditions.pop('battery_soc', None)
         boundary_conditions.pop('gen_status_init', None)
         boundary_conditions.pop('gen_output_prev', None)
+        boundary_conditions.pop('battery_discharge_prev', None)
+        boundary_conditions.pop('battery_charge_prev', None)
         boundary_conditions.pop('reservoir_level', None)
+        # Battery SOC at the start of the year (battery × bus, MWh), from window 1.
+        year_start_soc = None
 
         # Extract year-specific sectoral demand (self._sectoral_demand covers full horizon)
         year_sectoral_demand = {}
@@ -4030,8 +6742,32 @@ class Orchestrator:
                 ev_start_hourly = start_hour * resolution_hours
                 ev_window_hourly = (end_hour - start_hour) * resolution_hours
                 ev_config_data = self._build_ev_config(
-                    year_idx, ev_start_hourly, ev_window_hourly
+                    year_idx, ev_start_hourly, ev_window_hourly,
+                    resolution_hours=resolution_hours,
                 )
+
+            # Hours committed from this window: all but the overlap tail,
+            # except for the last window. The next window starts right after.
+            is_last_window = (window == num_windows - 1)
+            keep_hours = (end_hour - start_hour) if is_last_window else effective_hours
+
+            # The year must not end with less stored energy than it started
+            # with (the next year restarts from soc_initial): the last window
+            # gets a soft floor at the year-start SOC.
+            window_bc = boundary_conditions
+            if is_last_window:
+                window_bc = dict(boundary_conditions)
+                if year_start_soc is not None:
+                    window_bc['battery_soc_end_min'] = year_start_soc
+                elif window == 0:
+                    window_bc['battery_soc_end_cyclic'] = True
+
+            window_budget = None
+            if op_budget is not None:
+                kept_end = min(start_hour + keep_hours, hours)
+                window_budget = window_operating_budget(
+                    op_budget_left, demand_from[start_hour] - demand_from[kept_end],
+                    demand_from[start_hour])
 
             # Solve window
             # Pass start_hour in hourly units for adapter's availability cache slicing
@@ -4042,13 +6778,15 @@ class Orchestrator:
                 demand=window_demand,  # NET demand (after rooftop subtraction)
                 hours=end_hour - start_hour,
                 num_nodes=num_nodes,
-                boundary_conditions=boundary_conditions,
+                boundary_conditions=window_bc,
                 units_config=units_config,
                 sectoral_demand=window_sectoral,
                 ev_config_data=ev_config_data,
                 start_hour=start_hour_hourly,
                 rooftop_generation=None,  # Behind-the-meter: already in net demand
                 re_penetration_target=re_penetration_target,
+                keep_hours=keep_hours,
+                operating_budget=window_budget,
             )
 
             if window_result is None:
@@ -4075,14 +6813,14 @@ class Orchestrator:
             if self._progress and len(self._progress.task_ids) > 1:
                 self._progress.advance(self._progress.task_ids[1])
 
+            if window == 0:
+                first_soc = window_result.get("bat_soc")
+                if first_soc is not None and getattr(first_soc, "ndim", 0) == 3:
+                    year_start_soc = np.asarray(first_soc)[..., 0]
+
             # Update boundary conditions for next window
             if window_result.get("boundary_conditions"):
                 boundary_conditions = window_result["boundary_conditions"]
-
-            # Determine how many hours to keep from this window
-            # For all windows except the last, strip the overlap tail
-            is_last_window = (window == num_windows - 1)
-            keep_hours = (end_hour - start_hour) if is_last_window else effective_hours
 
             def _trim(arr, keep_h):
                 """Trim overlap hours from the time axis (last axis)."""
@@ -4093,36 +6831,33 @@ class Orchestrator:
                 else:
                     return arr[..., :keep_h]
 
-            def _merge_n1_trans_duals(duals_list):
-                """Merge N-1 transmission dual dicts across windows."""
-                merged = {}
-                for d in duals_list:
-                    for key, arr in d.items():
-                        if key in merged:
-                            merged[key] = np.concatenate([merged[key], np.asarray(arr)])
-                        else:
-                            merged[key] = np.asarray(arr)
-                return merged
-
-            # Accumulate scalar results (scale by kept fraction)
+            # Accumulate scalar results. The window's objective, totals and
+            # cost breakdown already cover only its committed steps
+            # (_solve_window extracts them with keep_hours).
             total_solve_time += window_result.get("solve_time", 0.0)
-            total_re_penetration += window_result.get("re_penetration", 0.0)
-            window_hours_total = end_hour - start_hour
-            kept_fraction = keep_hours / window_hours_total if window_hours_total > 0 else 1.0
-            total_objective += window_result.get("objective", 0.0) * kept_fraction
-            total_load_shed += window_result.get("load_shed_total", 0.0) * kept_fraction
-            total_curtailment += window_result.get("total_curtailment", 0.0) * kept_fraction
-            total_emissions += window_result.get("total_co2", 0.0) * kept_fraction
-            total_generation += window_result.get("total_generation", 0.0) * kept_fraction
-            total_demand_val += window_result.get("total_demand", 0.0) * kept_fraction
+            # The window's renewable generation: its RE share × its
+            # generation, both over the committed steps
+            total_re_generation += (window_result.get("re_penetration", 0.0)
+                                    * window_result.get("total_generation", 0.0))
+            total_objective += window_result.get("objective", 0.0)
+            total_load_shed += window_result.get("load_shed_total", 0.0)
+            total_curtailment += window_result.get("total_curtailment", 0.0)
+            total_emissions += window_result.get("total_co2", 0.0)
+            total_generation += window_result.get("total_generation", 0.0)
+            total_demand_val += window_result.get("total_demand", 0.0)
+            total_losses += window_result.get("total_losses", 0.0) or 0.0
+            if isinstance(window_result.get("loss_repair"), dict):
+                window_loss_repairs.append(window_result["loss_repair"])
 
-            # Accumulate cost breakdown (scale energy-based costs by kept_fraction)
             wbd = window_result.get("cost_breakdown")
             if wbd:
                 for k, v in wbd.items():
-                    accumulated_cost_breakdown[k] = (
-                        accumulated_cost_breakdown.get(k, 0.0) + v * kept_fraction
-                    )
+                    accumulated_cost_breakdown[k] = accumulated_cost_breakdown.get(k, 0.0) + v
+            if op_budget_left is not None:
+                # What the window spent within its budget: the excess is
+                # already penalised and leaves the later windows' share alone
+                op_budget_left -= (operating_spend(wbd)
+                                   - (wbd or {}).get("operating_budget_excess", 0.0))
 
             # Collect array results (trimmed to remove overlap hours)
             if window_result.get("gen_output") is not None:
@@ -4149,6 +6884,10 @@ class Orchestrator:
                 all_loss_reserve_dynamic.append(_trim(window_result["loss_of_reserve_dynamic"], keep_hours))
             if window_result.get("load_shed") is not None:
                 all_load_shed.append(_trim(window_result["load_shed"], keep_hours))
+            if window_result.get("line_losses") is not None:
+                all_line_losses.append(_trim(window_result["line_losses"], keep_hours))
+            if window_result.get("unattached_load_shed") is not None:
+                all_unattached_shed.append(_trim(window_result["unattached_load_shed"], keep_hours))
             if window_result.get("co2_emissions") is not None:
                 all_co2_emissions.append(_trim(window_result["co2_emissions"], keep_hours))
             if window_result.get("energy_prices") is not None:
@@ -4161,8 +6900,9 @@ class Orchestrator:
             if window_result.get("reactive_generation") is not None:
                 all_reactive_generation.append(
                     _trim(window_result["reactive_generation"], keep_hours))
-            if window_result.get("power_flow") is not None:
-                all_power_flow.append(window_result["power_flow"])
+            # Keyed series (power flow, transfer margin, N-1 duals) keep
+            # only the committed steps too, with keys aligned across windows.
+            all_power_flow.append((window_result.get("power_flow") or {}, keep_hours))
             if window_result.get("bat_spillage") is not None:
                 all_bat_spillage.append(_trim(window_result["bat_spillage"], keep_hours))
             if window_result.get("ev_charging") is not None:
@@ -4175,37 +6915,33 @@ class Orchestrator:
                 all_ev_loss.append(_trim(window_result["ev_loss"], keep_hours))
             if window_result.get("loss_of_inertia") is not None:
                 all_loss_of_inertia.append(_trim(window_result["loss_of_inertia"], keep_hours))
-            if window_result.get("transfer_margin") is not None:
-                all_transfer_margin.append(window_result["transfer_margin"])
+            all_transfer_margin.append((window_result.get("transfer_margin") or {}, keep_hours))
             if window_result.get("reservoir_level") is not None:
                 all_reservoir_level.append(_trim(window_result["reservoir_level"], keep_hours))
             if window_result.get("reservoir_spillage") is not None:
                 all_reservoir_spillage.append(_trim(window_result["reservoir_spillage"], keep_hours))
             if window_result.get("reservoir_pump") is not None:
                 all_reservoir_pump.append(_trim(window_result["reservoir_pump"], keep_hours))
-            if window_result.get("reservoir_invest_capacity") is not None:
-                last_reservoir_invest = window_result["reservoir_invest_capacity"]
-            # Investment arrays: keep from last window (not time-varying)
-            if window_result.get("gen_investment") is not None:
-                last_gen_investment = window_result["gen_investment"]
-            if window_result.get("bat_investment_power") is not None:
-                last_bat_inv_power = window_result["bat_investment_power"]
-            if window_result.get("bat_investment_capacity") is not None:
-                last_bat_inv_capacity = window_result["bat_investment_capacity"]
-            if window_result.get("transfer_investment") is not None:
-                last_transfer_investment = window_result["transfer_investment"]
+            if window_result.get("electrolyzer_power") is not None:
+                all_electrolyzer_power.append(_trim(window_result["electrolyzer_power"], keep_hours))
+                all_electrolyzer_h2.append(_trim(window_result["electrolyzer_h2"], keep_hours))
             if window_result.get("primary_energy") is not None:
-                all_pe_results.append(window_result["primary_energy"])
+                all_pe_results.append(
+                    (window_result["primary_energy"], end_hour - start_hour, keep_hours))
             # N-1 security results
-            if window_result.get("n1_gen_reserve_duals") is not None:
-                all_n1_gen_duals.append(_trim(window_result["n1_gen_reserve_duals"], keep_hours))
+            # A window without binding N-1 duals returns None: zero-fill it.
+            all_n1_gen_duals.append((
+                {"d": window_result["n1_gen_reserve_duals"]}
+                if window_result.get("n1_gen_reserve_duals") is not None else {},
+                keep_hours,
+            ))
             if window_result.get("n1_binding_contingencies") is not None:
                 for bc in window_result["n1_binding_contingencies"]:
                     if bc not in all_n1_binding:
                         all_n1_binding.append(bc)
-            if window_result.get("n1_trans_reserve_duals") is not None:
-                all_n1_trans_duals.append(window_result["n1_trans_reserve_duals"])
-            total_n1_security_cost += window_result.get("n1_security_cost", 0.0)
+            all_n1_trans_duals.append((window_result.get("n1_trans_reserve_duals") or {}, keep_hours))
+            # Over the committed steps, like the objective (extract_solution)
+            total_n1_security_cost += window_result.get("n1_security_cost") or 0.0
 
         # No window solved: the whole year produced no dispatch. Surface the
         # underlying solver/model error instead of exporting an empty result
@@ -4224,6 +6960,10 @@ class Orchestrator:
         # Update state boundary conditions for next year
         self.state.boundary_conditions = boundary_conditions
 
+        if op_budget is not None:
+            self._warn_operating_budget_excess(year, op_budget, accumulated_cost_breakdown,
+                                               total_load_shed)
+
         # Concatenate arrays along time axis (last axis = hours)
         gen_output = np.concatenate(all_gen_output, axis=-1) if all_gen_output else None
         gen_status = np.concatenate(all_gen_status, axis=-1) if all_gen_status else None
@@ -4237,6 +6977,7 @@ class Orchestrator:
         loss_reserve_static = np.concatenate(all_loss_reserve_static, axis=-1) if all_loss_reserve_static else None
         loss_reserve_dynamic = np.concatenate(all_loss_reserve_dynamic, axis=-1) if all_loss_reserve_dynamic else None
         load_shed_arr = np.concatenate(all_load_shed, axis=-1) if all_load_shed else None
+        line_losses_arr = np.concatenate(all_line_losses, axis=-1) if all_line_losses else None
         co2_emissions_arr = np.concatenate(all_co2_emissions, axis=-1) if all_co2_emissions else None
         prices = np.concatenate(all_prices, axis=-1) if all_prices else None
         voltage_angle = np.concatenate(all_voltage_angle, axis=-1) if all_voltage_angle else None
@@ -4254,57 +6995,29 @@ class Orchestrator:
         reservoir_level = np.concatenate(all_reservoir_level, axis=-1) if all_reservoir_level else None
         reservoir_spillage = np.concatenate(all_reservoir_spillage, axis=-1) if all_reservoir_spillage else None
         reservoir_pump = np.concatenate(all_reservoir_pump, axis=-1) if all_reservoir_pump else None
+        electrolyzer_power = (np.concatenate(all_electrolyzer_power, axis=-1)
+                              if all_electrolyzer_power else None)
+        electrolyzer_h2 = (np.concatenate(all_electrolyzer_h2, axis=-1)
+                           if all_electrolyzer_h2 else None)
 
-        # Combine power_flow dicts across windows
-        combined_power_flow = {}
-        for pf_dict in all_power_flow:
-            for key, arr in pf_dict.items():
-                if key in combined_power_flow:
-                    combined_power_flow[key] = np.concatenate([combined_power_flow[key], arr])
-                else:
-                    combined_power_flow[key] = np.array(arr)
+        # Combine keyed series across windows (committed steps only)
+        combined_power_flow = _concat_window_series(all_power_flow)
+        combined_transfer_margin = _concat_window_series(all_transfer_margin)
+        combined_n1_trans_duals = _concat_window_series(all_n1_trans_duals)
+        n1_gen_duals_arr = _concat_window_series(all_n1_gen_duals).get("d")
 
-        # Combine transfer_margin dicts across windows
-        combined_transfer_margin = {}
-        for tm_dict in all_transfer_margin:
-            for key, arr in tm_dict.items():
-                if key in combined_transfer_margin:
-                    combined_transfer_margin[key] = np.concatenate([combined_transfer_margin[key], arr])
-                else:
-                    combined_transfer_margin[key] = np.array(arr)
+        # Merge primary energy results across windows (committed steps only)
+        pe_merged = (_merge_pe_windows(all_pe_results, self._pe_period_steps())
+                     if all_pe_results else None)
 
-        # Merge primary energy results across windows
-        pe_merged = None
-        if all_pe_results:
-            pe_merged = {}
-            for key in ("total_fuel_supply", "total_ne_demand_satisfied", "total_loss_of_supply"):
-                pe_merged[key] = {}
-                for pe in all_pe_results:
-                    if key in pe:
-                        for fuel, arr in pe[key].items():
-                            if fuel in pe_merged[key]:
-                                pe_merged[key][fuel] = pe_merged[key][fuel] + arr
-                            else:
-                                pe_merged[key][fuel] = arr.copy()
-            last_pe = all_pe_results[-1]
-            pe_merged["final_storage_levels"] = last_pe.get("final_storage_levels", {})
-            pe_merged["transport_investments"] = last_pe.get("transport_investments", {})
-            pe_merged["storage_investments"] = last_pe.get("storage_investments", {})
-            # Sum transport flows across windows
-            pe_merged["transport_flows"] = {}
-            for pe in all_pe_results:
-                for fuel, arr in pe.get("transport_flows", {}).items():
-                    if fuel in pe_merged["transport_flows"]:
-                        pe_merged["transport_flows"][fuel] = pe_merged["transport_flows"][fuel] + arr
-                    else:
-                        pe_merged["transport_flows"][fuel] = arr.copy()
-            for cost_key in ("total_fuel_cost", "total_transport_cost", "total_loss_penalty"):
-                pe_merged[cost_key] = sum(pe.get(cost_key, 0.0) for pe in all_pe_results)
+        # The year's RE share, energy-weighted: renewable over total
+        # generation of the committed steps (not a mean of the windows')
+        avg_re = re_share(total_re_generation, total_generation)
 
-        # Average RE penetration
-        avg_re = total_re_penetration / num_solved if num_solved > 0 else 0.0
-
-        # Aggregate bus-level results to node-level (when num_buses > num_nodes)
+        # Aggregate bus-level results back to node-level whenever the bus
+        # network is not the identity mapping over nodes (see
+        # node_bus_mapping_required) — otherwise bus-indexed arrays are
+        # exported as if node-indexed and every viewer misreads them.
         if self._bus_to_node is not None:
             # Quantity variables: SUM across buses in same node
             gen_output = self._aggregate_buses_to_nodes(gen_output, "sum")
@@ -4314,6 +7027,7 @@ class Orchestrator:
             bat_discharge = self._aggregate_buses_to_nodes(bat_discharge, "sum")
             bat_soc = self._aggregate_buses_to_nodes(bat_soc, "sum")
             load_shed_arr = self._aggregate_buses_to_nodes(load_shed_arr, "sum")
+            line_losses_arr = self._aggregate_buses_to_nodes(line_losses_arr, "sum")
             co2_emissions_arr = self._aggregate_buses_to_nodes(co2_emissions_arr, "sum")
             reserve_static = self._aggregate_buses_to_nodes(reserve_static, "sum")
             reserve_dynamic = self._aggregate_buses_to_nodes(reserve_dynamic, "sum")
@@ -4328,14 +7042,34 @@ class Orchestrator:
             reservoir_level = self._aggregate_buses_to_nodes(reservoir_level, "sum")
             reservoir_spillage = self._aggregate_buses_to_nodes(reservoir_spillage, "sum")
             reservoir_pump = self._aggregate_buses_to_nodes(reservoir_pump, "sum")
-            # Status variables: MAX across buses (1 if active at any bus)
-            gen_status = self._aggregate_buses_to_nodes(gen_status, "max")
+            electrolyzer_power = self._aggregate_buses_to_nodes(electrolyzer_power, "sum")
+            electrolyzer_h2 = self._aggregate_buses_to_nodes(electrolyzer_h2, "sum")
+            # Units online: SUM across buses (a plant the master built is
+            # spread over the node's buses, each piece with its own units)
+            gen_status = self._aggregate_buses_to_nodes(gen_status, "sum")
             # Prices: MAX across buses (highest marginal price)
             prices = self._aggregate_buses_to_nodes(prices, "max")
             voltage_angle = self._aggregate_buses_to_nodes(voltage_angle, "max")
 
+        # Demand of nodes without a load bus: in no power balance, so it is
+        # reported as unserved load at its node (the adapter already added it
+        # to load_shed_total, the cost breakdown and the objective).
+        if all_unattached_shed and len(all_unattached_shed) == len(all_load_shed):
+            unattached = np.concatenate(all_unattached_shed, axis=-1)
+            if load_shed_arr is not None and load_shed_arr.shape == unattached.shape:
+                load_shed_arr = load_shed_arr + unattached
+
         logger.debug(f"Year {year} dispatch: obj=${total_objective:,.0f}, "
                       f"RE={avg_re:.1%}, CO2={total_emissions:.0f}t, time={total_solve_time:.1f}s")
+        dispatch_loss_repair = sum_loss_repairs(window_loss_repairs)
+        if dispatch_loss_repair and dispatch_loss_repair["windows_repaired"]:
+            r = dispatch_loss_repair
+            logger.log(
+                logging.INFO if r["gap"] > LOSS_REPAIR_GAP_INFO else logging.DEBUG,
+                f"Year {year} dispatch line losses: PWL solves ${r['lower_bound']:,.0f} "
+                f"(lower bound), repaired ${r['objective']:,.0f} (gap {r['gap']:.2%}, "
+                f"largest window {r['gap_max']:.2%}; {r['windows_repaired']} of "
+                f"{r['windows']} windows repaired, {r['released']} line-step(s) released)")
 
         year_result = YearResults(
             year=year,
@@ -4356,15 +7090,12 @@ class Orchestrator:
             load_shed_array=load_shed_arr,
             co2_emissions=co2_emissions_arr,
             power_flow=combined_power_flow if combined_power_flow else None,
+            line_losses=line_losses_arr,
             voltage_angle=voltage_angle,
             voltage_magnitude=voltage_magnitude,
             reactive_generation=reactive_generation,
-            transfer_investment=last_transfer_investment,
             prices=prices,
             demand=demand,
-            gen_investment_array=last_gen_investment,
-            bat_investment_power=last_bat_inv_power,
-            bat_investment_capacity=last_bat_inv_capacity,
             bat_spillage=bat_spillage,
             ev_charging=ev_charging,
             ev_v2g=ev_v2g,
@@ -4380,15 +7111,19 @@ class Orchestrator:
             reservoir_level=reservoir_level,
             reservoir_spillage=reservoir_spillage,
             reservoir_pump=reservoir_pump,
-            reservoir_invest_capacity=last_reservoir_invest,
+            electrolyzer_power=electrolyzer_power,
+            electrolyzer_h2=electrolyzer_h2,
             primary_energy=pe_merged,
+            fuel_for_power=(pe_merged or {}).get("fuel_for_power") or None,
             load_shed=total_load_shed,
             re_penetration=avg_re,
             emissions=total_emissions,
             total_generation=total_generation,
             total_demand=total_demand_val,
-            n1_gen_reserve_duals=np.concatenate(all_n1_gen_duals) if all_n1_gen_duals else None,
-            n1_trans_reserve_duals=_merge_n1_trans_duals(all_n1_trans_duals) if all_n1_trans_duals else None,
+            transmission_losses=total_losses,
+            dispatch_loss_repair=dispatch_loss_repair,
+            n1_gen_reserve_duals=n1_gen_duals_arr,
+            n1_trans_reserve_duals=combined_n1_trans_duals if combined_n1_trans_duals else None,
             n1_binding_contingencies=all_n1_binding if all_n1_binding else None,
             n1_security_cost=total_n1_security_cost,
             cost_breakdown=accumulated_cost_breakdown if accumulated_cost_breakdown else None,
@@ -4430,6 +7165,7 @@ class Orchestrator:
             generators.append(SimpleNamespace(
                 name=vdata.get("name", key),
                 type=vdata.get("type", "Renewable"),
+                fuel=vdata.get("fuel", "None"),
                 rated_power=rp,
                 fuel_cost=vdata.get("fuel_cost", [0.0] * len(rp)),
                 fixed_cost=vdata.get("fixed_cost", [0.0] * len(rp)),
@@ -4512,6 +7248,9 @@ class Orchestrator:
             for g, gen in enumerate(generators):
                 if g >= n_gen:
                     break
+                # The fuel price of this year, as the dispatch charged it
+                growth = fuel_price_factor(sys_fuels, getattr(gen, 'fuel', None), result.year,
+                                           self._fuel_price_base_year(result.year))
                 for n in range(min(n_nodes, len(gen.fuel_cost))):
                     output = result.gen_output[g, n, :]
                     mask = output > 1e-6
@@ -4520,12 +7259,21 @@ class Orchestrator:
                     fc = gen.fuel_cost[n]
                     if fc <= 0:
                         fc = _fuel_based_cost(gen, n)
-                    fxc = gen.fixed_cost[n]
+                    fc *= growth
                     mc = gen.maintenance_cost[n]
+                    # Fixed O&M ($/MW·yr) of the rated power over these
+                    # hours, spread over the energy produced in them
+                    rated = gen.rated_power[n] if n < len(gen.rated_power) else 0.0
+                    fxc = (gen.fixed_cost[n] * rated * hours
+                           / HOURS_STD_YEAR / float(output.sum()))
                     total_cost = (fc + fxc + mc) * output
                     # Add startup cost if available
+                    # (one of num_units units costs start_up_cost / num_units)
                     if result.gen_startup is not None and g < result.gen_startup.shape[0]:
                         su = gen.start_up_cost[n] if n < len(gen.start_up_cost) else 0.0
+                        units = (self._gen_num_units[g] if g < len(self._gen_num_units)
+                                 else [])
+                        su /= max(1, units[n] if n < len(units) else 1)
                         total_cost += su * result.gen_startup[g, n, :]
                     lcoe[g, n, mask] = total_cost[mask] / output[mask]
             result.lcoe = lcoe
@@ -4728,11 +7476,16 @@ class Orchestrator:
             tech_prices = {}
             n_gen = result.gen_output.shape[0]
             hours = result.gen_output.shape[2]
+            # Keyed by the unit's HDF5 dataset name: unique (homonymous
+            # generators no longer overwrite each other) and '/'-free.
+            known = list(getattr(self, "_gen_names", None) or [])
+            names = known if len(known) == len(generators) else [gen.name for gen in generators]
+            ds_names = self._h5_unit_names(names)
 
             for g, gen in enumerate(generators):
                 if g >= n_gen:
                     break
-                name = gen.name
+                name = ds_names[g]
                 rows = []
                 total_gen = 0.0
                 total_rev = 0.0
@@ -4865,15 +7618,10 @@ class Orchestrator:
                 'storage_capacity': stor_cap[fuel],
                 'initial_storage_level': stor_init[fuel],
                 'min_storage_level': min_stor[fuel],
-                'storage_investment_cost': 0.0,
-                'transport_cost': 0.0,
-                'transport_losses': 0.0,
                 'transport_transit_days_per_100km': transit[fuel],
                 'disruption_start_hour': disrupt[fuel]["start"],
                 'disruption_end_hour': disrupt[fuel]["end"],
                 'disruption_availability': disrupt[fuel]["avail"],
-                'max_storage_investment_per_node': 0.0,
-                'max_transport_investment_per_arc': 0.0,
             }
             # Get unit from fuels definition
             fuel_def = system_config.fuels.get(fuel)
@@ -4887,6 +7635,11 @@ class Orchestrator:
                         f"import_cost={fv['import_cost']}, "
                         f"storage_cap={fv['storage_capacity']}")
         return pe_sources
+
+    def _pe_period_steps(self) -> int:
+        """Primary-energy period length in timesteps (``primary_energy_resolution`` hours)."""
+        res_h = getattr(self.config.temporal, 'resolution_hours', 1) or 1
+        return max(1, int(self.config.temporal.primary_energy_resolution) // res_h)
 
     def _solve_window(
         self,
@@ -4902,6 +7655,8 @@ class Orchestrator:
         start_hour: int = 0,
         rooftop_generation: Optional[np.ndarray] = None,
         re_penetration_target: Optional[float] = None,
+        keep_hours: Optional[int] = None,
+        operating_budget: Optional[float] = None,
     ) -> Optional[dict]:
         """
         Solve a single rolling horizon window.
@@ -4914,6 +7669,11 @@ class Orchestrator:
             start_hour: Start hour within the year (for availability profile slicing)
             num_nodes: Number of nodes
             boundary_conditions: Battery SOC, generator status from previous window
+            keep_hours: Steps of this window that are committed (the next
+                window starts after them); the boundary state handed to the
+                next window is taken there. Defaults to the whole window.
+            operating_budget: The window's operating budget ($) for its
+                committed steps (``window_operating_budget``); None: no budget.
             units_config: Current units configuration (with investments applied)
             sectoral_demand: Sectoral demand arrays for this window
             ev_config_data: EV configuration data for this window
@@ -4951,16 +7711,22 @@ class Orchestrator:
                 year=year,
                 base_year=self.state.base_year,
                 mode=ps_mode,
+                # N-1 apply_to_modes lists simulation modes, not ps_mode
+                run_mode=self.config.simulation_mode,
                 availability_cache=self._availability_cache,
-                inflow_cache=self._inflow_cache,
+                inflow_cache=getattr(self, "_inflow_cache", None),
                 start_hour=start_hour,
+                # Names the window in the solver warnings
+                window=window,
                 boundary_conditions=boundary_conditions,
                 units_config=units_config,
                 sectoral_demand=sectoral_demand or {},
                 ev_config_data=ev_config_data,
                 rooftop_generation=rooftop_generation,
                 re_penetration_target=re_penetration_target,
-                system_config=self.primary_system,
+                # With the electrolyzers the master built up to this year
+                system_config=self._dispatch_system(year),
+                config_path=self.config_path,
             )
 
             # Build power system model
@@ -4968,10 +7734,7 @@ class Orchestrator:
 
             # Integrate primary energy (fuel supply chain) if enabled and configured
             pe = None
-            has_pe_sources = bool(system_config.primary_energy_sources)
-            has_fuel_entries = bool(getattr(system_config, 'fuel_entry_points', None))
-            if (self.config.enable_primary_energy
-                    and (has_pe_sources or has_fuel_entries)):
+            if self._pe_enabled(system_config):
                 try:
                     # Build generator list as dicts for PE adapter.
                     # MUST match the PowerSystemAdapter ordering: original gens
@@ -4997,51 +7760,7 @@ class Orchestrator:
                             gen_dict['name'] = vdata.get('name', vk)
                             gen_list.append(gen_dict)
 
-                    # Build fuels definition dict
-                    fuels_def = {}
-                    for fk, fc in system_config.fuels.items():
-                        fuels_def[fk] = fc.model_dump() if hasattr(fc, 'model_dump') else fc.__dict__.copy()
-
-                    # Build PE sources config
-                    pe_sources = {}
-                    if has_pe_sources:
-                        for pk, pc in system_config.primary_energy_sources.items():
-                            pe_sources[pk] = pc.model_dump() if hasattr(pc, 'model_dump') else pc.__dict__.copy()
-                    elif has_fuel_entries:
-                        # Auto-build PE sources from fuel_entry_points + storage
-                        pe_sources = self._build_pe_sources_from_entries(
-                            system_config, num_nodes,
-                        )
-
-                    # Build non-electric demand config
-                    ne_demand = {}
-                    for nk, nc in system_config.non_electric_demand.items():
-                        ne_demand[nk] = nc.model_dump() if hasattr(nc, 'model_dump') else nc.__dict__.copy()
-
-                    # Build infrastructure config
-                    infra = system_config.fuel_infrastructure
-                    infra_dict = infra.model_dump() if hasattr(infra, 'model_dump') else infra.__dict__.copy()
-
-                    # Penalties dict
-                    penalties_dict = system_config.penalties.model_dump() if hasattr(system_config.penalties, 'model_dump') else system_config.penalties.__dict__.copy()
-
-                    # Convert PE resolution from real hours to timestep units
                     res_h = getattr(self.config.temporal, 'resolution_hours', 1)
-                    pe_res_timesteps = max(1, self.config.temporal.primary_energy_resolution // res_h)
-
-                    # Scale max_availability for temporal resolution: PE model treats
-                    # each timestep as 1h, but each is res_h real hours. The PE model
-                    # computes max_supply_per_period = annual_avail * (timesteps/8760).
-                    # Correct fraction should use real hours, so scale by res_h.
-                    if res_h > 1:
-                        import copy
-                        pe_sources_scaled = copy.deepcopy(pe_sources)
-                        for fuel_data in pe_sources_scaled.values():
-                            avail_list = fuel_data.get('max_availability', [])
-                            fuel_data['max_availability'] = [a * res_h for a in avail_list]
-                    else:
-                        pe_sources_scaled = pe_sources
-
                     pe_init_storage = boundary_conditions.get('pe_storage_levels')
                     if pe_init_storage and window <= 3:
                         logger.debug(f"Window {window}: PE initial_storage_levels = {pe_init_storage}")
@@ -5051,21 +7770,20 @@ class Orchestrator:
                         base_year=self.state.base_year,
                         hours=hours,
                         num_nodes=num_nodes,
-                        fuels_config=pe_sources_scaled,
-                        non_electric_demand=ne_demand,
-                        infrastructure_config=infra_dict,
-                        transport_distances=system_config.fuel_transport_distances,
                         generators=gen_list,
-                        fuels_definition=fuels_def,
-                        penalties_config=penalties_dict,
-                        primary_energy_resolution=pe_res_timesteps,
-                        discount_rate=system_config.discount_rate,
-                        mode=ps_mode,
-                        cumulative_capacities=self.state.primary_energy_capacities,
+                        primary_energy_resolution=self._pe_period_steps(),
+                        # The run's mode: a development run ends each window
+                        # with its tanks at least 10 % full
+                        mode=self.config.simulation_mode,
+                        # Fuel storage and routes the master built up to this
+                        # year (the dispatch builds none)
+                        cumulative_capacities=self._dispatch_pe_capacities(year),
                         initial_storage_levels=pe_init_storage,
-                        investment_from_master=(self.config.simulation_mode == "development"),
-                        transport_routes=system_config.fuel_transport_routes,
-                        outage_schedule=getattr(system_config, "outage_schedule", None),
+                        step_hours=res_h,
+                        year_hour_offset=start_hour,
+                        # Fuel the previous window shipped that is still in transit
+                        scheduled_arrivals=boundary_conditions.get('pe_in_transit'),
+                        **self._pe_inputs(system_config, num_nodes),
                     )
 
                     # Create PE variables in the same JuMP model
@@ -5074,11 +7792,17 @@ class Orchestrator:
                     # Couple PE to PowerSystem (adds coupling constraints + PE objective)
                     pe.integrate_with_power_system(ps)
 
-                    logger.debug(f"Window {window}: Primary energy integrated "
-                                f"({len(pe_sources)} fuel sources)")
+                    logger.debug(f"Window {window}: Primary energy integrated")
                 except Exception as e:
                     logger.warning(f"Window {window}: Primary energy integration failed: {e}")
                     pe = None
+
+            # The window's share of the year's operating budget, over its
+            # committed steps (the objective is complete now, PE included)
+            if operating_budget is not None:
+                ps.add_operating_budget(
+                    operating_budget, keep_steps=min(keep_hours, hours) if keep_hours else hours,
+                    primary_energy=pe)
 
             # Solve the (possibly coupled) model
             status = ps.solve()
@@ -5097,50 +7821,77 @@ class Orchestrator:
                     logger.warning(f"Could not export LP: {e}")
                 return None
 
+            # Steps committed from this window (the next window solves the
+            # overlap tail again): the scalar totals and costs cover only
+            # these, and the boundary state is taken where they end.
+            k = min(keep_hours, hours) if keep_hours else hours
+
             # Extract results
-            solution = ps.get_solution_values()
+            solution = ps.get_solution_values(keep_steps=k, primary_energy=pe)
 
             # Extract primary energy results and storage carry-over
             pe_results = None
             if pe is not None:
                 try:
-                    pe_results = pe.get_results()
+                    pe_results = pe.get_results(keep_steps=k)
                 except Exception as e:
                     logger.warning(f"Window {window}: PE result extraction failed: {e}")
+                if pe_results:
+                    # Fuel burnt per coupled unit, keyed by the unit's name
+                    unit_names = unique_unit_names([g["name"] for g in gen_list])
+                    pe_results["fuel_for_power"] = {
+                        unit_names[g]: arr
+                        for g, arr in (pe_results.get("fuel_for_power") or {}).items()
+                        if 0 <= g < len(unit_names)
+                    }
 
-            # Extract boundary conditions for next window
+            # Extract boundary conditions for next window, at the end of the
+            # committed part: the next window starts there, not at the end of
+            # this window's look-ahead (overlap) tail.
             new_boundary = {}
-            bat_soc = solution.get('bat_soc')
-            if bat_soc is not None:
-                # bat_soc shape: (batteries x nodes x hours)
-                # Take final timestep SOC for each battery/node
-                if bat_soc.ndim == 3:
-                    new_boundary['battery_soc'] = bat_soc[:, :, -1]  # Last timestep
-                elif bat_soc.ndim == 2:
-                    new_boundary['battery_soc'] = bat_soc[:, -1]
 
-            # UC commitment carry-over (last-timestep gen_status per gen × bus).
-            # Adapter populates Julia generator_initial_status used by min_up /
+            def _state_at(arr):
+                # Level arrays have hours+1 columns (column t = level at the
+                # start of step t); flow arrays have one column per step.
+                if arr is None or not hasattr(arr, 'ndim') or arr.ndim < 2:
+                    return None
+                return arr[..., k] if arr.shape[-1] > hours else arr[..., k - 1]
+
+            bat_soc = _state_at(solution.get('bat_soc'))
+            if bat_soc is not None:
+                new_boundary['battery_soc'] = bat_soc
+
+            # UC commitment carry-over (gen_status per gen × bus). Adapter
+            # populates Julia generator_initial_status used by min_up /
             # min_down constraints at t=1 of the next window.
             gen_status = solution.get('gen_status')
             if gen_status is not None and hasattr(gen_status, 'ndim') and gen_status.ndim == 3:
-                new_boundary['gen_status_init'] = gen_status[:, :, -1]
+                new_boundary['gen_status_init'] = _state_at(gen_status)
 
-            # Ramp continuity: last-timestep gen_output for t=1 ramp seam.
+            # Ramp continuity: gen_output of the last committed step.
             gen_output = solution.get('gen_output')
             if gen_output is not None and hasattr(gen_output, 'ndim') and gen_output.ndim == 3:
-                new_boundary['gen_output_prev'] = gen_output[:, :, -1]
+                new_boundary['gen_output_prev'] = _state_at(gen_output)
 
-            # Reservoir continuity: last-timestep water level (overrides the
-            # configured initial fraction on the next window).
+            # Battery ramp continuity: charge and discharge of the last
+            # committed step (battery × bus)
+            for _src, _dst in (('bat_discharge', 'battery_discharge_prev'),
+                               ('bat_charge', 'battery_charge_prev')):
+                _arr = solution.get(_src)
+                if _arr is not None and hasattr(_arr, 'ndim') and _arr.ndim == 3:
+                    new_boundary[_dst] = _state_at(_arr)
+
+            # Reservoir continuity: water level (overrides the configured
+            # initial fraction on the next window).
             reservoir_level = solution.get('reservoir_level')
             if reservoir_level is not None and hasattr(reservoir_level, 'ndim') and reservoir_level.ndim == 3:
-                new_boundary['reservoir_level'] = reservoir_level[:, :, -1]
+                new_boundary['reservoir_level'] = _state_at(reservoir_level)
 
-            # Carry PE storage levels to next window
+            # Carry PE tank levels and fuel still in transit to the next window
             if pe is not None:
                 try:
-                    new_boundary['pe_storage_levels'] = pe.get_final_storage_levels()
+                    new_boundary['pe_storage_levels'] = pe.get_final_storage_levels(step=k)
+                    new_boundary['pe_in_transit'] = pe.get_in_transit_arrivals(step=k)
                 except Exception as e:
                     logger.warning(f"Window {window}: Could not extract PE storage levels: {e}")
                     import traceback
@@ -5150,6 +7901,9 @@ class Orchestrator:
                 "window": window,
                 "objective": solution.get('objective', 0.0),
                 "solve_time": time.time() - solve_start,
+                # Bounds of the window's line-loss repair (whole window,
+                # look-ahead included), or None
+                "loss_repair": getattr(ps, "loss_repair", None),
                 "status": solution.get('status', 'Unknown'),
                 "boundary_conditions": new_boundary,
                 # Generation arrays [gen x node x hour]
@@ -5168,15 +7922,17 @@ class Orchestrator:
                 "loss_of_reserve_dynamic": solution.get('loss_of_reserve_dynamic'),
                 # Load shedding [node x hour] and CO2 [node x hour]
                 "load_shed": solution.get('load_shed'),
+                # Demand of nodes without a load bus, unserved [node x hour]
+                "unattached_load_shed": solution.get('unattached_load_shed'),
                 "co2_emissions": solution.get('co2_emissions'),
                 # Network
                 "energy_prices": solution.get('energy_prices'),
                 "power_flow": solution.get('power_flow'),
                 "power_flow_by_line": solution.get('power_flow_by_line'),
+                "line_losses": solution.get('line_losses'),
                 "voltage_angle": solution.get('voltage_angle'),
                 "voltage_magnitude": solution.get('voltage_magnitude'),
                 "reactive_generation": solution.get('reactive_generation'),
-                "transfer_investment": solution.get('transfer_investment'),
                 # EV / V2G dispatch [node x hour] — produced by Julia when
                 # ev_config is set; must be propagated here or the year-level
                 # aggregation drops them and they never reach the H5.
@@ -5184,10 +7940,23 @@ class Orchestrator:
                 "ev_v2g": solution.get('ev_v2g'),
                 "ev_soc": solution.get('ev_soc'),
                 "ev_loss": solution.get('ev_loss'),
-                # Investment arrays
-                "gen_investment": solution.get('gen_investment'),
-                "bat_investment_power": solution.get('bat_investment_power'),
-                "bat_investment_capacity": solution.get('bat_investment_capacity'),
+                # Electrolyzers [electrolyzer x bus x hour]: MW drawn, kg/h H2
+                "electrolyzer_power": solution.get('electrolyzer_power'),
+                "electrolyzer_h2": solution.get('electrolyzer_h2'),
+                # Battery spillage [bat x bus x hour], inertia deficit
+                # [hour], transfer margin {(from_bus, to_bus): [hour]}
+                "bat_spillage": solution.get('bat_spillage'),
+                "loss_of_inertia": solution.get('loss_of_inertia'),
+                "transfer_margin": solution.get('transfer_margin'),
+                # Reservoir hydro [gen x bus x hour] (level: hour+1 columns)
+                "reservoir_level": solution.get('reservoir_level'),
+                "reservoir_spillage": solution.get('reservoir_spillage'),
+                "reservoir_pump": solution.get('reservoir_pump'),
+                # N-1 security: duals, binding contingencies, security cost
+                "n1_gen_reserve_duals": solution.get('n1_gen_reserve_duals'),
+                "n1_trans_reserve_duals": solution.get('n1_trans_reserve_duals'),
+                "n1_binding_contingencies": solution.get('n1_binding_contingencies'),
+                "n1_security_cost": solution.get('n1_security_cost', 0.0),
                 # Scalars
                 "load_shed_total": solution.get('load_shed_total', 0.0),
                 "total_curtailment": solution.get('total_curtailment', 0.0),
@@ -5195,6 +7964,7 @@ class Orchestrator:
                 "total_co2": solution.get('total_co2', 0.0),
                 "total_generation": solution.get('total_generation', 0.0),
                 "total_demand": solution.get('total_demand', 0.0),
+                "total_losses": solution.get('total_losses', 0.0),
                 # Granular cost decomposition (capex/opex/fuel/O&M/penalties).
                 # Built by Julia extract_solution → CostBreakdown and mapped in
                 # converters.py; accumulated across windows and written to the
@@ -5221,50 +7991,58 @@ class Orchestrator:
                 )
                 result["ac_power_flow"] = ac_results
 
-            # Compute balance from solution arrays (matches KCL terms)
-            go = solution.get('gen_output')
-            ls = solution.get('load_shed')
-            bd = solution.get('bat_discharge')
-            bc = solution.get('bat_charge')
-            ev_ch = solution.get('ev_charging')
-            ev_v2g = solution.get('ev_v2g')
-            rs = solution.get('reserve_static')
-            rd = solution.get('reserve_dynamic')
+            # Energy balance of the committed steps (MWh), with the terms of
+            # the power balance. Reserves are headroom, not energy, so they
+            # are not in it; transmission losses are reported on their own.
+            tres = max(1.0, float(getattr(self.config.temporal, 'resolution_hours', 1) or 1))
 
-            gen_sum = float(np.sum(go)) if go is not None else 0
-            ls_sum = float(np.sum(ls)) if ls is not None else 0
-            bd_sum = float(np.sum(bd)) if bd is not None else 0
-            bc_sum = float(np.sum(bc)) if bc is not None else 0
-            ev_ch_sum = float(np.sum(ev_ch)) if ev_ch is not None else 0
-            ev_v2g_sum = float(np.sum(ev_v2g)) if ev_v2g is not None else 0
-            rs_sum = float(np.sum(rs)) if rs is not None else 0
-            rd_sum = float(np.sum(rd)) if rd is not None else 0
-            dem_sum = float(np.sum(demand)) if demand is not None else 0
-            rooftop_sum = float(np.sum(rooftop_generation)) if rooftop_generation is not None else 0
+            def _mwh(arr):
+                if arr is None:
+                    return 0.0
+                a = np.asarray(arr, dtype=float)
+                return float(np.nansum(a[..., :k])) * tres if a.ndim else 0.0
+
+            gen_sum = _mwh(solution.get('gen_output'))
+            ls_sum = (_mwh(solution.get('load_shed'))
+                      + _mwh(solution.get('unattached_load_shed')))
+            bd_sum = _mwh(solution.get('bat_discharge'))
+            bc_sum = _mwh(solution.get('bat_charge'))
+            ev_ch_sum = _mwh(solution.get('ev_charging'))
+            ev_v2g_sum = _mwh(solution.get('ev_v2g'))
+            elz_sum = _mwh(solution.get('electrolyzer_power'))
+            pump_sum = _mwh(solution.get('reservoir_pump'))
+            dem_sum = (float(np.nansum(np.asarray(demand, dtype=float)[:k])) * tres
+                       if demand is not None else 0.0)
+            rooftop_sum = (float(np.nansum(np.asarray(rooftop_generation, dtype=float)[:k])) * tres
+                           if rooftop_generation is not None else 0.0)
+            loss_sum = float(solution.get('total_losses', 0.0) or 0.0)
 
             supply = gen_sum + bd_sum + ev_v2g_sum + ls_sum + rooftop_sum
-            demand_side = dem_sum + bc_sum + rs_sum + rd_sum + ev_ch_sum
+            consumption = dem_sum + bc_sum + ev_ch_sum + elz_sum + pump_sum + loss_sum
 
-            gap = supply - demand_side
-            gap_pct = abs(gap) / demand_side * 100 if demand_side > 0 else 0
+            gap = supply - consumption
+            gap_pct = abs(gap) / consumption * 100 if consumption > 0 else 0
+            loss_pct = loss_sum / supply * 100 if supply > 0 else 0
 
             # Concise balance line for every window (matches Julia @info)
             logger.debug(
                 f"Window {window} solved: obj=${result['objective']:,.0f} | "
-                f"balance: supply={supply:.1f} demand={demand_side:.1f} gap={gap:.1f} ({gap_pct:.1f}%) | "
+                f"energy balance (MWh): supply={supply:.1f} use={consumption:.1f} "
+                f"gap={gap:.1f} ({gap_pct:.2f}%) | losses={loss_sum:.1f} ({loss_pct:.2f}%) | "
                 f"gen={gen_sum:.1f} ls={ls_sum:.1f} bat={bd_sum - bc_sum:.1f} ev={ev_v2g_sum - ev_ch_sum:.1f}"
             )
 
             # Detailed balance for first 3 windows per year
             if window < 3:
                 logger.debug(
-                    f"  BALANCE W{window} detail: "
+                    f"  BALANCE W{window} detail (MWh): "
                     f"gen={gen_sum:.1f} bat_dch={bd_sum:.1f} ev_v2g={ev_v2g_sum:.1f} "
                     f"ls={ls_sum:.1f} rooftop={rooftop_sum:.1f} | "
                     f"dem={dem_sum:.1f} bat_ch={bc_sum:.1f} ev_ch={ev_ch_sum:.1f} "
-                    f"res_s={rs_sum:.1f} res_d={rd_sum:.1f}"
+                    f"electrolyzer={elz_sum:.1f} pump={pump_sum:.1f} losses={loss_sum:.1f}"
                 )
                 # Log per-generator output
+                go = solution.get('gen_output')
                 if go is not None:
                     for g, name in enumerate(self._gen_names):
                         if g < go.shape[0]:
@@ -5387,6 +8165,29 @@ class Orchestrator:
 
         return results_summary
 
+    def _apply_master_builds(self, investments: dict[str, float]) -> None:
+        """Add one year's master builds (transmission, converters) to the
+        dispatch's network. The values are that year's increments, so every
+        year must pass here once, also the years the dispatch skips."""
+        if investments:
+            self._apply_transfer_investments(investments)
+            self._apply_converter_investments(investments)
+
+    def _apply_converter_investments(self, investments: dict[str, float]) -> None:
+        """Add the converter capacity the master built this year to the
+        dispatch's converters (``converter_investment_{acdc|freq}_{c}`` keys,
+        MW). Converters do not age, so the capacity stays for later years.
+        The master and the dispatch list the converters in the same order.
+        """
+        for key, value in investments.items():
+            kind, idx = _converter_investment_key(key)
+            if kind is None:
+                continue
+            convs = getattr(self.primary_system, f"{kind}_converters", None) or []
+            if idx < len(convs):
+                convs[idx].rated_power_mva += float(value)
+                logger.debug(f"Converter {convs[idx].name}: +{value:.1f} MW built")
+
     def _apply_transfer_investments(
         self,
         investments: dict[str, float],
@@ -5402,10 +8203,13 @@ class Orchestrator:
            rate it did before the investment, defeating the master's
            cost-minimisation rationale.
 
-        For each invested node pair ``(i, j)`` the additional MW is
-        distributed proportionally across the existing bus-level lines
-        connecting those nodes.  If no such line exists, the value is
-        retained only in the node adjacency matrix.
+        The master's indices are its own buses. When the master is
+        node-level (one bus per node, the merged multi-node case) the
+        additional MW of a node pair ``(i, j)`` is distributed proportionally
+        across the bus-level lines connecting those nodes. When the master
+        shares the operational bus network (single-node systems), it goes to
+        the lines joining exactly those two buses. If no such line exists,
+        the value is retained only in the node adjacency matrix.
 
         Args:
             investments: Investment dict from master problem, may contain
@@ -5435,42 +8239,69 @@ class Orchestrator:
             key = (min(ni, nj), max(ni, nj))
             lines_by_pair[key].append(ln)
 
-        applied = 0
-        scaled_bus_lines = 0
+        # Master bus index → node, and whether the master indexes the
+        # operational buses themselves.
+        master_buses = self.master_system.buses or []
+        bus_level = self.master_system is sys_op and bool(buses_op)
+
+        def _master_node(idx: int) -> int:
+            return master_buses[idx].parent_node if idx < len(master_buses) else idx
+
+        lines_by_buses: dict[tuple[int, int], list] = defaultdict(list)
+        if bus_level:
+            for ln in (sys_op.transmission_lines_geo or []):
+                fb, tb = ln.from_bus, ln.to_bus
+                if fb is not None and tb is not None and fb != tb:
+                    lines_by_buses[(min(fb, tb), max(fb, tb))].append(ln)
+
+        # One value per corridor: when both i→j and j→i exist the master
+        # holds them equal and its line capacity counts one of them.
+        corridors: dict[tuple[int, int], float] = {}
         for key, value in investments.items():
             if not key.startswith("transfer_investment_"):
                 continue
             parts = key.split("_")
             if len(parts) >= 4:
-                i_idx, j_idx = int(parts[2]), int(parts[3])
-                if 0 <= i_idx < num_nodes and 0 <= j_idx < num_nodes:
-                    conn[i_idx, j_idx] += float(value)
-                    applied += 1
-                    # Mirror into bus-level lines connecting the same node pair.
-                    pair = (min(i_idx, j_idx), max(i_idx, j_idx))
-                    lines = lines_by_pair.get(pair, [])
-                    if lines:
-                        total_cap = sum(
-                            float(getattr(ln, "capacity_mw", 0.0) or 0.0)
-                            for ln in lines
-                        )
-                        add_mw = float(value)
-                        if total_cap > 0:
-                            # Proportional scaling
-                            for ln in lines:
-                                cap_i = float(getattr(ln, "capacity_mw", 0.0) or 0.0)
-                                share = cap_i / total_cap
-                                ln.capacity_mw = cap_i + share * add_mw
-                                scaled_bus_lines += 1
-                        else:
-                            # Existing lines have zero capacity — split equally.
-                            per_line = add_mw / len(lines)
-                            for ln in lines:
-                                ln.capacity_mw = (
-                                    float(getattr(ln, "capacity_mw", 0.0) or 0.0)
-                                    + per_line
-                                )
-                                scaled_bus_lines += 1
+                i_bus, j_bus = int(parts[2]), int(parts[3])
+                pair = (min(i_bus, j_bus), max(i_bus, j_bus))
+                corridors[pair] = max(corridors.get(pair, 0.0), float(value))
+
+        applied = 0
+        scaled_bus_lines = 0
+        for (i_bus, j_bus), value in corridors.items():
+            i_idx, j_idx = _master_node(i_bus), _master_node(j_bus)
+            if 0 <= i_idx < num_nodes and 0 <= j_idx < num_nodes:
+                if i_idx != j_idx:
+                    conn[i_idx, j_idx] += value
+                    conn[j_idx, i_idx] += value
+                applied += 1
+                # Mirror into the bus-level lines of the same corridor.
+                if bus_level:
+                    lines = lines_by_buses.get((i_bus, j_bus), [])
+                else:
+                    lines = lines_by_pair.get((min(i_idx, j_idx), max(i_idx, j_idx)), [])
+                if lines:
+                    total_cap = sum(
+                        float(getattr(ln, "capacity_mw", 0.0) or 0.0)
+                        for ln in lines
+                    )
+                    add_mw = value
+                    if total_cap > 0:
+                        # Proportional scaling
+                        for ln in lines:
+                            cap_i = float(getattr(ln, "capacity_mw", 0.0) or 0.0)
+                            share = cap_i / total_cap
+                            ln.capacity_mw = cap_i + share * add_mw
+                            scaled_bus_lines += 1
+                    else:
+                        # Existing lines have zero capacity — split equally.
+                        per_line = add_mw / len(lines)
+                        for ln in lines:
+                            ln.capacity_mw = (
+                                float(getattr(ln, "capacity_mw", 0.0) or 0.0)
+                                + per_line
+                            )
+                            scaled_bus_lines += 1
         if applied > 0:
             new_conn = conn.flatten().tolist()
             self.primary_system.nodes.nodes_connections = new_conn
@@ -5480,7 +8311,8 @@ class Orchestrator:
                 f"({scaled_bus_lines} bus-level lines scaled)"
             )
 
-    def _rebuild_unit_names(self, units_config: dict[str, Any]) -> None:
+    def _rebuild_unit_names(self, units_config: dict[str, Any],
+                            year_offset: int = 0) -> None:
         """Rebuild generator/battery name lists from units_config.
 
         Must replicate the EXACT same ordering and filtering as the
@@ -5492,8 +8324,20 @@ class Orchestrator:
           2. Virtual generators (from units_config, not in sys.generators)
           3. Original batteries (from sys.batteries)
           4. Virtual batteries (from units_config, not in sys.batteries)
+
+        Also records each unit's MW in service per node in the dispatch's
+        year (*year_offset* = years since the base year), for the export:
+        the units the master built have no config in the results file, and
+        the configured ``rated_power`` of an existing unit ignores its
+        retirement, life extension and degradation.
         """
         sys = self.primary_system
+        num_nodes = self._num_nodes
+
+        def existing(key, unit, power_key, degrade):
+            data = units_config.get(key) or unit.model_dump()
+            return existing_power_in_service(data, power_key, num_nodes,
+                                             year_offset, degrade=degrade)
 
         # --- Generator names + parallel fuel list ---
         # _gen_fuels mirrors _gen_names index-for-index so the export
@@ -5501,10 +8345,24 @@ class Orchestrator:
         # the dashboard can bucket by fuel without parsing plant names.
         gen_names: list[str] = []
         gen_fuels: list[str] = []
+        gen_renewable: list[bool] = []
+        gen_in_service: list = []
+        # Units per node (clustered unit commitment): what gen_status counts
+        gen_units: list = []
+        # Committed in unit commitment (see is_committed_unit)
+        gen_committed: list[bool] = []
         # 1) Original generators (same order as sys.generators iteration)
         for key, gen in sys.generators.items():
             gen_names.append(gen.name if hasattr(gen, 'name') else key)
             gen_fuels.append(str(getattr(gen, 'fuel', '') or ''))
+            gen_renewable.append(gen.type == "Renewable")
+            gen_committed.append(is_committed_unit(
+                gen.type, gen.fuel, getattr(gen, 'reservoir_capacity', None)))
+            gen_in_service.append(existing(key, gen, "rated_power", True))
+            data = units_config.get(key) or {}
+            gen_units.append([int(n) for n in _per_node_list(
+                data.get("num_units") or getattr(gen, "num_units", None) or [1],
+                num_nodes, 1)])
 
         # 2) Virtual generators from units_config (matching adapter filter)
         for key, vdata in units_config.items():
@@ -5521,12 +8379,24 @@ class Orchestrator:
             # Investment gens carry their technology's fuel in vdata
             # (populated when they were synthesised from a tech).
             gen_fuels.append(str(vdata.get("fuel", "") or ""))
+            gen_renewable.append(vdata.get("type") == "Renewable")
+            gen_committed.append(is_committed_unit(
+                vdata.get("type", ""), vdata.get("fuel", ""),
+                vdata.get("reservoir_capacity")))
+            gen_in_service.append(self._unit_power_by_node(vdata, rp))
+            # Units at the buses that hold capacity, summed per node
+            units = _per_node_list(vdata.get("num_units") or [1], len(rp), 1)
+            gen_units.append([int(round(v)) for v in self._unit_power_by_node(
+                vdata, [u if p > 0 else 0 for u, p in zip(units, rp)])])
 
         # --- Battery names ---
         bat_names = []
-        # 1) Original batteries (same order as sys.batteries iteration)
+        bat_in_service: list = []
+        # 1) Original batteries (same order as sys.batteries iteration);
+        # their fixed O&M is on the rated (not degraded) discharge power
         for key, bat in sys.batteries.items():
             bat_names.append(bat.name if hasattr(bat, 'name') else key)
+            bat_in_service.append(existing(key, bat, "MaxDischargePower", False))
 
         # 2) Virtual batteries from units_config (matching adapter filter)
         for key, vdata in units_config.items():
@@ -5539,26 +8409,40 @@ class Orchestrator:
             if not cap or (max(cap) < 0.01 and max(charge_pow) < 0.01):
                 continue
             bat_names.append(vdata.get("name", key))
+            # Fixed O&M is on the rated power (as for the original
+            # batteries): a built battery's power is degraded by the master
+            # (_build_config_from_cumulative keeps the rated power)
+            bat_in_service.append(self._unit_power_by_node(
+                vdata, vdata.get("_rated_discharge_power")
+                or vdata.get("MaxDischargePower", charge_pow)))
 
-        # Deduplicate names (HDF5 datasets require unique names within a group)
-        def _dedup(names: list[str]) -> list[str]:
-            seen: dict[str, int] = {}
-            out: list[str] = []
-            for n in names:
-                if n in seen:
-                    seen[n] += 1
-                    out.append(f"{n} ({seen[n]})")
-                else:
-                    seen[n] = 0
-                    out.append(n)
-            return out
-
-        # _dedup may suffix duplicates with " (N)"; apply to names only,
-        # not fuels — the fuel list stays index-aligned with the pre-dedup
-        # gen_names because _dedup preserves order and length.
-        self._gen_names = _dedup(gen_names)
+        # Homonyms get a " (N)" suffix (HDF5 needs unique dataset names);
+        # order and length are kept, so the fuel list stays index-aligned.
+        self._gen_names = unique_unit_names(gen_names)
         self._gen_fuels = list(gen_fuels)
-        self._bat_names = _dedup(bat_names)
+        self._gen_renewable = gen_renewable
+        self._gen_committed = gen_committed
+        self._gen_in_service_mw = gen_in_service
+        self._gen_num_units = gen_units
+        self._bat_names = unique_unit_names(bat_names)
+        self._bat_in_service_mw = bat_in_service
+
+    def _unit_power_by_node(self, vdata: dict, power) -> list[float]:
+        """Per-node MW of a virtual unit's ``power`` list, which is per bus
+        when the unit carries ``_is_per_bus`` (summed onto the buses' parent
+        nodes) and per node otherwise."""
+        num_nodes = self._num_nodes
+        values = [float(v) for v in (power or [])]
+        buses = self.primary_system.buses or []
+        if vdata.get("_is_per_bus") and len(values) == len(buses):
+            from esfex.bridge.converters import node_bus_mapping_required
+            if node_bus_mapping_required(buses, num_nodes):
+                out = [0.0] * num_nodes
+                for b, v in zip(buses, values):
+                    if 0 <= b.parent_node < num_nodes:
+                        out[b.parent_node] += v
+                return out
+        return (values + [0.0] * num_nodes)[:num_nodes]
 
     # ------------------------------------------------------------------
     # System-unit mapping (for per-system HDF5 export)
@@ -5656,29 +8540,46 @@ class Orchestrator:
         self,
         base_units_config: dict[str, Any],
         year_caps: dict[str, dict],
+        year_offset: Optional[int] = None,
     ) -> dict[str, Any]:
         """
         Build units config from MasterProblem's cumulative capacities.
 
         Uses the MasterProblem's correctly computed cumulative capacity which
         accounts for:
-        - Existing units: age-based retirement + degradation
+        - Existing units: age-based retirement + degradation, and the
+          capacity the master keeps past the lifetime (life extension)
         - Investments: each with its own age tracking (NOT retired when
           the original unit retires)
+
+        The dispatch retires a unit at the end of its ``life_time``; the
+        units whose capacity comes from the master get no end of life there
+        (the master already decided it).
 
         Args:
             base_units_config: Original units config (for structure/metadata)
             year_caps: {'gen': {julia_g_idx: np.array(per_bus)},
-                        'bat': {julia_b_idx: np.array(per_bus)}}
+                        'bat': {julia_b_idx: np.array(per_bus)},
+                        'bat_power': {julia_b_idx: np.array(per_bus)},
+                        'tech' / 'bat_tech_power' / 'bat_tech_capacity':
+                            {julia_t_idx: np.array(per_bus)}, in service
+                            (each build degraded by its age),
+                        'bat_tech_power_rated' (optional): the battery
+                            power undegraded, its fixed O&M base}
+            year_offset: Years since the first planning year (the dispatch's
+                ``year - base_year``). With it, an existing battery past its
+                lifetime gets the power and energy the master keeps.
         """
         updated = deepcopy(base_units_config)
 
-        # Build bus_to_node mapping
+        # Build bus_to_node mapping (needed whenever the bus list is not the
+        # identity mapping over nodes, including fewer-buses-than-nodes).
+        from esfex.bridge.converters import node_bus_mapping_required
         sys = self.primary_system
         num_nodes = sys.nodes.num_nodes or 1
         buses = sys.buses or []
         num_buses = len(buses) if buses else num_nodes
-        if len(buses) > num_nodes:
+        if node_bus_mapping_required(buses, num_nodes):
             bus_to_node = [b.parent_node for b in buses]
         else:
             bus_to_node = None
@@ -5704,40 +8605,46 @@ class Orchestrator:
         # So we must ZERO OUT degradation_rate and initial_age to prevent
         # power_system.jl from applying them again (double degradation/retirement).
         gen_caps = year_caps.get('gen', {})
-        # Detect master granularity (same logic as for tech_caps below).
-        gen_master_per_node = (
-            num_buses > num_nodes
-            and gen_caps
-            and len(next(iter(gen_caps.values()))) == num_nodes
-        )
         for g_jl, bus_caps in gen_caps.items():
             py_idx = int(g_jl) - 1  # Julia 1-based → Python 0-based
             unit_key = gen_idx_to_key.get(py_idx)
             if unit_key and unit_key in updated:
-                bus_arr = np.array(bus_caps)
-                if gen_master_per_node:
-                    # Master output is already per-node; copy directly.
-                    node_caps = np.array(bus_arr[:num_nodes], dtype=float)
-                    if len(node_caps) < num_nodes:
-                        node_caps = np.concatenate([
-                            node_caps, np.zeros(num_nodes - len(node_caps))
-                        ])
-                else:
-                    # Aggregate per-bus capacities to per-node by
-                    # mapping each bus to its parent node.
-                    node_caps = np.zeros(num_nodes)
-                    for b_idx in range(len(bus_arr)):
-                        n_idx = bus_to_node[b_idx] if bus_to_node else b_idx
-                        if n_idx < num_nodes:
-                            node_caps[n_idx] += bus_arr[b_idx]
+                # Per master location (bus or node): per node here
+                node_caps = self._master_values_by_node(bus_caps, num_nodes)
                 updated[unit_key]["rated_power"] = node_caps.tolist()
-                # Prevent double degradation/retirement in power_system.jl
+                # Whole units of the original size left of that capacity
+                base = base_units_config[unit_key]
+                units = _per_node_list(base.get("num_units") or [1], num_nodes, 1)
+                rated0 = _per_node_list(base.get("rated_power") or [], num_nodes)
+                deg = _per_node_list(base.get("degradation_rate") or [], num_nodes)
+                age0 = _per_node_list(base.get("initial_age") or [], num_nodes, 0)
+                updated[unit_key]["num_units"] = [
+                    units_in_service(units[n], float(rated0[n]), float(node_caps[n]),
+                                     float(deg[n]), float(age0[n]) + (year_offset or 0))
+                    for n in range(num_nodes)]
+                # Prevent double degradation/retirement in power_system.jl:
+                # the master's capacity already holds both (and the life
+                # extension), so no degradation and no end of life here
                 updated[unit_key]["degradation_rate"] = [0.0] * num_nodes
                 updated[unit_key]["initial_age"] = [0] * num_nodes
+                updated[unit_key]["life_time"] = [999] * num_nodes
 
-        # Note: battery cumulative from MasterProblem is ENERGY capacity (MWh),
-        # not power (MW). Battery power/capacity in config is handled separately
-        # via the operational dispatch's own age-based retirement logic.
+        if year_offset is not None:
+            self._apply_master_battery_life(updated, year_caps, year_offset,
+                                            bus_to_node, num_nodes)
+
+        # Reservoir capacity the master built up to this year (MWh per node,
+        # see _add_reservoir_caps) is existing capacity for the dispatch
+        for (g, node), mwh in year_caps.get('reservoir', {}).items():
+            unit_key = gen_idx_to_key.get(int(g))
+            if unit_key in updated and 0 <= node < num_nodes:
+                cap = _pad_zeros(updated[unit_key].get("reservoir_capacity"), num_nodes)
+                cap[node] += float(mwh)
+                updated[unit_key]["reservoir_capacity"] = cap
+
+        # Existing batteries within their lifetime keep the dispatch's own
+        # degradation (the master degrades them alike); past it they hold
+        # what the master keeps (_apply_master_battery_life).
 
         # Create virtual generators from technology investments
         # Keep per-bus arrays so virtual generators inject at the correct buses
@@ -5745,24 +8652,15 @@ class Orchestrator:
         tech_caps = year_caps.get('tech', {})
         tech_keys = list(self.primary_system.technologies.keys())
 
-        # Detect master granularity: master may run on a node-level network
-        # (when `primary_system.buses` is empty after merge → converters
-        # auto-create one bus per node, so `n_buses == num_nodes`).  In that
-        # case the per-bus arrays returned by Julia are actually **per-node**
-        # (length num_nodes) and must be mapped onto the bus-level
-        # operational network.  Each node's investment is placed at the
-        # node's first (canonical) bus — a deterministic, neutral mapping.
-        # (No demand-fraction redistribution heuristic: capacity is placed
-        # organically and the DC-OPF routes it; if a single-bus injection is
-        # infeasible that indicates a real model issue to fix, not to mask.)
-        master_per_node = (
-            num_buses > num_nodes
-            and tech_caps
-            and len(next(iter(tech_caps.values()))) == num_nodes
-        )
+        # Master granularity (_master_on_buses, not the array length): a
+        # node-level master (the merged master network, one bus per node)
+        # returns per-node arrays, laid out below on the bus-level
+        # operational network; a bus-level master (the master solves on the
+        # operational buses themselves) returns per-bus arrays.
+        master_per_node = bus_to_node is not None and not self._master_on_buses()
         first_bus_of_node: dict[int, int] | None = None
         node_buses_map: dict[int, list[int]] | None = None
-        if master_per_node or num_buses > num_nodes:
+        if master_per_node or bus_to_node is not None:
             first_bus_of_node = {}
             node_buses_map = {}
             for b_idx, b in enumerate(buses):
@@ -5815,61 +8713,41 @@ class Orchestrator:
                     while len(bus_rated) < num_buses:
                         bus_rated.append(0.0)
 
-                if max(bus_rated) < 0.1:
+                if max(bus_rated) <= MIN_BUILD:
                     continue
 
-                # Helper to replicate a per-node property to per-bus length.
-                # Critical: when arr is a per-node array padded by _merge_systems
-                # (len == total_nodes, with 0 at other systems' offsets), the
-                # legacy `[arr[0]]*n` fallback would broadcast the padding-zero
-                # of the OTHER system to all buses, zeroing this system's
-                # property. Use bus_to_node mapping to put each bus's node's
-                # value at that bus.
-                def _rep(arr, n=num_buses):
-                    if not arr:
-                        return [0.0] * n
-                    if len(arr) >= n:
-                        return list(arr[:n])
-                    if len(arr) == 1:
-                        return [arr[0]] * n
-                    if bus_to_node is not None and len(arr) <= len(bus_to_node):
-                        out = [0.0] * n
-                        for _b in range(n):
-                            _nidx = bus_to_node[_b]
-                            if _nidx < len(arr):
-                                out[_b] = arr[_nidx]
-                        return out
-                    return [arr[0]] * n
+                # The technology's per-node properties, per bus
+                def _rep(arr, default=0.0):
+                    return _node_values_on_buses(arr, num_buses, bus_to_node, default)
+
+                def _rep_curve(curves, n=num_buses):
+                    # The technology's per-node bidding curves, per bus. A
+                    # bus whose node has no curve gets a flat one (its
+                    # fuel_cost). None when the technology has no curve.
+                    if not curves:
+                        return None
+                    if len(curves) == 1:
+                        return [curves[0]] * n
+                    out = []
+                    for _b in range(n):
+                        _nidx = bus_to_node[_b] if bus_to_node is not None else _b
+                        out.append(curves[_nidx] if _nidx < len(curves)
+                                   else CostCurveConfig())
+                    return out
 
                 vgen_key = f"inv_{tech_key}"
                 updated[vgen_key] = {
-                    "name": f"Investment {tech.name}",
-                    "type": tech.type,
-                    "fuel": tech.fuel,
+                    **technology_unit_fields(tech, _rep, _rep_curve),
                     "rated_power": bus_rated,
-                    "min_power": [tech.min_output[0] * v for v in bus_rated],
-                    "eff_at_rated": _rep(tech.eff_at_rated),
-                    "eff_at_min": _rep(tech.eff_at_min),
-                    "ramp_up": _rep(tech.ramp_up),
-                    "ramp_down": _rep(tech.ramp_down),
-                    "min_up": _rep(tech.min_up),
-                    "min_down": _rep(tech.min_down),
-                    "fuel_cost": _rep(tech.fuel_cost),
-                    "fixed_cost": _rep(tech.fixed_cost),
-                    "maintenance_cost": _rep(tech.maintenance_cost),
-                    "start_up_cost": _rep(tech.start_up_cost),
-                    "inertia": _rep(tech.inertia),
-                    "availability_file": tech.availability_file,
+                    # Units of the technology's unit_size at each bus
+                    "num_units": [units_of_capacity(float(p), float(u)) for p, u in
+                                  zip(bus_rated, _rep(tech.unit_size, 0.0))],
                     "Availability": tech.availability_file,
                     # Already degraded by master problem — prevent double degradation
                     "degradation_rate": [0.0] * num_buses,
                     "initial_age": [0] * num_buses,
                     "life_time": [999] * num_buses,
                     "invest_cost": [0.0] * num_buses,
-                    "invest_max_power": [0.0] * num_buses,
-                    "frequency_hz": tech.frequency_hz,
-                    "current_type": tech.current_type,
-                    "reservable": tech.reservable,
                     "decommissioning_cost": [0.0] * num_buses,
                     "_is_per_bus": True,  # Flag: arrays are already per-bus
                 }
@@ -5881,12 +8759,9 @@ class Orchestrator:
         # master ran on a node-level network.
         bat_tech_pow_caps = year_caps.get('bat_tech_power', {})
         bat_tech_cap_caps = year_caps.get('bat_tech_capacity', {})
+        bat_tech_rated_caps = year_caps.get('bat_tech_power_rated', {})
         bat_tech_keys = list(self.primary_system.battery_technologies.keys())
-        bat_master_per_node = (
-            num_buses > num_nodes
-            and bat_tech_pow_caps
-            and len(next(iter(bat_tech_pow_caps.values()))) == num_nodes
-        )
+        bat_master_per_node = bus_to_node is not None and not self._master_on_buses()
         if bat_master_per_node and first_bus_of_node is None:
             first_bus_of_node = {}
             for b_idx, b in enumerate(buses):
@@ -5937,60 +8812,47 @@ class Orchestrator:
                     while len(bus_cap) < num_buses:
                         bus_cap.append(0.0)
 
-                if max(bus_pow) < 0.1 and max(bus_cap) < 0.1:
+                if max(bus_pow) <= MIN_BUILD and max(bus_cap) <= MIN_BUILD:
                     continue
-
-                def _brep(arr, n=num_buses, default=0.0):
-                    if not arr:
-                        return [default] * n
-                    if len(arr) >= n:
-                        return list(arr[:n])
-                    if len(arr) == 1:
-                        return [arr[0]] * n
-                    # Per-node array (padded by _merge_systems with 0 at other
-                    # systems' offsets): expand to per-bus via bus_to_node.
-                    # Without this, [arr[0]]*n broadcasts the padding-zero of
-                    # the OTHER system to all buses — for batteries this means
-                    # zero maintenance_cost and zero throughput_degradation_cost
-                    # in the LP, which removes the incentive against the
-                    # simultaneous charge+discharge LP-relaxation pathology.
-                    if bus_to_node is not None and len(arr) <= len(bus_to_node):
-                        out = [default] * n
-                        for _b in range(n):
-                            _nidx = bus_to_node[_b]
-                            if _nidx < len(arr):
-                                out[_b] = arr[_nidx]
-                        return out
-                    return [arr[0]] * n
 
                 vbat_key = f"inv_{bt_key}"
                 updated[vbat_key] = {
-                    "_type": "battery",
-                    "type": "Storage",
-                    "name": f"Investment {bat_tech.name}",
+                    **battery_technology_unit_fields(
+                        bat_tech, lambda arr, default: _node_values_on_buses(
+                            arr, num_buses, bus_to_node, default)),
                     "capacity": bus_cap,
                     "MaxChargePower": bus_pow,
                     "MaxDischargePower": bus_pow,
-                    "efficiency_charge": _brep(bat_tech.efficiency_charge, default=0.95),
-                    "efficiency_discharge": _brep(bat_tech.efficiency_discharge, default=0.95),
-                    "soc_initial": _brep(bat_tech.soc_initial),
-                    "max_DoD": _brep(bat_tech.max_DoD),
-                    "maintenance_cost": _brep(bat_tech.maintenance_cost),
-                    "inertia": _brep(bat_tech.inertia),
-                    "spillage": bat_tech.spillage,
-                    "current_type": bat_tech.current_type,
-                    # Already degraded by master problem
+                    # Already degraded by the master (each build by its age)
                     "degradation_rate": [0.0] * num_buses,
                     "initial_age": [0] * num_buses,
                     "life_time": [999] * num_buses,
                     "invest_cost": [0.0] * num_buses,
-                    "invest_cost_energy": [0.0] * num_buses,
                     "invest_max_power": [0.0] * num_buses,
-                    "invest_max_capacity": [0.0] * num_buses,
-                    "throughput_degradation_cost": _brep(bat_tech.throughput_degradation_cost),
                     "decommissioning_cost": [0.0] * num_buses,
                     "_is_per_bus": True,  # Flag: arrays are already per-bus
                 }
+                rated = bat_tech_rated_caps.get(bt_jl)
+                if rated is not None:
+                    # Fixed O&M on the rated power built, as the master
+                    # charges it: the power above is degraded, so its
+                    # fixed_cost is scaled by rated / degraded at each
+                    # master location (a bus's node on a node-level master)
+                    rated = np.asarray(rated, dtype=float)
+
+                    def _om_scale(b_idx):
+                        loc = bus_to_node[b_idx] if bat_master_per_node else b_idx
+                        deg = float(pow_arr[loc]) if loc < len(pow_arr) else 0.0
+                        rat = float(rated[loc]) if loc < len(rated) else 0.0
+                        return rat / deg if deg > 0 and rat > 0 else 1.0
+
+                    unit = updated[vbat_key]
+                    unit["fixed_cost"] = [float(fc) * _om_scale(b_idx)
+                                          for b_idx, fc in enumerate(unit["fixed_cost"])]
+                    # The rated power per bus, recorded in the results as
+                    # the battery's power for fixed O&M (_rebuild_unit_names)
+                    unit["_rated_discharge_power"] = [
+                        float(p) * _om_scale(b_idx) for b_idx, p in enumerate(bus_pow)]
                 # DEBUG: emitted per bus → noisy at INFO. The aggregate
                 # "Year X investments" log a few lines up covers the
                 # milestone view.
@@ -5998,55 +8860,65 @@ class Orchestrator:
 
         return updated
 
-    def _apply_retirements_to_config(
+    def _apply_master_battery_life(
         self,
-        units_config: dict[str, Any],
-        retirements: dict[str, float],
-    ) -> dict[str, Any]:
+        updated: dict[str, Any],
+        year_caps: dict[str, dict],
+        year_offset: int,
+        bus_to_node: Optional[list[int]],
+        num_nodes: int,
+    ) -> None:
+        """Existing batteries past their lifetime: the master's life extension.
+
+        At a node where the battery's age (``initial_age`` + *year_offset*)
+        has reached its ``life_time``, the master keeps
+        ``year_caps['bat_power']`` MW and ``year_caps['bat']`` MWh (0 when it
+        retires it). The dispatch would retire the battery there, so the node
+        gets that capacity, with no degradation and no end of life. Nodes
+        within the lifetime are left to the dispatch's own ageing.
         """
-        Apply retirement decisions to the units configuration.
+        pow_caps = year_caps.get('bat_power', {})
+        cap_caps = year_caps.get('bat', {})
+        if not pow_caps:
+            return
 
-        Reduces or removes capacity from generators/batteries based on
-        MasterProblem retirement decisions.
+        def to_nodes(arr) -> np.ndarray:
+            return self._master_values_by_node(arr, num_nodes)
 
-        Args:
-            units_config: Current units configuration
-            retirements: Retirement decisions {key: fraction_retired}
-
-        Returns:
-            Updated units configuration (new copy)
-        """
-        if not retirements:
-            return units_config
-
-        updated = deepcopy(units_config)
-
-        # Build index-to-key mapping
-        gen_idx_to_key = {}
-        gen_idx = 0
-        for unit_key, unit_data in updated.items():
-            if unit_data.get("_type") != "battery" and unit_data.get("type") != "Storage":
-                gen_idx_to_key[gen_idx] = unit_key
-                gen_idx += 1
-
-        for ret_key, ret_fraction in retirements.items():
-            if ret_fraction <= 0:
+        bat_keys = [k for k, d in updated.items()
+                    if d.get("_type") == "battery" or d.get("type") == "Storage"]
+        for b_jl, bus_pow in pow_caps.items():
+            py_idx = int(b_jl) - 1
+            if not 0 <= py_idx < len(bat_keys):
                 continue
-
-            if ret_key.startswith("gen_"):
-                idx = int(ret_key.split("_")[1])
-                unit_key = gen_idx_to_key.get(idx)
-                if unit_key and unit_key in updated:
-                    rated = updated[unit_key].get("rated_power", [])
-                    if rated:
-                        # Reduce capacity by retirement fraction
-                        updated[unit_key]["rated_power"] = [
-                            max(0, r * (1 - ret_fraction)) for r in rated
-                        ]
-                        name = updated[unit_key].get("name", unit_key)
-                        logger.debug(f"Retirement: {name} reduced by {ret_fraction*100:.0f}%")
-
-        return updated
+            unit = updated[bat_keys[py_idx]]
+            if unit.get("_is_per_bus"):
+                continue
+            ages = _per_node_list(unit.get("initial_age", [0]), num_nodes)
+            lives = _per_node_list(unit.get("life_time", [999]), num_nodes)
+            kept_pow = to_nodes(bus_pow)
+            kept_cap = to_nodes(cap_caps.get(b_jl, np.zeros(len(bus_pow))))
+            fields = {f: [float(x) for x in _per_node_list(unit.get(f, [0.0]), num_nodes)]
+                      for f in ("MaxChargePower", "MaxDischargePower", "capacity",
+                                "rated_power", "degradation_rate")}
+            ages, lives = list(ages), list(lives)
+            changed = False
+            for n in range(num_nodes):
+                base = fields["MaxDischargePower"][n]
+                if base <= 0 or float(ages[n]) + year_offset < float(lives[n]):
+                    continue
+                share = min(1.0, kept_pow[n] / base)
+                fields["MaxChargePower"][n] *= share
+                fields["MaxDischargePower"][n] = float(kept_pow[n])
+                fields["rated_power"][n] *= share
+                fields["capacity"][n] = float(kept_cap[n])
+                fields["degradation_rate"][n] = 0.0
+                ages[n], lives[n] = 0, 999
+                changed = True
+            if changed:
+                unit.update(fields)
+                unit["initial_age"] = ages
+                unit["life_time"] = lives
 
     def _initialize_hdf5(self, path: Path, num_nodes: int, num_years: int,
                          start_year: int, end_year: int):
@@ -6066,7 +8938,19 @@ class Orchestrator:
             f.attrs["temporal_resolution_hours"] = temporal_resolution
             f.attrs["export_complete"] = False
             f.attrs["simulation_mode"] = self.config.simulation_mode
+            if self.config.simulation_mode == "development":
+                f.attrs["planning_mode"] = str(getattr(
+                    self.config.master_problem, "planning_mode", "perfect_foresight"))
             f.attrs["years_range"] = f"{start_year}-{end_year - 1}"
+            # What produced the file, for readers such as `esfex summary`
+            try:
+                from esfex import __version__ as _esfex_version
+            except ImportError:
+                _esfex_version = "unknown"
+            f.attrs["esfex_version"] = str(_esfex_version)
+            f.attrs["solver"] = str(self.config.solver.name)
+            f.attrs["config_file"] = (str(Path(self.config_path).resolve())
+                                      if self.config_path else "")
             if hasattr(self.config, "re_target"):
                 f.attrs["target_re"] = self.config.re_target
 
@@ -6162,6 +9046,11 @@ class Orchestrator:
                     tg.attrs["type"] = tech.type
                     tg.attrs["fuel"] = tech.fuel
                     tg.attrs["invest_cost"] = str(list(tech.invest_cost))
+                    # Operating costs of the units the master builds from it
+                    # (no generator config of their own): read by the results
+                    # dashboard and the financial analysis
+                    for k in _TECH_COST_ATTRS:
+                        tg.attrs[k] = str(list(getattr(tech, k)))
                     if tech.color:
                         tg.attrs["color"] = tech.color
 
@@ -6179,8 +9068,18 @@ class Orchestrator:
                     btg.attrs["name"] = bt.name
                     btg.attrs["invest_cost_power"] = str(list(bt.invest_cost_power))
                     btg.attrs["invest_cost_energy"] = str(list(bt.invest_cost_energy))
+                    for k in _BAT_TECH_COST_ATTRS:
+                        btg.attrs[k] = str(list(getattr(bt, k)))
                     if bt.color:
                         btg.attrs["color"] = bt.color
+
+            # Fuel price growth of the fuels block: the dispatch charges a
+            # unit's fuel_cost × (1 + rate)^(year − base_year) (see
+            # fuel_price_factor); the financial analysis does the same
+            fg_group = config_group.create_group("fuel_price_growth")
+            fg_group.attrs["base_year"] = self._fuel_price_base_year(start_year)
+            for fuel_name, fuel in (getattr(self.primary_system, "fuels", None) or {}).items():
+                fg_group.attrs[str(fuel_name)] = float(fuel.price_growth_rate or 0.0)
 
             # Store transmission line geometry for results visualization
             sys = self.primary_system
@@ -6258,12 +9157,26 @@ class Orchestrator:
         """
         return name.replace("/", " - ")
 
+    @classmethod
+    def _h5_unit_names(cls, names: list[str]) -> list[str]:
+        """HDF5 dataset names for a unit list, index-aligned and unique.
+
+        Names are passed through ``_h5safe`` and made unique with
+        :func:`unique_unit_names` (a homonym, or ``"A/B"`` next to
+        ``"A - B"``, gets a `` (1)``, `` (2)``… suffix).
+        """
+        return unique_unit_names([cls._h5safe(str(name)) for name in names])
+
     def _append_year_to_hdf5(self, path: Path, result: YearResults):
         """Append year results to HDF5 file with legacy-compatible structure."""
         import h5py
 
         num_nodes = self._num_nodes
         hours = result.gen_output.shape[-1] if result.gen_output is not None else 0
+        # One dataset name per unit, shared by every per-generator and
+        # per-battery group so the same unit has the same name everywhere.
+        gen_ds = self._h5_unit_names(self._gen_names)
+        bat_ds = self._h5_unit_names(self._bat_names)
 
         with h5py.File(path, "a") as f:
             # ==============================================================
@@ -6280,6 +9193,7 @@ class Orchestrator:
                 "co2_emissions": result.emissions,
                 "loss_of_load": result.load_shed,
                 "n1_security_cost": result.n1_security_cost,
+                "transmission_losses": result.transmission_losses,
             }
 
             for col, value in summary_data.items():
@@ -6313,7 +9227,14 @@ class Orchestrator:
             scenario.attrs["total_generation"] = result.total_generation
             scenario.attrs["total_demand"] = result.total_demand
             scenario.attrs["load_shed"] = result.load_shed
+            scenario.attrs["transmission_losses"] = result.transmission_losses
             scenario.attrs["master_re_target"] = result.master_re_target
+            # Line-loss repair bounds: the first (PWL) solve, a lower bound,
+            # and the repaired one ($), when the solves had PWL losses
+            for prefix, bounds in (("master", result.master_loss_repair),
+                                   ("dispatch", result.dispatch_loss_repair)):
+                for key, val in (bounds or {}).items():
+                    scenario.attrs[f"{prefix}_loss_repair_{key}"] = val
 
             # --- Generation data (per generator) ---
             if result.gen_output is not None:
@@ -6327,13 +9248,11 @@ class Orchestrator:
                 # missing (shouldn't happen, but the export should never
                 # crash on stale state).
                 gen_fuels = getattr(self, '_gen_fuels', []) or []
-                _seen_gen: dict[str, int] = {}
+                gen_renewable = getattr(self, '_gen_renewable', []) or []
+                gen_in_service = getattr(self, '_gen_in_service_mw', None) or []
                 for g, name in enumerate(self._gen_names):
                     if g < result.gen_output.shape[0]:
-                        # Deduplicate HDF5 dataset names
-                        safe = self._h5safe(name)
-                        _seen_gen[safe] = _seen_gen.get(safe, 0) + 1
-                        ds_name = safe if _seen_gen[safe] == 1 else f"{safe}_{_seen_gen[safe]}"
+                        ds_name = gen_ds[g]
                         ds = gen_group.create_dataset(
                             ds_name, data=result.gen_output[g],
                             chunks=True, compression="gzip",
@@ -6346,44 +9265,56 @@ class Orchestrator:
                         # HDF5 happy when the source data didn't supply
                         # one (e.g. legacy configs).
                         ds.attrs["fuel"] = gen_fuels[g] if g < len(gen_fuels) else ""
+                        # The RE share's rule (type "Renewable"), so readers
+                        # need not guess it from the fuel or the name
+                        if g < len(gen_renewable):
+                            ds.attrs["is_renewable"] = bool(gen_renewable[g])
+                        _stamp_power_in_service(ds, gen_in_service, g)
 
-            # --- Generator status (unit commitment on/off) ---
+            # --- Generator status (unit commitment: units online) ---
+            # Only committed generators: a variable renewable has no on/off
+            # decision, so no gen_status / gen_startup dataset
+            gen_units = getattr(self, '_gen_num_units', None) or []
+            committed = getattr(self, '_gen_committed', None) or []
+
+            def _is_committed(g):
+                return committed[g] if g < len(committed) else True
+
             if result.gen_status is not None:
                 status_group = scenario.create_group("gen_status")
                 status_group.attrs["description"] = (
-                    "Generator on/off status [nodes x hours] for each generator (1=on, 0=off)"
+                    "Generator units online [nodes x hours] for each committed "
+                    "generator (0..num_units; 0/1 for a single-unit plant); "
+                    "variable renewables have none"
                 )
-                _seen_st: dict[str, int] = {}
                 for g, name in enumerate(self._gen_names):
-                    if g < result.gen_status.shape[0]:
-                        safe = self._h5safe(name)
-                        _seen_st[safe] = _seen_st.get(safe, 0) + 1
-                        ds_name = safe if _seen_st[safe] == 1 else f"{safe}_{_seen_st[safe]}"
+                    if g < result.gen_status.shape[0] and _is_committed(g):
+                        ds_name = gen_ds[g]
                         ds = status_group.create_dataset(
                             ds_name, data=result.gen_status[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
-                        ds.attrs["units"] = "binary (0/1)"
+                        ds.attrs["units"] = "units online"
+                        _stamp_num_units(ds, gen_units, g)
 
             # --- Generator startup events (per generator) ---
             if result.gen_startup is not None:
                 startup_group = scenario.create_group("gen_startup")
                 startup_group.attrs["description"] = (
-                    "Generator startup events [nodes x hours] for each generator"
+                    "Generator units started [nodes x hours] for each committed "
+                    "generator; each start costs start_up_cost / num_units"
                 )
-                _seen_su: dict[str, int] = {}
                 for g, name in enumerate(self._gen_names):
-                    if g < result.gen_startup.shape[0]:
-                        safe = self._h5safe(name)
-                        _seen_su[safe] = _seen_su.get(safe, 0) + 1
-                        ds_name = safe if _seen_su[safe] == 1 else f"{safe}_{_seen_su[safe]}"
+                    if g < result.gen_startup.shape[0] and _is_committed(g):
+                        ds_name = gen_ds[g]
                         ds = startup_group.create_dataset(
                             ds_name, data=result.gen_startup[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
-                        ds.attrs["units"] = "binary (0/1)"
+                        ds.attrs["units"] = "units started"
+                        _stamp_num_units(ds, gen_units, g)
 
             # --- Curtailment per node (aggregated across generators) ---
             # Keep the node axis so the visualizer can attribute curtailment
@@ -6416,14 +9347,17 @@ class Orchestrator:
                     bat_group.attrs["description"] = (
                         f"{bat_key} [nodes x hours] for each battery"
                     )
+                    bat_in_service = getattr(self, '_bat_in_service_mw', None) or []
                     for b, name in enumerate(self._bat_names):
                         if b < bat_data.shape[0]:
                             ds = bat_group.create_dataset(
-                                self._h5safe(name), data=bat_data[b],
+                                bat_ds[b], data=bat_data[b],
                                 chunks=True, compression="gzip",
                             )
                             ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
                             ds.attrs["units"] = "MW"
+                            if bat_key == "battery_discharge":
+                                _stamp_power_in_service(ds, bat_in_service, b)
 
             # --- Battery SOC (per battery) ---
             if result.bat_soc is not None:
@@ -6434,7 +9368,7 @@ class Orchestrator:
                 for b, name in enumerate(self._bat_names):
                     if b < result.bat_soc.shape[0]:
                         ds = soc_group.create_dataset(
-                            self._h5safe(name), data=result.bat_soc[b],
+                            bat_ds[b], data=result.bat_soc[b],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -6488,8 +9422,13 @@ class Orchestrator:
                     "CO2_emissions", data=result.co2_emissions,
                     chunks=True, compression="gzip",
                 )
-                ds.attrs["units"] = "tonnes CO2"
-                ds.attrs["description"] = "CO2 emissions per node and hour"
+                # Rate per step, like the MW datasets: tonnes in a step
+                # are value × temporal_resolution_hours.
+                ds.attrs["units"] = "tCO2/h"
+                ds.attrs["description"] = (
+                    "CO2 emission rate per node and time step "
+                    "(x temporal_resolution_hours = tonnes per step)"
+                )
 
             # --- Voltage angle [node x hour] ---
             if result.voltage_angle is not None:
@@ -6520,17 +9459,17 @@ class Orchestrator:
 
             # --- Demand data ---
             if result.demand is not None:
+                # result.demand is [step, node]; store [node, step] like
+                # every other per-node dataset, whatever the shape (the
+                # orientation used to depend on steps > nodes).
                 demand_array = np.array(result.demand, dtype=np.float32)
-                # Ensure [node x hour] orientation
-                if demand_array.ndim == 2 and demand_array.shape[0] > demand_array.shape[1]:
-                    demand_data = demand_array.T
-                else:
-                    demand_data = demand_array
+                demand_data = demand_array.T if demand_array.ndim == 2 else demand_array
                 ds = scenario.create_dataset(
                     "demand", data=demand_data,
                     chunks=True, compression="gzip",
                 )
                 ds.attrs["units"] = "MW"
+                ds.attrs["dimensions"] = "nodes x hours"
                 ds.attrs["description"] = "Total system demand"
 
             # --- Electricity prices ---
@@ -6560,23 +9499,9 @@ class Orchestrator:
             # bus-pair flows up to (from_node, to_node) via bus_to_node;
             # drop intra-node bus lines.
             if result.power_flow and isinstance(result.power_flow, dict):
-                max_hours = max(
-                    (len(v) for v in result.power_flow.values()), default=0
-                )
+                flow_array = self._bus_pairs_to_node_flows(result.power_flow, num_nodes)
+                max_hours = flow_array.shape[-1]
                 if max_hours > 0:
-                    flow_array = np.zeros((num_nodes, num_nodes, max_hours))
-                    b2n = self._bus_to_node
-                    for (i, j), flow in result.power_flow.items():
-                        if b2n is None:
-                            ni, nj = i, j
-                        else:
-                            if i >= len(b2n) or j >= len(b2n):
-                                continue
-                            ni, nj = b2n[i], b2n[j]
-                        if ni == nj:
-                            continue  # intra-node bus line
-                        if 0 <= ni < num_nodes and 0 <= nj < num_nodes:
-                            flow_array[ni, nj, :len(flow)] += flow
                     ds = scenario.create_dataset(
                         "power_flow", data=flow_array,
                         chunks=True, compression="gzip",
@@ -6590,57 +9515,18 @@ class Orchestrator:
                         "bus-pair flows aggregated to node-pair via bus_to_node"
                     )
 
-            # --- Transfer investment [from x to] ---
-            if result.transfer_investment and isinstance(result.transfer_investment, dict):
-                trans_inv_array = np.zeros((num_nodes, num_nodes))
-                for (i, j), val in result.transfer_investment.items():
-                    if i < num_nodes and j < num_nodes:
-                        trans_inv_array[i, j] = val
+            # --- Line losses [node x hour] ---
+            if result.line_losses is not None:
                 ds = scenario.create_dataset(
-                    "transfer_investment", data=trans_inv_array,
+                    "line_losses", data=result.line_losses,
                     chunks=True, compression="gzip",
                 )
-                ds.attrs["shape"] = f"[{num_nodes} from_nodes x {num_nodes} to_nodes]"
                 ds.attrs["units"] = "MW"
-                ds.attrs["description"] = "Transmission capacity investment"
-
-            # --- Generator investment [gen x node] ---
-            if result.gen_investment_array is not None:
-                inv_group = scenario.create_group("gen_investment_power")
-                inv_group.attrs["description"] = "Generator capacity investment [nodes] for each generator"
-                inv_group.attrs["units"] = "MW"
-                for g, name in enumerate(self._gen_names):
-                    if g < result.gen_investment_array.shape[0]:
-                        ds = inv_group.create_dataset(
-                            self._h5safe(name), data=result.gen_investment_array[g],
-                            chunks=True, compression="gzip",
-                        )
-                        ds.attrs["shape"] = f"[{num_nodes} nodes]"
-
-            # --- Battery investment [bat x node] ---
-            if result.bat_investment_power is not None:
-                inv_group = scenario.create_group("bat_investment_power")
-                inv_group.attrs["description"] = "Battery power capacity investment [nodes] for each battery"
-                inv_group.attrs["units"] = "MW"
-                for b, name in enumerate(self._bat_names):
-                    if b < result.bat_investment_power.shape[0]:
-                        ds = inv_group.create_dataset(
-                            self._h5safe(name), data=result.bat_investment_power[b],
-                            chunks=True, compression="gzip",
-                        )
-                        ds.attrs["shape"] = f"[{num_nodes} nodes]"
-
-            if result.bat_investment_capacity is not None:
-                inv_group = scenario.create_group("bat_investment_capacity")
-                inv_group.attrs["description"] = "Battery energy capacity investment [nodes] for each battery"
-                inv_group.attrs["units"] = "MWh"
-                for b, name in enumerate(self._bat_names):
-                    if b < result.bat_investment_capacity.shape[0]:
-                        ds = inv_group.create_dataset(
-                            self._h5safe(name), data=result.bat_investment_capacity[b],
-                            chunks=True, compression="gzip",
-                        )
-                        ds.attrs["shape"] = f"[{num_nodes} nodes]"
+                ds.attrs["dimensions"] = "nodes x hours"
+                ds.attrs["description"] = (
+                    "Transmission losses of the DC loss model: half of each "
+                    "line's loss at each of its two end nodes"
+                )
 
             # --- Capacity Factor (per generator) ---
             if result.capacity_factor is not None:
@@ -6650,7 +9536,7 @@ class Orchestrator:
                 for g, name in enumerate(self._gen_names):
                     if g < result.capacity_factor.shape[0]:
                         ds = cf_group.create_dataset(
-                            self._h5safe(name), data=result.capacity_factor[g],
+                            gen_ds[g], data=result.capacity_factor[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -6663,7 +9549,7 @@ class Orchestrator:
                 for g, name in enumerate(self._gen_names):
                     if g < result.lcoe.shape[0]:
                         ds = lcoe_group.create_dataset(
-                            self._h5safe(name), data=result.lcoe[g],
+                            gen_ds[g], data=result.lcoe[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -6676,7 +9562,7 @@ class Orchestrator:
                 for g, name in enumerate(self._gen_names):
                     if g < result.vallcoe.shape[0]:
                         ds = vallcoe_group.create_dataset(
-                            self._h5safe(name), data=result.vallcoe[g],
+                            gen_ds[g], data=result.vallcoe[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -6689,7 +9575,7 @@ class Orchestrator:
                 for b, name in enumerate(self._bat_names):
                     if b < result.bat_spillage.shape[0]:
                         ds = spill_group.create_dataset(
-                            self._h5safe(name), data=result.bat_spillage[b],
+                            bat_ds[b], data=result.bat_spillage[b],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -6702,7 +9588,7 @@ class Orchestrator:
                 for b, name in enumerate(self._bat_names):
                     if b < result.bat_capacity_factor.shape[0]:
                         ds = bcf_group.create_dataset(
-                            self._h5safe(name), data=result.bat_capacity_factor[b],
+                            bat_ds[b], data=result.bat_capacity_factor[b],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -6715,7 +9601,7 @@ class Orchestrator:
                 for b, name in enumerate(self._bat_names):
                     if b < result.bat_lcoe.shape[0]:
                         ds = blcoe_group.create_dataset(
-                            self._h5safe(name), data=result.bat_lcoe[b],
+                            bat_ds[b], data=result.bat_lcoe[b],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -6728,7 +9614,7 @@ class Orchestrator:
                 for b, name in enumerate(self._bat_names):
                     if b < result.bat_vallcoe.shape[0]:
                         ds = bvallcoe_group.create_dataset(
-                            self._h5safe(name), data=result.bat_vallcoe[b],
+                            bat_ds[b], data=result.bat_vallcoe[b],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["shape"] = f"[{num_nodes} nodes x {hours} hours]"
@@ -6788,15 +9674,11 @@ class Orchestrator:
                 ds.attrs["description"] = "System-wide inertia deficit per hour"
 
             # --- Transfer margin [from_node x to_node x hour] ---
+            # Keyed by bus pair like power_flow; summed to node pairs.
             if result.transfer_margin and isinstance(result.transfer_margin, dict):
-                max_hours_tm = max(
-                    (len(v) for v in result.transfer_margin.values()), default=0
-                )
+                tm_array = self._bus_pairs_to_node_flows(result.transfer_margin, num_nodes)
+                max_hours_tm = tm_array.shape[-1]
                 if max_hours_tm > 0:
-                    tm_array = np.zeros((num_nodes, num_nodes, max_hours_tm))
-                    for (i, j), margin in result.transfer_margin.items():
-                        if i < num_nodes and j < num_nodes:
-                            tm_array[i, j, :len(margin)] = margin
                     ds = scenario.create_dataset(
                         "transfer_margin", data=tm_array,
                         chunks=True, compression="gzip",
@@ -6830,7 +9712,7 @@ class Orchestrator:
                 tsp_group = scenario.create_group("technology_selling_prices")
                 tsp_group.attrs["description"] = "Revenue-weighted price data per technology"
                 for tech_name, data in result.technology_selling_prices.items():
-                    tech_group = tsp_group.create_group(tech_name)
+                    tech_group = tsp_group.create_group(self._h5safe(tech_name))
                     tech_group.attrs["total_generation"] = data["total_generation"]
                     tech_group.attrs["total_revenue"] = data["total_revenue"]
                     tech_group.attrs["average_selling_price"] = data["average_selling_price"]
@@ -6845,11 +9727,12 @@ class Orchestrator:
             # --- Reservoir hydro data (per generator) ---
             if result.reservoir_level is not None:
                 res_group = scenario.create_group("reservoir_level")
-                res_group.attrs["description"] = "Reservoir water level [nodes x hours+1] per gen"
+                res_group.attrs["description"] = (
+                    "Reservoir water level at the start of each hour [nodes x hours] per gen")
                 for g, name in enumerate(self._gen_names):
                     if g < result.reservoir_level.shape[0]:
                         ds = res_group.create_dataset(
-                            self._h5safe(name), data=result.reservoir_level[g],
+                            gen_ds[g], data=result.reservoir_level[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["units"] = "MWh-eq"
@@ -6860,7 +9743,7 @@ class Orchestrator:
                 for g, name in enumerate(self._gen_names):
                     if g < result.reservoir_spillage.shape[0]:
                         ds = spill_group.create_dataset(
-                            self._h5safe(name), data=result.reservoir_spillage[g],
+                            gen_ds[g], data=result.reservoir_spillage[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["units"] = "MW-eq"
@@ -6871,16 +9754,43 @@ class Orchestrator:
                 for g, name in enumerate(self._gen_names):
                     if g < result.reservoir_pump.shape[0]:
                         ds = pump_group.create_dataset(
-                            self._h5safe(name), data=result.reservoir_pump[g],
+                            gen_ds[g], data=result.reservoir_pump[g],
                             chunks=True, compression="gzip",
                         )
                         ds.attrs["units"] = "MW"
 
+            # --- Electrolyzers (per electrolyzer, config order) ---
+            if result.electrolyzer_power is not None:
+                elz_names = self._h5_unit_names(
+                    [getattr(e, "name", None) or key for key, e in
+                     (self.primary_system.electrolyzers or {}).items()])
+                for group_name, data, units, desc in (
+                    ("electrolyzer_power", result.electrolyzer_power, "MW",
+                     "Electrolyzer power drawn [nodes x hours] per electrolyzer"),
+                    ("electrolyzer_h2", result.electrolyzer_h2, "kg/h",
+                     "Hydrogen produced [nodes x hours] per electrolyzer"),
+                ):
+                    if data is None:
+                        continue
+                    elz_group = scenario.create_group(group_name)
+                    elz_group.attrs["description"] = desc
+                    for e, name in enumerate(elz_names):
+                        if e < data.shape[0]:
+                            ds = elz_group.create_dataset(
+                                name, data=data[e],
+                                chunks=True, compression="gzip",
+                            )
+                            ds.attrs["units"] = units
+
             # --- Investments (scalar attrs) ---
+            # Keyed by node: a bus-level master's buses are summed per node
             if result.investments:
-                for key, value in result.investments.items():
-                    val = float(value) if not isinstance(value, (list, np.ndarray)) else float(np.sum(value))
-                    scenario.attrs[f"investment_{key}"] = val
+                node_investments = self._master_investments_by_node({
+                    key: float(value) if not isinstance(value, (list, np.ndarray))
+                    else float(np.sum(value))
+                    for key, value in result.investments.items()})
+                for key, val in node_investments.items():
+                    scenario.attrs[f"investment_{key}"] = float(val)
 
             # --- Retirements (scalar attrs) ---
             if result.retirements:
@@ -6918,6 +9828,43 @@ class Orchestrator:
                     for fuel_name, arr in pe["transport_flows"].items():
                         tf_grp.create_dataset(
                             fuel_name, data=np.array(arr, dtype=np.float64))
+
+                # Fuel burnt by each coupled unit: {unit: [nodes × steps]},
+                # under the unit's dataset name of the per-generator groups
+                if result.fuel_for_power:
+                    ffp_grp = pe_grp.create_group("fuel_for_power")
+                    ffp_grp.attrs["units"] = "fuel units per step"
+                    ds_of = dict(zip(unique_unit_names(self._gen_names), gen_ds))
+                    units = list(result.fuel_for_power)
+                    names = unique_unit_names([ds_of.get(str(u)) or self._h5safe(str(u))
+                                               for u in units])
+                    for unit, name in zip(units, names):
+                        ffp_grp.create_dataset(
+                            name, data=np.array(result.fuel_for_power[unit], dtype=np.float64),
+                            chunks=True, compression="gzip")
+            # --- Fuel infrastructure and electrolyzers the master built (#89) ---
+            # In service this year, on top of the configured capacity
+            fuel_caps = (getattr(self, "_master_fuel_by_year", None) or {}).get(result.year) or {}
+            if any(fuel_caps.get(k) for k in ("storage", "transport", "electrolyzer")):
+                mf_grp = scenario.create_group("master_fuel_capacity")
+                n_routes = len(self.primary_system.fuel_transport_routes or [])
+                for kind, size in (("storage", self._num_nodes), ("transport", n_routes)):
+                    if not fuel_caps.get(kind):
+                        continue
+                    kgrp = mf_grp.create_group(kind)
+                    fuels = list(fuel_caps[kind])
+                    for fuel_name, ds_name in zip(fuels, self._h5_unit_names(fuels)):
+                        by_idx = fuel_caps[kind][fuel_name]
+                        arr = np.zeros(max([size] + [i + 1 for i in by_idx]))
+                        for i, v in by_idx.items():
+                            arr[i] = v
+                        kgrp.create_dataset(ds_name, data=arr)
+                if fuel_caps.get("electrolyzer"):
+                    egrp = mf_grp.create_group("electrolyzer")
+                    keys = list(fuel_caps["electrolyzer"])
+                    for key, ds_name in zip(keys, self._h5_unit_names(keys)):
+                        egrp.create_dataset(ds_name, data=np.array(
+                            fuel_caps["electrolyzer"][key], dtype=np.float64))
 
             # --- N-1 Security Results ---
             if (result.n1_gen_reserve_duals is not None
@@ -7029,11 +9976,15 @@ class Orchestrator:
                     for n in range(smap["node_offset"], smap["node_offset"] + smap["node_count"]):
                         node_to_sys[n] = sname
 
-                # Aggregate flows between system pairs
+                # Aggregate flows between system pairs. power_flow is keyed
+                # by bus pair: map each end to its node, then its system.
                 inter_flows: dict[tuple[str, str], np.ndarray] = {}
                 for (i, j), flow in result.power_flow.items():
-                    sys_i = node_to_sys.get(i)
-                    sys_j = node_to_sys.get(j)
+                    nodes = self._bus_pair_nodes(i, j)
+                    if nodes is None:
+                        continue
+                    sys_i = node_to_sys.get(nodes[0])
+                    sys_j = node_to_sys.get(nodes[1])
                     if sys_i and sys_j and sys_i != sys_j:
                         pair = (sys_i, sys_j)
                         if pair not in inter_flows:
@@ -7059,6 +10010,7 @@ class Orchestrator:
                 "loss_of_load": result.load_shed,
                 "total_generation": result.total_generation,
                 "total_demand": result.total_demand,
+                "transmission_losses": result.transmission_losses,
             }
             for col, value in global_summary_data.items():
                 if col in global_sum:

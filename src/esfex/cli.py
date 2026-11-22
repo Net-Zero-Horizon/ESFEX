@@ -6,6 +6,7 @@ and exporting results.
 """
 
 import sys
+import typing
 from pathlib import Path
 from typing import Optional
 
@@ -88,6 +89,100 @@ except Exception:
 
 console = Console(force_terminal=True)
 
+# Values `run --mode/--solver` accept: the schema's (esfex/__init__ already
+# imports it, so this costs nothing at startup).
+from esfex.config.schema import ESFEXConfig as _ESFEXConfig, SolverConfig as _SolverConfig
+from esfex.utils.temporal import DEFAULT_RUN_YEARS
+
+SIMULATION_MODES: tuple[str, ...] = typing.get_args(
+    _ESFEXConfig.model_fields["simulation_mode"].annotation)
+SOLVER_NAMES: tuple[str, ...] = typing.get_args(
+    _SolverConfig.model_fields["name"].annotation)
+
+
+# ── --json output ────────────────────────────────────────────────────────
+#
+# A --json command prints exactly one JSON object on stdout; everything
+# else (progress, rich tables, Julia and solver output) goes to stderr.
+
+
+def _flush_c_stdio() -> None:
+    """Flush the C library's stdio buffers (a solver's printf output to a
+    pipe sits there until exit, which would put it after the JSON)."""
+    try:
+        import ctypes
+
+        libc = ctypes.cdll.msvcrt if sys.platform == "win32" else ctypes.CDLL(None)
+        libc.fflush(None)
+    except Exception:
+        pass
+
+
+class _StdoutToStderr:
+    """Inside the block, writes to stdout land on stderr: Python's
+    ``sys.stdout`` and the process's file descriptor 1 (so what Julia and
+    the solvers print follows). :func:`_write_json` then prints the
+    document on the real stdout."""
+
+    def __enter__(self):
+        import os
+
+        self._real = sys.stdout
+        self._saved_fd = None
+        for stream in (sys.stdout, sys.__stdout__):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        _flush_c_stdio()
+        try:
+            os.fstat(1)
+            os.fstat(2)
+            self._saved_fd = os.dup(1)
+            os.dup2(2, 1)
+        except OSError:  # no console (pythonw): Python-level only
+            self._saved_fd = None
+        sys.stdout = sys.stderr
+        return self
+
+    def __exit__(self, *exc):
+        import os
+
+        for stream in (sys.stderr, sys.__stdout__):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        _flush_c_stdio()
+        sys.stdout = self._real
+        if self._saved_fd is not None:
+            os.dup2(self._saved_fd, 1)
+            os.close(self._saved_fd)
+        return False
+
+
+def _write_json(doc: dict) -> None:
+    import json
+
+    sys.stdout.write(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def _check_mode(value: Optional[str]) -> Optional[str]:
+    if value is not None and value not in SIMULATION_MODES:
+        raise typer.BadParameter(
+            f"'{value}' is not a simulation mode; use one of: {', '.join(SIMULATION_MODES)}")
+    return value
+
+
+def _check_solver(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if value.lower() not in SOLVER_NAMES:
+        raise typer.BadParameter(
+            f"'{value}' is not a supported solver; use one of: {', '.join(SOLVER_NAMES)}")
+    return value.lower()
+
 
 @app.command()
 def run(
@@ -105,14 +200,17 @@ def run(
         None,
         "--mode",
         "-m",
-        help="Simulation mode: 'development' or 'unit_commitment'. "
+        help=f"Simulation mode: {', '.join(SIMULATION_MODES)}. "
              "If omitted, the value from the config file is used.",
+        callback=_check_mode,
     ),
     solver: Optional[str] = typer.Option(
         None,
         "--solver",
         "-s",
-        help="Override solver from config: 'highs', 'cbc', 'glpk', 'gurobi', 'cplex'",
+        help=f"Override the config's solver: {', '.join(SOLVER_NAMES)}. "
+             "If omitted, the value from the config file is used.",
+        callback=_check_solver,
     ),
     output: Optional[Path] = typer.Option(
         None,
@@ -124,7 +222,12 @@ def run(
         None,
         "--years",
         "-y",
-        help="Number of years to simulate (default: from config)",
+        help=f"Number of years to simulate (default: {DEFAULT_RUN_YEARS})",
+    ),
+    start_year: Optional[int] = typer.Option(
+        None,
+        "--start-year",
+        help="Label of the first simulated year (default: the year of date_start)",
     ),
     verbose: bool = typer.Option(
         False,
@@ -137,18 +240,125 @@ def run(
         "--dry-run",
         help="Validate config and show plan without running optimization",
     ),
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="At the end print one JSON object (schema esfex.run/1) on stdout: status, "
+             "output file, wall time, warnings, summary of the last year. Everything "
+             "else goes to stderr",
+    ),
+    resume: bool = typer.Option(
+        False, "--resume",
+        help="Continue an interrupted myopic development run from the first year it did "
+             "not complete, appending to its results file (RESULTS, default: the newest "
+             "results file of this case in the output directory)",
+    ),
+    force_resume: bool = typer.Option(
+        False, "--force-resume",
+        help="With --resume: continue although the case, its input files or the ESFEX "
+             "version changed since the run started (each difference is logged as a warning)",
+    ),
+    results: Optional[Path] = typer.Argument(
+        None, metavar="[RESULTS.h5]",
+        help="With --resume: the results file of the run to continue",
+        dir_okay=False,
+    ),
 ):
     """
     Run the ESFEX optimization model.
 
     Executes capacity expansion and operational dispatch optimization
-    based on the provided configuration file.
+    based on the provided configuration file. Exit code 0 on success, 1 if
+    the configuration is invalid, the run failed or is incomplete, or a
+    --resume was refused.
     """
+    import time
+
+    from esfex.api.diagnostics import collect_warnings
+
+    if results is not None and not resume:
+        raise typer.BadParameter("a results file is only read with --resume",
+                                 param_hint="RESULTS.h5")
+    if force_resume and not resume:
+        raise typer.BadParameter("--force-resume needs --resume", param_hint="--force-resume")
+    state: dict = {"status": None, "errors": [], "output_dir": None,
+                   "orchestrator": None, "case": None, "resume": None,
+                   "resume_requested": resume}
+    args = (config, mode, solver, output, years, start_year, verbose, dry_run,
+            resume, force_resume, results)
+    if not json_out:
+        with collect_warnings():
+            _run_command(state, *args)
+        return
+
+    t0 = time.time()
+    code = 0
+    with collect_warnings() as collector, _StdoutToStderr():
+        try:
+            _run_command(state, *args)
+        except typer.Exit as e:
+            code = int(e.exit_code or 0)
+        except Exception as e:  # never leave the caller without its JSON
+            code = 1
+            state["status"] = state["status"] or "failed"
+            state["errors"].append(_run_error("run_error", f"{type(e).__name__}: {e}"))
+        doc = _run_json_doc(state, code, time.time() - t0, collector, config)
+    _write_json(doc)
+    raise typer.Exit(code=code)
+
+
+def _run_error(code: str, message: str, key: str = "", fix: str = ""):
+    from esfex.api import ApiError
+
+    return ApiError(code=code, message=message, key=key, fix=fix)
+
+
+def _run_json_doc(state: dict, code: int, wall: float, collector, config: Path) -> dict:
+    """The ``esfex.run/1`` document of a finished (or failed) ``run --json``."""
+    from esfex.api import envelope
+    from esfex.api import summary as _summary
+
+    orch = state.get("orchestrator")
+    out_file = getattr(orch, "_hdf5_path", None) if orch is not None else None
+    wsum = getattr(orch, "warnings_summary", None) if orch is not None else None
+    if wsum is None:
+        wsum = collector.summary()
+    status = state.get("status") or ("complete" if code == 0 else "failed")
+    years = [r.year for r in (getattr(orch, "results", None) or [])]
+    plan = (getattr(orch, "resume_plan", None)
+            if orch is not None and state.get("resume_requested") else None)
+    if plan is not None:
+        # The years the interrupted run had dispatched are in the file too
+        years = sorted(set(plan.dispatch_years) | set(years))
+    # --resume: where the run resumed (or, with --dry-run, would resume)
+    resume = plan.to_dict() if plan is not None else state.get("resume")
+    last_year = None
+    if out_file is not None and Path(out_file).exists() and years:
+        try:
+            last_year = _summary(out_file, years=[years[-1]]).last_year()
+        except Exception as e:
+            state["errors"].append(_run_error("summary_error", f"{type(e).__name__}: {e}",
+                                              key=str(out_file)))
+    return envelope(
+        "run", code == 0, errors=state["errors"], status=status, exit_code=code,
+        config=str(config), output_dir=state.get("output_dir"),
+        output_file=None if out_file is None else str(Path(out_file).resolve()),
+        wall_time_s=round(wall, 3), years=years, warnings=wsum.to_dict(),
+        last_year=last_year, case=state.get("case"),
+        resumed_from=None if resume is None else resume["resumed_from"], resume=resume)
+
+
+def _run_command(state: dict, config: Path, mode: Optional[str], solver: Optional[str],
+                 output: Optional[Path], years: Optional[int], start_year: Optional[int],
+                 verbose: bool, dry_run: bool, resume: bool = False,
+                 force_resume: bool = False, results_file: Optional[Path] = None) -> None:
+    """Body of ``esfex run``; records the outcome in *state* for ``--json``."""
     import logging
     import sys
 
+    from esfex.api.cases import config_issue_error, case_summary, missing_data_files
     from esfex.config.loader import load_config, ConfigLoadError
-    from esfex.runner import Orchestrator
+    from esfex.io.checkpoint import ResumeError, newest_results_file
+    from esfex.runner import Orchestrator, RunAbortedError
     from esfex.logging_config import setup_console_logging
 
     # Install the (single) console handler at the right verbosity.
@@ -161,7 +371,7 @@ def run(
     if verbose:
         console.print(f"[bold blue]ESFEX[/bold blue] - Power System Optimization")
         console.print(f"Configuration: {config}")
-        console.print(f"Mode: {mode}")
+        console.print(f"Mode: {mode or '(from config)'}")
         console.print(f"Solver: {solver or '(from config)'}")
         console.print()
 
@@ -176,6 +386,9 @@ def run(
             cfg = load_config(config)
     except ConfigLoadError as e:
         console.print(f"[red]Configuration error:[/red] {e}")
+        state["status"] = "invalid_config"
+        state["errors"] = [config_issue_error(i) for i in (getattr(e, "issues", None) or [
+            {"key": "", "type": "load", "message": str(e), "input": None}])]
         raise typer.Exit(code=1)
 
     # Override config values from CLI
@@ -215,13 +428,64 @@ def run(
     if verbose:
         _show_config_summary(cfg)
 
+    try:
+        state["case"] = case_summary(cfg)
+    except Exception:  # a mocked or partial config: the run decides
+        state["case"] = None
+
     if dry_run:
+        state["status"] = "dry_run"
+        missing = missing_data_files(cfg, config.parent)
+        if missing:
+            state["errors"] = missing
+            console.print(f"[red]{len(missing)} data file(s) the run reads cannot be found:[/red]")
+            for err in missing:
+                console.print(f"  {err.key}: {err.message}", markup=False)
+            raise typer.Exit(code=1)
+        if resume:
+            # Would --resume be accepted? (The same checks as the run's.)
+            from esfex.io.checkpoint import check_resume
+
+            target = results_file or newest_results_file(output or Path("./results"), config)
+            try:
+                if target is None:
+                    raise ResumeError([_run_error(
+                        "results_not_found", f"No results file of {config.stem} in "
+                        f"{(output or Path('./results')).resolve()}", key=str(output or ""),
+                        fix="Pass the file: esfex run -c CASE --resume FILE.h5")])
+                plan = check_resume(target, cfg, config, years=years, start_year=start_year,
+                                    force=force_resume)
+            except ResumeError as e:
+                state["status"] = "resume_refused"
+                state["errors"] = e.errors
+                for err in e.errors:
+                    console.print(f"[red]Cannot resume:[/red] {err.message}", markup=True)
+                raise typer.Exit(code=1)
+            state["resume"] = plan.to_dict()
+            at = plan.resume_year if plan.resume_year is not None else "the end"
+            console.print(f"{target.name} can be resumed at {at}")
         console.print("\n[yellow]Dry run mode - not executing optimization[/yellow]")
         raise typer.Exit(code=0)
 
     # Create output directory
     output_dir = output or Path("./results")
+    if resume:
+        # The run goes on in its own file (and its directory)
+        if results_file is None:
+            results_file = newest_results_file(output_dir, config)
+            if results_file is None:
+                console.print(f"[red]Nothing to resume:[/red] no results file of "
+                              f"{config.stem} in {output_dir}")
+                state["status"] = "resume_refused"
+                state["errors"] = [_run_error(
+                    "results_not_found",
+                    f"No results file of {config.stem} in {output_dir.resolve()}",
+                    key=str(output_dir), fix="Pass the file: esfex run -c CASE --resume FILE.h5, "
+                                             "or the run's --output directory.")]
+                raise typer.Exit(code=1)
+        output_dir = results_file.parent
     output_dir.mkdir(parents=True, exist_ok=True)
+    state["output_dir"] = str(output_dir.resolve())
 
     def _safe_console_print(msg: str, *, style: str = "") -> None:
         """Print via rich, but if stdout is in non-blocking mode and the
@@ -250,11 +514,52 @@ def run(
     # Run optimization
     try:
         orchestrator = Orchestrator(cfg, output_dir=output_dir, config_path=config)
-        results = orchestrator.run(years=years)
+        state["orchestrator"] = orchestrator
+        resume_kw = (dict(resume_from=results_file, force_resume=force_resume)
+                     if resume else {})
+        results = orchestrator.run(years=years, start_year=start_year, **resume_kw)
 
+        # A year some of whose dispatch windows failed has hours without a
+        # dispatch: the run is incomplete, not a success (a resumed run: also
+        # the years the interrupted run dispatched)
+        plan = getattr(orchestrator, "resume_plan", None) if resume else None
+        earlier = ([r["year"] for r in plan.doc.get("dispatch", {}).get("completed", [])
+                    if not r.get("feasible", True)] if plan is not None else [])
+        incomplete = earlier + [r.year for r in results or [] if not getattr(r, "feasible", True)]
+        if incomplete:
+            _safe_console_print(
+                "\nOptimization finished with errors: operational windows of "
+                f"year(s) {', '.join(map(str, incomplete))} failed to solve and "
+                "have no dispatch (see the log).", style="red")
+            _safe_console_print(f"Partial results saved to: {output_dir}")
+            state["status"] = "failed_windows"
+            state["errors"].append(_run_error(
+                "failed_windows", f"Operational windows of year(s) "
+                f"{', '.join(map(str, incomplete))} failed to solve and have no dispatch",
+                fix="See the log for the windows' solver status."))
+            raise typer.Exit(code=1)
+        state["status"] = "complete"
         _safe_console_print("\nOptimization completed successfully!", style="green")
         _safe_console_print(f"Results saved to: {output_dir}")
 
+    except typer.Exit:
+        raise
+    except ResumeError as e:
+        _force_blocking_stdio()
+        _safe_console_print("\nCannot resume:", style="red")
+        for err in e.errors:
+            _safe_console_print(f"  {err.message}")
+            if err.fix:
+                _safe_console_print(f"    {err.fix}")
+        state["status"] = "resume_refused"
+        state["errors"].extend(e.errors)
+        raise typer.Exit(code=1)
+    except RunAbortedError as e:
+        _force_blocking_stdio()
+        _safe_console_print(f"\nOptimization failed: {e}", style="red")
+        state["status"] = "aborted"
+        state["errors"].append(_run_error("aborted", str(e)))
+        raise typer.Exit(code=1)
     except BlockingIOError as e:
         # Stdout pipe was non-blocking and full (typical when GUI
         # subprocess can't drain stdout fast enough). Try once more
@@ -269,10 +574,14 @@ def run(
             sys.__stderr__.flush()
         except Exception:
             pass
+        state["status"] = "failed"
+        state["errors"].append(_run_error("stdout_pipe_full", str(e)))
         raise typer.Exit(code=1)
     except Exception as e:
         _force_blocking_stdio()
         _safe_console_print(f"\nOptimization failed: {e}", style="red")
+        state["status"] = "failed"
+        state["errors"].append(_run_error("run_error", f"{type(e).__name__}: {e}"))
         if verbose:
             import traceback
             _safe_console_print(traceback.format_exc())
@@ -291,19 +600,48 @@ def validate(
         dir_okay=False,
         readable=True,
     ),
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="Print one JSON object (schema esfex.validate/1) on stdout instead of text",
+    ),
 ):
     """
     Validate a configuration file.
 
-    Checks that the configuration is valid and all required files exist.
+    Checks that the configuration loads and that the demand and
+    availability files it names exist. Exit code 0 if valid, 1 if not.
     """
+    if json_out:
+        from esfex.api import envelope, validate_case
+
+        with _StdoutToStderr():
+            report = validate_case(config)
+        _write_json(envelope("validate", report.ok, errors=report.errors,
+                             path=report.path, warnings=report.warnings,
+                             case=report.summary))
+        raise typer.Exit(code=0 if report.ok else 1)
+
     from esfex.config.loader import load_config, ConfigLoadError
+    from esfex.api.cases import missing_data_files
 
     console.print(f"Validating: {config}")
 
     try:
         cfg = load_config(config)
+        missing = missing_data_files(cfg, config.parent)
+        if missing:
+            console.print(f"[red]Validation failed:[/red] {len(missing)} data file(s) "
+                          "the run reads cannot be found:")
+            for err in missing:
+                console.print(f"  {err.key}: {err.message}", markup=False)
+            console.print(f"  ({missing[0].fix})", markup=False)
+            raise typer.Exit(code=1)
         console.print("[green]Configuration is valid![/green]")
+        if cfg.unknown_keys:
+            console.print(f"[yellow]{len(cfg.unknown_keys)} unknown key(s) are ignored "
+                          "(misspelt or obsolete?):[/yellow]")
+            for key in cfg.unknown_keys:
+                console.print(f"  {key}", markup=False)
         _show_config_summary(cfg)
 
     except ConfigLoadError as e:
@@ -367,6 +705,198 @@ def export(
         raise typer.Exit(code=1)
 
 
+def _split_sections(value: Optional[list[str]]) -> Optional[list[str]]:
+    from esfex.api.results import SECTIONS
+
+    if not value:
+        return None
+    out = [s.strip().lower() for v in value for s in v.split(",") if s.strip()]
+    unknown = [s for s in out if s not in SECTIONS]
+    if unknown:
+        raise typer.BadParameter(
+            f"unknown section(s) {', '.join(unknown)}; use any of: {', '.join(SECTIONS)}")
+    return out
+
+
+@app.command()
+def summary(
+    results: Path = typer.Argument(
+        ..., help="HDF5 results file written by `esfex run`",
+        exists=True, file_okay=True, dir_okay=False, readable=True,
+    ),
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="Print one JSON object (schema esfex.summary/1) on stdout instead of tables",
+    ),
+    year: Optional[list[int]] = typer.Option(
+        None, "--year", help="Only this year (repeat for several; default: all years)",
+    ),
+    section: Optional[list[str]] = typer.Option(
+        None, "--section", callback=_split_sections,
+        help="Only these sections (repeat or comma-separate): costs, re, shedding, "
+             "curtailment, emissions, builds, capacity, storage, losses, warnings, binding",
+    ),
+):
+    """
+    Summarise a results file: per-year costs, RE share, shedding, builds, warnings.
+
+    Reads only the attributes and the few small datasets it needs, so it is
+    quick on large files. Exit code 0 when the file was read (whatever the
+    run's outcome: see metadata.status and checks), 1 when it is not an
+    ESFEX results file.
+    """
+    from esfex.api import ApiError, ResultsFileError, envelope
+    from esfex.api import summary as _summary
+
+    def _fail(err: ApiError):
+        if json_out:
+            _write_json(envelope("summary", False, errors=[err], path=str(results)))
+        else:
+            console.print(f"[red]Cannot summarise {results}:[/red] {err.message}", markup=True)
+        raise typer.Exit(code=1)
+
+    try:
+        if json_out:
+            with _StdoutToStderr():
+                s = _summary(results, years=year, sections=section)
+        else:
+            s = _summary(results, years=year, sections=section)
+    except ResultsFileError as e:
+        _fail(e.error)
+    except Exception as e:
+        _fail(ApiError("read_error", f"{type(e).__name__}: {e}", key=str(results)))
+
+    if json_out:
+        _write_json(envelope("summary", True, **s.to_dict()))
+        return
+    _show_summary(s)
+
+
+def _fmt(v, spec: str = ",.0f", none: str = "-") -> str:
+    if v is None:
+        return none
+    try:
+        return format(v, spec)
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _show_summary(s) -> None:
+    """Rich tables of an :class:`esfex.api.RunSummary`."""
+    m = s.metadata
+    console.print(f"[bold]{s.path}[/bold]", markup=True, highlight=False)
+    console.print(
+        f"ESFEX {m.get('esfex_version') or '?'} · {m.get('simulation_mode') or '?'} · "
+        f"solver {m.get('solver') or '?'} · years {m.get('years_range') or '?'} · "
+        f"{m.get('num_nodes') or '?'} nodes · status {m.get('status')}",
+        markup=False, highlight=False)
+    secs = set(s.sections)
+    if s.years:
+        t = Table(title="Per year")
+        t.add_column("Year", justify="right")
+        if "costs" in secs:
+            t.add_column("Cost (M$)", justify="right")
+        if "re" in secs:
+            t.add_column("RE share / target", justify="right")
+        if "shedding" in secs:
+            t.add_column("Shed MWh (h)", justify="right")
+        if "curtailment" in secs:
+            t.add_column("Curtailed", justify="right")
+        if "emissions" in secs:
+            t.add_column("CO2 (kt)", justify="right")
+        if "builds" in secs:
+            t.add_column("Built MW", justify="right")
+        if "losses" in secs:
+            t.add_column("Losses MWh", justify="right")
+        for y in s.years:
+            row = [str(y["year"]) + ("" if y.get("feasible", True) else " !")]
+            if "costs" in secs:
+                c = y.get("costs") or {}
+                tot = c.get("total")
+                row.append(_fmt(None if tot is None else tot / 1e6, ",.2f"))
+            if "re" in secs:
+                r = y.get("re") or {}
+                share = _fmt(r.get("share"), ".1%")
+                tgt = r.get("target")
+                row.append(share + (f" / {tgt:.1%}" if tgt else ""))
+            if "shedding" in secs:
+                sh = y.get("shedding") or {}
+                row.append(f"{_fmt(sh.get('energy_mwh'), ',.1f')} ({_fmt(sh.get('hours'), ',.0f')})")
+            if "curtailment" in secs:
+                cu = y.get("curtailment") or {}
+                row.append(_fmt(cu.get("share"), ".1%"))
+            if "emissions" in secs:
+                e = (y.get("emissions") or {}).get("co2_t")
+                row.append(_fmt(None if e is None else e / 1e3, ",.1f"))
+            if "builds" in secs:
+                b = (y.get("builds") or {}).get("generation_mw") or {}
+                row.append(_fmt(sum(b.values()), ",.1f"))
+            if "losses" in secs:
+                row.append(_fmt((y.get("losses") or {}).get("energy_mwh"), ",.0f"))
+            t.add_row(*row)
+        console.print(t)
+
+    last = s.years[-1] if s.years else None
+    if last and "costs" in secs and (last.get("costs") or {}).get("components"):
+        c = last["costs"]
+        t = Table(title=f"Cost components, {last['year']} (M$)")
+        t.add_column("Component")
+        t.add_column("M$", justify="right")
+        for k, v in c["components"].items():
+            if abs(v) >= 0.5:
+                t.add_row(k, _fmt(v / 1e6, ",.3f"))
+        chk = c.get("check") or {}
+        t.add_row("[bold]total[/bold]", f"[bold]{_fmt(c['total'] / 1e6, ',.3f')}[/bold]"
+                  + ("" if chk.get("ok", True) else " [red](≠ sum)[/red]"))
+        console.print(t)
+    if last and "builds" in secs and last.get("builds"):
+        # Builds are per year: summed over the years shown. Retirements are
+        # cumulative: the last year's.
+        built: dict[tuple, float] = {}
+        for y in s.years:
+            for kind, unit in (("generation_mw", "MW"), ("storage_mw", "MW"),
+                               ("storage_mwh", "MWh")):
+                for k, v in ((y.get("builds") or {}).get(kind) or {}).items():
+                    built[(k, unit)] = built.get((k, unit), 0.0) + v
+        rows = [(k, f"{v:,.1f} {unit}") for (k, unit), v in built.items()]
+        rows += [(k, f"retired {r['share']:.0%}")
+                 for k, r in (last["builds"].get("retired") or {}).items()]
+        if rows:
+            span = (f"{s.years[0]['year']}-{last['year']}" if len(s.years) > 1
+                    else str(last["year"]))
+            t = Table(title=f"Built ({span}) and retired (by {last['year']})")
+            t.add_column("Unit / technology")
+            t.add_column("Amount", justify="right")
+            for r in rows:
+                t.add_row(*r)
+            console.print(t)
+    if "warnings" in secs and s.warnings:
+        w = s.warnings
+        console.print(f"\n[bold]Warnings:[/bold] {w['total']} in {w['kinds']} kinds")
+        for g in w["groups"][:10]:
+            msg = str(g.get("message", "")).splitlines()[0][:110]
+            console.print(f"  {g.get('count')}× [{g.get('level')}] {g.get('logger')}: {msg}",
+                          markup=False, highlight=False)
+    if "binding" in secs and s.master:
+        console.print("\n[bold]Master: binding constraints and paid slacks[/bold]")
+        for yk, entry in s.master.items():
+            fams = [b for b in entry.get("binding", []) if int(b.get("count_binding", 0) or 0) > 0]
+            fams.sort(key=lambda b: -float(b.get("sum_abs_dual", 0) or 0))
+            text = ", ".join(
+                f"{b.get('family')} ({b.get('count_binding')}/{b.get('count_total')}, "
+                f"max |dual| {_fmt(b.get('max_abs_dual'), ',.3g')} {b.get('units', '')})"
+                for b in fams[:6]) or "none"
+            console.print(f"  {yk}: {text}", markup=False, highlight=False)
+            for sl in entry.get("slacks", [])[:5]:
+                console.print(f"    slack {sl.get('name')}: {_fmt(sl.get('value'), ',.3g')} "
+                              f"(cost {_fmt(sl.get('cost'), ',.0f')} $)",
+                              markup=False, highlight=False)
+    for chk in s.checks:
+        console.print(f"[red]Check:[/red] {chk['message']}")
+    for note in s.notes:
+        console.print(f"[dim]Note: {note}[/dim]")
+
+
 @app.command()
 def studio(
     config: Optional[Path] = typer.Option(
@@ -379,7 +909,7 @@ def studio(
         None,
         "--output",
         "-o",
-        help="Output YAML path (default: overwrites input)",
+        help="YAML path File > Save writes to (default: the --config file)",
     ),
 ):
     """
@@ -402,11 +932,22 @@ def studio(
     if config:
         console.print(f"Loading: {config}")
 
-    result = launch_studio(config=str(config) if config else None, blocking=True)
+    from esfex.config.loader import SavedConfigInvalidError
+
+    try:
+        result = launch_studio(config=str(config) if config else None, blocking=True,
+                               output=str(output) if output else None)
+    except SavedConfigInvalidError as e:
+        # "Save anyway" on a configuration with errors: written, but invalid.
+        console.print(f"[yellow]Configuration saved to {e.path}, "
+                      f"but it does not validate:[/yellow]")
+        console.print(str(e.error), markup=False)
+        console.print(f"Fix it in the Studio, or check it with: esfex validate -c {e.path}",
+                      markup=False)
+        raise typer.Exit(code=1)
 
     if result:
-        out_path = output or config or Path("esfex_config.yaml")
-        console.print(f"[green]Configuration saved to: {out_path}[/green]")
+        console.print("[green]Configuration saved.[/green]")
     else:
         console.print("[yellow]Studio closed without saving.[/yellow]")
 
@@ -433,7 +974,6 @@ def plugin_list():
         console.print(
             "Plugins are discovered from:\n"
             "  ~/.esfex/plugins/\n"
-            "  <project>/.esfex/plugins/\n"
             "  $ESFEX_PLUGIN_PATH"
         )
         return
@@ -451,6 +991,8 @@ def plugin_list():
             continue
         enabled = pm.is_enabled(name)
         status = "[green]enabled[/green]" if enabled else "[red]disabled[/red]"
+        if not pm.is_trusted(name):
+            status += " [red]untrusted[/red]"
         table.add_row(name, meta.version, meta.category, status, meta.description)
 
     console.print(table)
@@ -465,6 +1007,13 @@ def plugin_install(
     name: Optional[str] = typer.Option(
         None, "--name", "-n", help="Target directory name (for git)"
     ),
+    trust_host: bool = typer.Option(
+        False, "--trust-host",
+        help="Allow a git host outside the default list (github.com, "
+             "gitlab.com, bitbucket.org, codeberg.org, git.sr.ht). The "
+             "plugin's code runs with your permissions: use only for a "
+             "source you trust.",
+    ),
 ):
     """Install a plugin from a git repository or ZIP file."""
     from esfex.plugins import get_plugin_manager
@@ -473,7 +1022,8 @@ def plugin_install(
 
     if git:
         try:
-            installed = pm.install_from_git(git, target_name=name)
+            installed = pm.install_from_git(
+                git, target_name=name, trust_host=trust_host)
             console.print(f"[green]Installed plugin:[/green] {installed}")
         except Exception as e:
             console.print(f"[red]Install failed:[/red] {e}")
@@ -500,6 +1050,23 @@ def plugin_uninstall(
     pm = get_plugin_manager()
     pm.uninstall(name)
     console.print(f"[green]Uninstalled plugin:[/green] {name}")
+
+
+@plugin_app.command("trust")
+def plugin_trust(
+    name: str = typer.Argument(..., help="Plugin name to trust"),
+):
+    """Trust a plugin's current files so it loads (it runs with full access)."""
+    from esfex.plugins import get_plugin_manager
+
+    pm = get_plugin_manager()
+    pm.discover()
+    try:
+        pm.trust_plugin(name)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+    console.print(f"[green]Trusted plugin:[/green] {name}")
 
 
 @plugin_app.command("enable")
@@ -576,10 +1143,34 @@ def precompile(
 
 
 @app.command()
-def info():
+def info(
+    json_out: bool = typer.Option(
+        False, "--json",
+        help="Print one JSON object (schema esfex.info/1) on stdout instead of text",
+    ),
+    probe: Optional[bool] = typer.Option(
+        None, "--probe/--no-probe",
+        help="Start Julia and load each installed solver (default: on for the text "
+             "output, off with --json, where solvers are found from the Julia "
+             "project files)",
+    ),
+):
     """
     Show ESFEX version and system information.
     """
+    if json_out:
+        from esfex.api import envelope, system_info
+
+        with _StdoutToStderr():
+            data = system_info(probe=bool(probe))
+        _write_json(envelope("info", True, **data))
+        return
+    if probe is False:
+        from esfex.api import system_info
+
+        _show_system_info(system_info(probe=False))
+        return
+
     import sys
     from esfex import __version__
 
@@ -625,6 +1216,29 @@ def info():
         console.print("  [yellow]Julia not available - cannot check solvers[/yellow]")
 
 
+def _show_system_info(data: dict) -> None:
+    """Text view of :func:`esfex.api.system_info` without probing Julia."""
+    console.print(f"[bold blue]ESFEX[/bold blue] version {data['esfex']['version']}")
+    console.print(f"Python: {data['python']['version']} ({data['python']['executable']})")
+    jl = data["julia"]
+    console.print("Julia: " + ("juliacall installed" if jl["juliacall_installed"]
+                               else "[yellow]juliacall not installed[/yellow]")
+                  + (f", julia at {jl['julia_on_path']}" if jl["julia_on_path"] else ""))
+    si = jl.get("sysimage")
+    console.print("Sysimage: " + ("[yellow]Not built[/yellow]" if not si else
+                                  f"{'[yellow]STALE[/yellow]' if si['stale'] else 'up to date'} "
+                                  f"({si['path']}, {si['size_mb']} MB)"))
+    table = Table(title="Solvers (from the Julia project files)")
+    for col in ("Solver", "Installed", "Licensed", "Type"):
+        table.add_column(col)
+    for s in data["solvers"]:
+        table.add_row(s["name"], "yes" if s["installed"] else "no",
+                      "yes" if s["licensed"] else "no", s["kind"])
+    console.print(table)
+    d = data["data"]
+    console.print(f"Data root: {d['data_root']}" + ("" if d["data_root_exists"] else " (missing)"))
+
+
 def _check_julia_solver(name: str):
     """Check if a solver is available in Julia."""
     try:
@@ -664,47 +1278,54 @@ def _show_config_summary(cfg):
     console.print(table)
 
 
-def _register_plugin_cli() -> None:
-    """Discover plugins and register their CLI sub-commands."""
+def _register_plugin_cli(args: Optional[list[str]] = None) -> None:
+    """Load the enabled, trusted plugins and mount their CLI sub-commands.
+
+    Called by the ``esfex`` entry point with the command line, not on
+    import. Skipped when *args* name a built-in command: those don't need
+    plugin commands, and ``run`` and ``studio`` load the plugins themselves
+    with the project's config (the manager loads plugins only once).
+    """
+    args = sys.argv[1:] if args is None else args
+    command = next((a for a in args if not a.startswith("-")), None)
     try:
         from esfex.plugins import get_plugin_manager
+        from esfex.plugins.manager import _typer_command_names
 
+        if command is not None and command in _typer_command_names(app):
+            return
         pm = get_plugin_manager()
-        pm.discover()
+        pm.load_all(config=None, gui_mode=False)
         pm.register_cli_commands(app)
     except Exception:
-        pass  # Don't crash the CLI if plugin discovery fails
-
-
-_register_plugin_cli()
+        pass  # A plugin problem must not stop the built-in commands
 
 
 @app.command()
 def train_demand_model(
     output: Optional[Path] = typer.Option(
         None, "--output", "-o",
-        help="Output path for trained model (default: ~/.cache/esfex/models/demand_model.xgb)",
+        help="Where to write the trained model (default: demand_model.xgb "
+             "in the ESFEX models directory, where the Studio picks it up)",
     ),
     cache_dir: Optional[Path] = typer.Option(
         None, "--cache-dir",
-        help="Directory for caching training data downloads",
+        help="Dataset directory written by build-demand-dataset "
+             "(default: its default directory)",
     ),
-    countries: int = typer.Option(
-        200, "--countries", "-n",
-        help="Number of countries to include in training data",
+    folds: int = typer.Option(
+        3, "--folds", min=1, help="Temporal cross-validation folds (by year)",
     ),
-    year_start: int = typer.Option(1990, "--year-start", help="Start year"),
-    year_end: int = typer.Option(2023, "--year-end", help="End year"),
 ):
-    """Train the demand estimation ML model from World Bank + ERA5 data.
+    """Train the XGBoost demand model on the dataset of build-demand-dataset.
 
-    Downloads macroeconomic indicators and hourly temperature data for
-    ~200 countries, then trains an XGBoost model that predicts 3-hourly
-    demand shape factors.  The trained model is used automatically by
-    the Demand Estimation workflow.
-
-    First run downloads ~500MB of data (cached for subsequent runs).
-    Training takes ~5-10 minutes on a modern CPU.
+    Reads the hourly Parquet files that ``esfex build-demand-dataset`` wrote
+    (real demand with ERA5 temperature), adds the pixel features at each
+    series' location, validates by temporal cross-validation and saves the
+    model. No demand data is downloaded (raster tiles of the pixel features
+    missing locally are fetched on first use). A model saved in the ESFEX
+    models directory replaces the shipped one in the Demand Estimation
+    workflow.
     """
     from esfex.models.demand_training import train_demand_model as _train
 
@@ -720,11 +1341,9 @@ def train_demand_model(
 
         try:
             model = _train(
+                dataset_dir=cache_dir,
                 output_path=output,
-                cache_dir=cache_dir,
-                n_countries=countries,
-                year_start=year_start,
-                year_end=year_end,
+                n_cv_folds=folds,
                 progress_cb=on_progress,
             )
             console.print(
@@ -743,11 +1362,25 @@ def train_demand_model(
             raise typer.Exit(code=1)
 
 
+def _check_demand_sources(value: Optional[str]) -> Optional[str]:
+    from esfex.models.demand_real_data import DEMAND_SOURCES
+
+    names = {s.strip().lower() for s in (value or "").split(",") if s.strip()}
+    unknown = sorted(names - set(DEMAND_SOURCES) - {"all"})
+    if unknown:
+        raise typer.BadParameter(
+            f"unknown source(s) {', '.join(unknown)}; use all or any of: "
+            f"{', '.join(DEMAND_SOURCES)}")
+    return value
+
+
 @app.command()
 def build_demand_dataset(
     sources: Optional[str] = typer.Option(
-        "all", "--sources", "-s",
-        help="Comma-separated source names: all, opsd, entsoe, brazil, colombia, japan, australia, usa, rte, uk, eskom",
+        "all", "--sources", "-s", callback=_check_demand_sources,
+        help="Comma-separated source names, or all: opsd, entsoe, brazil, "
+             "colombia, japan, rte, uk, eskom, australia, usa, turkey, chile, "
+             "argentina, mexico, korea, taiwan, peru",
     ),
     cache_dir: Optional[Path] = typer.Option(
         None, "--cache-dir",
@@ -899,6 +1532,7 @@ def list_solvers():
 
 def _entrypoint() -> None:
     """CLI entrypoint (registered in pyproject)."""
+    _register_plugin_cli()
     app()
 
 
@@ -913,9 +1547,14 @@ def _studio_entrypoint() -> None:
     ``studio`` command, which would write to a console that doesn't
     exist under pythonw.
     """
+    from esfex.config.loader import SavedConfigInvalidError
     from esfex.visualization import launch_studio
 
-    launch_studio(blocking=True)
+    try:
+        launch_studio(blocking=True)
+    except SavedConfigInvalidError:
+        # No console under pythonw; the Studio warned before "Save anyway".
+        pass
 
 
 if __name__ == "__main__":

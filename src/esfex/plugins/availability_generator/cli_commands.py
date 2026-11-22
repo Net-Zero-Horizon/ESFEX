@@ -33,7 +33,8 @@ def generate(
     ),
     years_str: Optional[str] = typer.Option(
         None, "--years", "-y",
-        help="Comma-separated years (e.g. 2020,2021). Default: from config.",
+        help="Comma-separated years (e.g. 2020,2021). Default: the year of the "
+        "config's date_start.",
     ),
     generators_str: Optional[str] = typer.Option(
         None, "--generators", "-g",
@@ -104,7 +105,14 @@ def generate(
         f"using {data_source}..."
     )
 
-    from .generator import generate_availability_profiles, update_config_yaml
+    from .generator import (
+        config_model_clock,
+        generate_availability_profiles,
+        update_config_yaml,
+    )
+
+    clock = config_model_clock(cfg)
+    typer.echo(f"Model clock: {clock.label}")
 
     def progress_cb(pct: int, msg: str) -> None:
         typer.echo(f"  [{pct:3d}%] {msg}")
@@ -118,6 +126,7 @@ def generate(
         wind_params=wind_params,
         generator_filter=gen_filter,
         progress_callback=progress_cb,
+        model_clock=clock,
     )
 
     if not result_map:
@@ -129,20 +138,20 @@ def generate(
         typer.echo(f"  {key} -> {path}")
 
     if update_config:
-        update_config_yaml(config, result_map)
-        typer.echo(f"\nUpdated config: {config}")
+        update_config_yaml(config, result_map, model_clock=clock)
+        typer.echo(f"\nUpdated config: {config} (temporal.model_clock: {clock.zone})")
+    elif cfg.temporal.model_clock != clock.zone:
+        typer.echo(
+            f"\nThe profiles are on {clock.label}: set temporal.model_clock: "
+            f"{clock.zone} in {config} (or pass --update-config).")
 
 
 def _default_years(cfg) -> list[int]:
-    """Extract default year(s) from config temporal settings."""
+    """The year of the config's ``date_start`` (``DD/MM/YYYY HH:MM``), or
+    2020 when it is missing or unreadable."""
+    from esfex.utils.temporal import parse_date_start
+
     try:
-        temporal = cfg.temporal
-        start = getattr(temporal, "date_start", None)
-        if start:
-            if hasattr(start, "year"):
-                return [start.year]
-            # May be a string like "2020-01-01"
-            return [int(str(start)[:4])]
-    except Exception:
-        pass
-    return [2020]
+        return [parse_date_start(cfg.date_start).year]
+    except (AttributeError, TypeError, ValueError):
+        return [2020]

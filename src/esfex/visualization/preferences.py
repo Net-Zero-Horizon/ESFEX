@@ -77,7 +77,6 @@ DEFAULT_PREFERENCES: dict[str, dict[str, Any]] = {
         "time_limit": 3600,
         "mip_gap": 0.001,
         "verbose": False,
-        "scale_constraints": False,
         "presolve": "choose",
         "memory_limit": 0,
         "log_file": "",
@@ -97,11 +96,10 @@ DEFAULT_PREFERENCES: dict[str, dict[str, Any]] = {
         "default_mode": "development",
         "default_resolution": 6,
         "default_rolling_horizon": 48,
-        "default_overlap": 0,
+        "default_overlap": 24,
         "default_primary_energy": False,
         "default_log_level": "basic",
         "log_to_file": False,
-        "default_output_dir": "",
     },
     "results": {
         "chart_backend": "matplotlib",
@@ -119,7 +117,6 @@ DEFAULT_PREFERENCES: dict[str, dict[str, Any]] = {
         "max_workers": 1,
         "cache_strategy": "preload",
         "debug_mode": False,
-        "cache_dir": str(Path.home() / ".cache" / "esfex"),
         "telemetry_opt_out": False,
     },
 }

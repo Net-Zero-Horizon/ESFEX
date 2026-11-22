@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
+from esfex.visualization.i18n import tr
 from esfex.visualization.workflows.otec_studio import optimize as opt
 from esfex.visualization.workflows.otec_studio.workers import (
     OptimizeWorker,
@@ -44,11 +45,12 @@ from esfex.visualization.ui_scale import scale_qss_fonts
 
 logger = logging.getLogger(__name__)
 
+# Design variables of the LCOE surface → translation key of their axis label.
 _VAR_LABELS = {
-    "p_gross": "Gross power (MW)",
-    "dT_WW": "ΔT warm (K)",
-    "dT_CW": "ΔT cold (K)",
-    "depth_CW": "CW depth (m)",
+    "p_gross": "otec_studio.opt_var_p_gross",
+    "dT_WW": "otec_studio.opt_var_dt_ww",
+    "dT_CW": "otec_studio.opt_var_dt_cw",
+    "depth_CW": "otec_studio.opt_var_depth_cw",
 }
 
 
@@ -88,21 +90,21 @@ class OptimizationPanel(QWidget):
         left = QWidget()
         left_lay = QVBoxLayout(left)
 
-        site_grp = QGroupBox("Site")
+        site_grp = QGroupBox(tr("otec_studio.opt_site_group"))
         sf = QFormLayout(site_grp)
         self._t_ww = _spin(0, 40, 26.0, 1, 0.5, " °C")
         self._t_cw = _spin(0, 40, 5.0, 1, 0.5, " °C")
         self._dist = _spin(0, 1000, 20.0, 1, 1.0, " km")
         self._lat = _spin(-60, 60, 21.0, 3, 0.1)
         self._lon = _spin(-180, 180, -158.0, 3, 0.1)
-        sf.addRow("Warm-water T:", self._t_ww)
-        sf.addRow("Cold-water T:", self._t_cw)
-        sf.addRow("Distance to shore:", self._dist)
-        sf.addRow("Latitude:", self._lat)
-        sf.addRow("Longitude:", self._lon)
+        sf.addRow(tr("otec_studio.warm_water_t"), self._t_ww)
+        sf.addRow(tr("otec_studio.cold_water_t"), self._t_cw)
+        sf.addRow(tr("otec_studio.distance_to_shore"), self._dist)
+        sf.addRow(tr("otec_studio.opt_latitude"), self._lat)
+        sf.addRow(tr("otec_studio.opt_longitude"), self._lon)
         left_lay.addWidget(site_grp)
 
-        bounds_grp = QGroupBox("Design bounds")
+        bounds_grp = QGroupBox(tr("otec_studio.opt_bounds_group"))
         bf = QFormLayout(bounds_grp)
         # power shown as positive MW magnitude (OTEX stores negative kW)
         self._pg_min = _spin(1, 500, 1.0, 0, 1.0, " MW")
@@ -113,35 +115,35 @@ class OptimizationPanel(QWidget):
         self._dtc_max = _spin(0.5, 10, 6.0, 1, 0.5, " K")
         self._dep_min = _spin(100, 5000, 600.0, 0, 50.0, " m")
         self._dep_max = _spin(100, 5000, 3000.0, 0, 50.0, " m")
-        bf.addRow("Power min / max:", self._row(self._pg_min, self._pg_max))
-        bf.addRow("ΔT warm min / max:", self._row(self._dtw_min, self._dtw_max))
-        bf.addRow("ΔT cold min / max:", self._row(self._dtc_min, self._dtc_max))
-        bf.addRow("CW depth min / max:", self._row(self._dep_min, self._dep_max))
+        bf.addRow(tr("otec_studio.opt_power_min_max"),
+                  self._row(self._pg_min, self._pg_max))
+        bf.addRow(tr("otec_studio.opt_dt_warm_min_max"),
+                  self._row(self._dtw_min, self._dtw_max))
+        bf.addRow(tr("otec_studio.opt_dt_cold_min_max"),
+                  self._row(self._dtc_min, self._dtc_max))
+        bf.addRow(tr("otec_studio.opt_depth_min_max"),
+                  self._row(self._dep_min, self._dep_max))
         left_lay.addWidget(bounds_grp)
 
-        con_grp = QGroupBox("Constraints (cap → interior optimum)")
+        con_grp = QGroupBox(tr("otec_studio.opt_constraints_group"))
         cf = QFormLayout(con_grp)
         self._con_capex = self._opt_constraint(0, 50000, 300.0, " M$")
         self._con_pnet = self._opt_constraint(0, 1000, 100.0, " MW")
         self._con_aep = self._opt_constraint(0, 1e7, 5e5, " MWh")
         self._con_pgross = self._opt_constraint(0, 1000, 200.0, " MW")
         self._con_paras = self._opt_constraint(0, 1, 0.4, "")
-        cf.addRow("Max CAPEX:", self._con_capex[2])
-        cf.addRow("Max net power:", self._con_pnet[2])
-        cf.addRow("Max AEP:", self._con_aep[2])
-        cf.addRow("Max gross power:", self._con_pgross[2])
-        cf.addRow("Max parasitic ratio:", self._con_paras[2])
-        hint = QLabel(
-            "Without any cap, LCOE falls monotonically with size → the optimum "
-            "degenerates to the max-power bound. Enable a cap to find the real "
-            "cost/size sweet spot."
-        )
+        cf.addRow(tr("otec_studio.opt_max_capex"), self._con_capex[2])
+        cf.addRow(tr("otec_studio.opt_max_net_power"), self._con_pnet[2])
+        cf.addRow(tr("otec_studio.opt_max_aep"), self._con_aep[2])
+        cf.addRow(tr("otec_studio.opt_max_gross_power"), self._con_pgross[2])
+        cf.addRow(tr("otec_studio.opt_max_parasitic"), self._con_paras[2])
+        hint = QLabel(tr("otec_studio.opt_constraints_hint"))
         hint.setWordWrap(True)
         hint.setStyleSheet(scale_qss_fonts("color: #888; font-size: 10px;"))
         cf.addRow(hint)
         left_lay.addWidget(con_grp)
 
-        self._btn_opt = QPushButton("Optimize (minimize LCOE)")
+        self._btn_opt = QPushButton(tr("otec_studio.opt_run"))
         self._btn_opt.setStyleSheet(
             "background-color: #2980b9; color: white; font-weight: bold; "
             "padding: 8px;"
@@ -165,33 +167,32 @@ class OptimizationPanel(QWidget):
         right = QWidget()
         right_lay = QVBoxLayout(right)
 
-        res_grp = QGroupBox("Optimal design")
+        res_grp = QGroupBox(tr("otec_studio.opt_result_group"))
         self._res_form = QFormLayout(res_grp)
         self._res_labels = {}
-        for key, label in [
-            ("status", "Status"), ("lcoe", "LCOE"), ("p_net", "Net power"),
-            ("capex", "CAPEX"), ("pg", "Gross power"), ("dtw", "ΔT warm"),
-            ("dtc", "ΔT cold"), ("depth", "CW depth"), ("viol", "Max violation"),
-        ]:
+        for key in ("status", "lcoe", "p_net", "capex", "pg", "dtw", "dtc",
+                    "depth", "viol"):
             lbl = QLabel("—")
             self._res_labels[key] = lbl
-            self._res_form.addRow(f"{label}:", lbl)
+            self._res_form.addRow(tr(f"otec_studio.opt_res_{key}"), lbl)
         right_lay.addWidget(res_grp)
 
-        surf_grp = QGroupBox("LCOE surface")
+        surf_grp = QGroupBox(tr("otec_studio.opt_surface_group"))
         surf_lay = QVBoxLayout(surf_grp)
         ctrl = QHBoxLayout()
         ctrl.addWidget(QLabel("X:"))
         self._var_x = QComboBox()
-        self._var_x.addItems(list(_VAR_LABELS.values()))
+        for var, label_key in _VAR_LABELS.items():
+            self._var_x.addItem(tr(label_key), var)
         self._var_x.setCurrentIndex(0)  # p_gross
         ctrl.addWidget(self._var_x)
         ctrl.addWidget(QLabel("Y:"))
         self._var_y = QComboBox()
-        self._var_y.addItems(list(_VAR_LABELS.values()))
+        for var, label_key in _VAR_LABELS.items():
+            self._var_y.addItem(tr(label_key), var)
         self._var_y.setCurrentIndex(3)  # depth_CW
         ctrl.addWidget(self._var_y)
-        self._btn_surf = QPushButton("Compute surface")
+        self._btn_surf = QPushButton(tr("otec_studio.opt_compute_surface"))
         self._btn_surf.setEnabled(False)
         self._btn_surf.clicked.connect(self._compute_surface)
         ctrl.addWidget(self._btn_surf)
@@ -287,7 +288,7 @@ class OptimizationPanel(QWidget):
         )
         self._btn_opt.setEnabled(False)
         self._progress.setVisible(True)
-        self._status.setText("Optimizing…")
+        self._status.setText(tr("otec_studio.opt_running"))
         self._worker = OptimizeWorker(
             self._site, self._collect_bounds(), self._collect_constraints(),
         )
@@ -301,12 +302,15 @@ class OptimizationPanel(QWidget):
         self._btn_opt.setEnabled(True)
         self._btn_surf.setEnabled(True)
         ok = bool(getattr(res, "success", False))
-        self._status.setText("Done." if ok else "Did not converge.")
+        self._status.setText(tr("otec_studio.done") if ok
+                             else tr("otec_studio.opt_not_converged"))
         self._status.setStyleSheet(
             "color: #2ecc71;" if ok else "color: #e67e22;"
         )
         L = self._res_labels
-        L["status"].setText(f"{'✓ success' if ok else '✗'} ({res.message})")
+        L["status"].setText(
+            tr("otec_studio.opt_status_success", message=res.message) if ok
+            else tr("otec_studio.opt_status_failed", message=res.message))
         L["lcoe"].setText(f"{res.lcoe:.4f}")
         L["p_net"].setText(f"{abs(res.p_net) / 1000:,.1f} MW")
         L["capex"].setText(f"${res.capex_total / 1e6:,.1f} M")
@@ -323,7 +327,7 @@ class OptimizationPanel(QWidget):
     def _on_error(self, msg):
         self._progress.setVisible(False)
         self._btn_opt.setEnabled(True)
-        self._status.setText(f"Error: {msg}")
+        self._status.setText(tr("otec_studio.error_msg", error=msg))
         self._status.setStyleSheet("color: #e74c3c;")
 
     # ------------------------------------------------------------------
@@ -331,7 +335,7 @@ class OptimizationPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _var_key(self, combo):
-        return list(_VAR_LABELS.keys())[combo.currentIndex()]
+        return combo.currentData()
 
     def _compute_surface(self):
         if self._site is None or self._result is None:
@@ -339,7 +343,7 @@ class OptimizationPanel(QWidget):
         var_x = self._var_key(self._var_x)
         var_y = self._var_key(self._var_y)
         if var_x == var_y:
-            self._status.setText("Choose two different axes for the surface.")
+            self._status.setText(tr("otec_studio.opt_same_axes"))
             return
         x = self._result.x
         base = {
@@ -350,7 +354,7 @@ class OptimizationPanel(QWidget):
         y_vals = self._axis_values(var_y)
         self._btn_surf.setEnabled(False)
         self._progress.setVisible(True)
-        self._status.setText("Sweeping LCOE surface…")
+        self._status.setText(tr("otec_studio.opt_sweeping"))
         self._surf_worker = SurfaceWorker(
             self._site, base, var_x, var_y, x_vals, y_vals,
         )
@@ -371,7 +375,7 @@ class OptimizationPanel(QWidget):
     def _on_surface(self, surf):
         self._progress.setVisible(False)
         self._btn_surf.setEnabled(True)
-        self._status.setText("Surface ready.")
+        self._status.setText(tr("otec_studio.opt_surface_ready"))
         self._status.setStyleSheet("color: #2ecc71;")
         self._ax.clear()
         xv = np.array(surf["x_vals"])
@@ -389,9 +393,10 @@ class OptimizationPanel(QWidget):
             oxd = -ox / 1000 if surf["var_x"] == "p_gross" else ox
             oyd = -oy / 1000 if surf["var_y"] == "p_gross" else oy
             self._ax.plot(oxd, oyd, "r*", markersize=16, markeredgecolor="white",
-                          label="optimum")
+                          label=tr("otec_studio.opt_legend_optimum"))
             self._ax.legend(fontsize=8)
-        self._ax.set_xlabel(_VAR_LABELS[surf["var_x"]])
-        self._ax.set_ylabel(_VAR_LABELS[surf["var_y"]])
-        self._ax.set_title("LCOE surface", fontsize=11, fontweight="bold")
+        self._ax.set_xlabel(tr(_VAR_LABELS[surf["var_x"]]))
+        self._ax.set_ylabel(tr(_VAR_LABELS[surf["var_y"]]))
+        self._ax.set_title(tr("otec_studio.opt_surface_group"), fontsize=11,
+                           fontweight="bold")
         self._canvas.draw()

@@ -12,6 +12,14 @@ When a generator trips, the power imbalance causes the system frequency to devia
 
 The COI model aggregates all synchronous machines into a single equivalent machine, enabling closed-form analytical solutions for each metric.
 
+This module is a post-processing analysis (`analysis/frequency.py`) run on dispatch results, in the Studio or from Python; it adds nothing to the optimization. The dispatch has its own linear inertia requirement, `inertia_{t}` (INE-1 in [Operational Dispatch](operational-dispatch.md)):
+
+\[
+\sum_{g,b} H_{g,b}\, p_{g,b,t} + \sum_{k,b} H^{bat}_{k,b} \left( p^{ch}_{k,b,t} + p^{dis}_{k,b,t} \right) + \lambda^{H}_t \geq H^{min}_t
+\]
+
+where \(H^{min}_t\) is the inertia threshold in MW·s (hourly profile or `INERTIA_LIMIT_THRESHOLD`, default 0.1; an absolute value, the Studio's Min. System Inertia field) and the shortfall \(\lambda^H_t\) is penalized at `penalties.loss_of_inertia`. Like FS-1, it weights each unit's inertia constant by its output, not its rating.
+
 ## Mathematical Model
 
 ### System Inertia
@@ -121,7 +129,7 @@ The frequency analysis uses parameters from the system configuration:
 | `rocof_limit` | `SystemConfig` | 2.0 Hz/s | Maximum allowable ROCOF |
 | `frequency_nadir_limit` | `SystemConfig` | 49.0 Hz | Minimum allowable frequency |
 
-Droop and governor time constant are per-node arrays (like other generator parameters), allowing different settings for each generator at each node.
+Droop and governor time constant are per-node arrays (like other generator parameters), allowing different settings for each generator at each node. The SLD frequency gauge uses the four `SystemConfig` keys; a `frequency_nominal` left at 50 Hz follows the buses' frequency, and a `frequency_nadir_limit` left at 49 Hz becomes 1 Hz below nominal (see [SLD Dynamic Analysis](../gui/sld-dynamic-analysis.md)). When the Studio saves a system whose `frequency_nominal` is a frequency none of its AC buses runs at (a Grid Builder network of a 60 Hz region with the 50 Hz default), it writes their most common frequency and moves `frequency_nadir_limit` by the same amount (49 Hz on 50 Hz becomes 59 Hz on 60 Hz). A mixed 50/60 Hz system keeps a nominal frequency some of its buses run at. `rocof_limit` is a protection setting in Hz/s and is not changed.
 
 ## N-1 Frequency Screening
 

@@ -67,12 +67,51 @@
     }
     #sld-tooltip .tt-label { font-weight: 600; }
     #sld-tooltip .tt-sub { font-size: 11px; opacity: 0.85; margin-top: 2px; }
+
+    /* Level of detail: sld_controller.js sets lod-far / lod-mid on the svg
+       from the zoom scale. Far: frames, bars and lines only, at a constant
+       on-screen width. Mid: plus equipment symbols. Text appears only when
+       it is large enough to read; until then the substation names are
+       drawn at a fixed size in .sld-names. */
+    svg.lod-far .sld-root text, svg.lod-mid .sld-root text,
+    svg.lod-far .sld-root .lod-label, svg.lod-mid .sld-root .lod-label { display: none; }
+    svg.lod-far .layer-stubs, svg.lod-far .layer-equip,
+    svg.lod-far .layer-ops, svg.lod-mid .layer-ops > :not(polygon) { display: none; }
+    svg.lod-far .layer-edges circle, svg.lod-far .bus-bar circle,
+    svg.lod-far .bus-bar-border { display: none; }
+    svg.lod-far .edge-path { vector-effect: non-scaling-stroke; stroke-width: 1px; }
+    svg.lod-far .bus-bar-line { vector-effect: non-scaling-stroke; stroke-width: 2.5px; }
+    svg.lod-far .node-group-bg {
+        vector-effect: non-scaling-stroke; stroke-width: 1px; stroke-dasharray: none;
+        fill: #8A96A3; fill-opacity: 0.08;
+    }
+
+    /* Substation drill-down: breadcrumb back to the whole system, and the
+       far-substation names at the end of the line stubs. */
+    #sld-breadcrumb {
+        display: none;
+        position: absolute; top: 10px; left: 10px; z-index: 400;
+        align-items: center; gap: 6px; max-width: calc(100% - 20px);
+        padding: 5px 10px; border-radius: 5px;
+        background: rgba(255, 255, 255, 0.92); border: 1px solid #D5DBE1;
+        font: 600 12px 'Segoe UI', Roboto, sans-serif; color: #2C3E50;
+    }
+    #sld-breadcrumb button {
+        border: 0; background: none; padding: 0; cursor: pointer;
+        font: inherit; color: #2E86DE;
+    }
+    #sld-breadcrumb button:hover { text-decoration: underline; }
+    #sld-breadcrumb .sep { color: #95A5A6; }
+    #sld-bc-site { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .stub-link { cursor: pointer; }
+    .stub-link:hover { fill: #2E86DE; text-decoration: underline; }
 </style>
 </head>
 <body>
 <div id="sld-container"></div>
-<div id="empty-message">No elements to display.<br>Add nodes and equipment in the Geographic View.</div>
-<div id="sld-loading"><div class="spinner"></div><div class="spinner-text">Laying out diagram...</div></div>
+<div id="sld-breadcrumb"><button id="sld-bc-system" data-i18n="web.sld.system" data-i18n-title="web.sld.back_to_system">System</button><span class="sep">&rsaquo;</span><span id="sld-bc-site"></span></div>
+<div id="empty-message"><span data-i18n="web.sld.empty_title">No elements to display.</span><br><span data-i18n="web.sld.empty_hint">Add nodes and equipment in the Geographic View.</span></div>
+<div id="sld-loading"><div class="spinner"></div><div class="spinner-text" data-i18n="web.sld.laying_out">Laying out diagram...</div></div>
 <div id="sld-tooltip"><span class="tt-label"></span><div class="tt-sub"></div></div>
 
 <!-- D3.js (vendored) -->

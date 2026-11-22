@@ -226,8 +226,6 @@ class BuildingFetcher(QThread):
         quadkey to (tile_x, tile_y, zoom) and invert the Web Mercator tile
         formula for correct bounds.
         """
-        import math
-
         z = len(quadkey)
         tile_x = tile_y = 0
         for ch in quadkey:

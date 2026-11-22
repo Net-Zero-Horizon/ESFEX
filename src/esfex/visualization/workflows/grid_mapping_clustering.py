@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 
+from esfex.visualization.i18n import tr
 from esfex.visualization.workflows.place_naming import name_positions_by_region
 
 logger = logging.getLogger(__name__)
@@ -185,9 +186,8 @@ def _fetch_building_centroids_ml(
     for source in sources:
         try:
             if progress_callback:
-                progress_callback(
-                    f"Fetching buildings from {source.title()}..."
-                )
+                progress_callback(tr("grid_builder.cluster_fetching_buildings_from",
+                                     source=source.title()))
             # Node clustering only needs a representative sample of
             # building centroids to seed K-means, so cap the pull low —
             # this keeps whole-country regions fast and memory-safe.
@@ -281,13 +281,13 @@ class NodeClusteringWorker(QThread):
         """Replace generic node names with OSM region names (best-effort)."""
         if not result.node_positions or self._cancelled:
             return result
-        self.progress.emit(95, "Naming nodes from OpenStreetMap...")
+        self.progress.emit(95, tr("grid_builder.cluster_naming_nodes"))
         named = name_positions_by_region(
             result.node_positions,
             cancelled=lambda: self._cancelled,
             progress=lambda done, total: self.progress.emit(
                 95 + int(5 * done / max(total, 1)),
-                f"Naming nodes ({done}/{total})...",
+                tr("grid_builder.cluster_naming_nodes_n", done=done, total=total),
             ),
         )
         return ClusterResult(named, result.n_clusters, result.criterion_used)
@@ -310,7 +310,8 @@ class NodeClusteringWorker(QThread):
             valid = [c for c in self._criteria if c in dispatch]
             if not valid:
                 self.error.emit(
-                    f"No valid criteria selected: {self._criteria}"
+                    tr("grid_builder.cluster_no_valid_criteria",
+                       criteria=", ".join(map(str, self._criteria)))
                 )
                 return
 
@@ -330,7 +331,9 @@ class NodeClusteringWorker(QThread):
                 base_pct = i * step_pct
                 self.progress.emit(
                     base_pct,
-                    f"Running {crit} criterion ({i + 1}/{len(valid)})...",
+                    tr("grid_builder.cluster_running_criterion",
+                       criterion=tr(f"grid_builder.cluster_criterion_{crit}"),
+                       i=i + 1, n=len(valid)),
                 )
                 result = dispatch[crit]()
                 if result.node_positions:
@@ -356,7 +359,7 @@ class NodeClusteringWorker(QThread):
                 return
 
             # Consensus merge: pool all candidate positions, re-cluster
-            self.progress.emit(75, "Merging criteria (consensus clustering)...")
+            self.progress.emit(75, tr("grid_builder.cluster_merging"))
             merged = self._consensus_merge(sub_results, valid)
             self._finish(merged)
 
@@ -405,7 +408,7 @@ class NodeClusteringWorker(QThread):
         mid_lat = float(np.mean(raw[:, 0]))
         projected = _project_to_km(raw)
 
-        self.progress.emit(85, f"Consensus K-means (k={target_k})...")
+        self.progress.emit(85, tr("grid_builder.cluster_consensus_kmeans", k=target_k))
         _labels, centroids_km = _run_kmeans(projected, target_k)
 
         positions = _km_centroids_to_latlng(centroids_km, mid_lat)
@@ -414,7 +417,7 @@ class NodeClusteringWorker(QThread):
             for i, (lat, lng) in enumerate(positions)
         ]
 
-        self.progress.emit(100, f"Consensus complete: {target_k} nodes")
+        self.progress.emit(100, tr("grid_builder.cluster_consensus_done", k=target_k))
         return ClusterResult(
             node_positions=named,
             n_clusters=target_k,
@@ -425,7 +428,7 @@ class NodeClusteringWorker(QThread):
 
     def _cluster_infrastructure(self) -> ClusterResult:
         """K-means on all infrastructure point positions."""
-        self.progress.emit(10, "Extracting infrastructure positions...")
+        self.progress.emit(10, tr("grid_builder.cluster_extracting_infra"))
         raw = _extract_infrastructure_points(self._features)
         return self._do_kmeans(raw, "infrastructure")
 
@@ -435,7 +438,7 @@ class NodeClusteringWorker(QThread):
             logger.warning("No bounds for building query; falling back")
             return self._cluster_infrastructure()
 
-        self.progress.emit(10, "Fetching building footprints...")
+        self.progress.emit(10, tr("grid_builder.cluster_fetching_buildings"))
 
         def _prog_cb(msg):
             self.progress.emit(20, msg)
@@ -449,7 +452,7 @@ class NodeClusteringWorker(QThread):
         except Exception as exc:
             logger.warning("Building fetch failed: %s; falling back", exc)
             self.progress.emit(
-                30, "Building fetch failed; using infrastructure...",
+                30, tr("grid_builder.cluster_buildings_failed"),
             )
             return self._cluster_infrastructure()
 
@@ -462,19 +465,19 @@ class NodeClusteringWorker(QThread):
                 len(centroids),
             )
             self.progress.emit(
-                30, "Too few buildings; using infrastructure...",
+                30, tr("grid_builder.cluster_too_few_buildings"),
             )
             return self._cluster_infrastructure()
 
         self.progress.emit(
-            40, f"Clustering {len(centroids)} building centroids...",
+            40, tr("grid_builder.cluster_clustering_buildings", n=len(centroids)),
         )
         raw = np.array(centroids)
         return self._do_kmeans(raw, "demand")
 
     def _cluster_regional(self) -> ClusterResult:
         """Grid-seeded K-means for uniform spatial coverage."""
-        self.progress.emit(10, "Preparing regional balance clustering...")
+        self.progress.emit(10, tr("grid_builder.cluster_preparing_regional"))
         raw = _extract_infrastructure_points(self._features)
         if len(raw) < 2:
             return self._do_kmeans(raw, "regional")
@@ -511,7 +514,7 @@ class NodeClusteringWorker(QThread):
             ))
         init = np.array(grid_pts[:k])
 
-        self.progress.emit(60, f"Running regional K-means (k={k})...")
+        self.progress.emit(60, tr("grid_builder.cluster_regional_kmeans", k=k))
         labels, centroids_km = _run_kmeans(projected, k, init=init)
 
         positions = _km_centroids_to_latlng(centroids_km, mid_lat)
@@ -546,13 +549,13 @@ class NodeClusteringWorker(QThread):
         mid_lat = float(np.mean(raw_points[:, 0]))
         projected = _project_to_km(raw_points)
 
-        self.progress.emit(50, "Determining optimal number of nodes...")
+        self.progress.emit(50, tr("grid_builder.cluster_optimal_k"))
         k = _determine_optimal_k(projected, self._min_nodes, self._max_nodes)
 
         if self._cancelled:
             return ClusterResult([], 0, criterion)
 
-        self.progress.emit(70, f"Running K-means (k={k})...")
+        self.progress.emit(70, tr("grid_builder.cluster_kmeans", k=k))
         labels, centroids_km = _run_kmeans(projected, k)
 
         positions = _km_centroids_to_latlng(centroids_km, mid_lat)
@@ -560,7 +563,7 @@ class NodeClusteringWorker(QThread):
             (lat, lng, f"Node {i}") for i, (lat, lng) in enumerate(positions)
         ]
 
-        self.progress.emit(100, f"Clustering complete: {k} nodes")
+        self.progress.emit(100, tr("grid_builder.cluster_done", k=k))
         return ClusterResult(
             node_positions=named,
             n_clusters=k,

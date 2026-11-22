@@ -494,6 +494,17 @@ class AnalysisPanel(QWidget):
         """Update the N-k summary label with results."""
         self._nk_summary_label.setText(text)
 
+    def set_nk_defaults(
+        self, depth: str, redistribution: str, pi_threshold: float,
+    ) -> None:
+        """Preset the N-k options from Global Settings > N-1 Security."""
+        for combo, value in ((self._nk_depth_combo, depth),
+                             (self._nk_redispatch_combo, redistribution)):
+            idx = combo.findData(value)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+        self._nk_pi_threshold.setValue(float(pi_threshold or 0.0))
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -519,10 +530,10 @@ class AnalysisPanel(QWidget):
         total_demand = sum(spin.value() for spin in self._demand_spins.values())
         balance = total_gen - total_demand
         sign = "+" if balance >= 0 else ""
-        self._summary_label.setText(
-            f"Gen: {total_gen:.1f} MW | Demand: {total_demand:.1f} MW | "
-            f"Balance: {sign}{balance:.1f} MW"
-        )
+        self._summary_label.setText(tr(
+            "analysis_panel.summary", gen=f"{total_gen:.1f}",
+            demand=f"{total_demand:.1f}", balance=f"{sign}{balance:.1f}",
+        ))
 
     def _bus_to_node(self, bus_id: str) -> int:
         bus = self._model.state.buses.get(bus_id)

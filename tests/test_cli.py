@@ -108,7 +108,6 @@ def minimal_config_path(tmp_path):
                         "fixed_cost": [6.6, 6.6],
                         "maintenance_cost": [28.8, 28.8],
                         "invest_cost": [3900000, 3900000],
-                        "invest_max_power": [0, 0],
                     },
                 },
                 "batteries": {},
@@ -125,6 +124,7 @@ def mock_esfex_config():
     """Create a mock ESFEXConfig object."""
     cfg = MagicMock()
     cfg.simulation_mode = "development"
+    cfg.unknown_keys = []
     cfg.solver = MagicMock()
     cfg.solver.name = "highs"
     cfg.solver.verbose = False
@@ -217,6 +217,16 @@ class TestValidateCommand:
         assert result.exit_code != 0
         assert "bad config" in result.output
 
+    def test_lists_unknown_keys(self, minimal_config_path):
+        """Misspelt keys are listed (the file is still valid: warn, don't reject)."""
+        cfg = yaml.safe_load(minimal_config_path.read_text())
+        cfg["systems"]["test_system"]["generators"]["gen_0"]["min_up_time"] = 2
+        minimal_config_path.write_text(yaml.dump(cfg))
+        result = runner.invoke(app, ["validate", "--config", str(minimal_config_path)])
+        assert result.exit_code == 0
+        assert "1 unknown key(s)" in re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert "systems.test_system.generators.gen_0.min_up_time" in result.output
+
     def test_shows_config_summary(self, minimal_config_path, mock_esfex_config):
         with patch(_PATCH_LOAD_CONFIG, return_value=mock_esfex_config):
             result = runner.invoke(app, ["validate", "--config", str(minimal_config_path)])
@@ -280,6 +290,49 @@ class TestRunCommand:
         assert result.exit_code == 0
         assert mock_esfex_config.solver.name == "cbc"
 
+    @pytest.mark.parametrize("flag,value", [("--mode", "operational"),
+                                            ("--solver", "mosek")])
+    def test_unknown_mode_or_solver_rejected(self, minimal_config_path,
+                                             mock_esfex_config, flag, value):
+        """--mode/--solver are checked against the schema before anything runs
+        (they used to be assigned to the config unchecked)."""
+        with patch(_PATCH_LOAD_CONFIG, return_value=mock_esfex_config) as load:
+            result = runner.invoke(
+                app, ["run", "--config", str(minimal_config_path), flag, value, "--dry-run"])
+        assert result.exit_code == 2
+        assert value in result.output
+        load.assert_not_called()
+
+    def test_every_schema_mode_and_solver_accepted(self, minimal_config_path,
+                                                   mock_esfex_config):
+        from esfex.cli import SIMULATION_MODES, SOLVER_NAMES
+        assert set(SIMULATION_MODES) == {"development", "unit_commitment",
+                                         "economic_dispatch"}
+        assert {"clarabel", "scs", "ipopt", "scip", "xpress"} <= set(SOLVER_NAMES)
+        with patch(_PATCH_LOAD_CONFIG, return_value=mock_esfex_config):
+            result = runner.invoke(app, [
+                "run", "--config", str(minimal_config_path),
+                "--mode", "economic_dispatch", "--solver", "Ipopt", "--dry-run"])
+        assert result.exit_code == 0
+        assert mock_esfex_config.simulation_mode == "economic_dispatch"
+        assert mock_esfex_config.solver.name == "ipopt"
+
+    def test_help_lists_every_solver(self):
+        from esfex.cli import SOLVER_NAMES
+        result = runner.invoke(app, ["run", "--help"], terminal_width=400)
+        out = " ".join(result.output.split())
+        for name in SOLVER_NAMES:
+            assert name in out
+
+    def test_verbose_header_without_mode(self, minimal_config_path, mock_esfex_config):
+        with patch(_PATCH_LOAD_CONFIG, return_value=mock_esfex_config):
+            result = runner.invoke(
+                app, ["run", "--config", str(minimal_config_path), "--dry-run", "--verbose"])
+        assert result.exit_code == 0
+        out = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert "Mode: None" not in out
+        assert "Mode: (from config)" in out
+
     def test_config_load_error_handled(self, minimal_config_path):
         from esfex.config.loader import ConfigLoadError
         with patch(_PATCH_LOAD_CONFIG, side_effect=ConfigLoadError("parse error")):
@@ -303,6 +356,42 @@ class TestRunCommand:
             )
         assert result.exit_code != 0
         assert "solver crashed" in result.output
+
+    def test_aborted_run_exits_nonzero(self, minimal_config_path, mock_esfex_config,
+                                       tmp_path):
+        """A run the master stops (round 36) used to print "Optimization
+        completed successfully!" and exit 0."""
+        from esfex.runner import RunAbortedError
+
+        mock_orch_instance = MagicMock()
+        mock_orch_instance.run.side_effect = RunAbortedError(
+            "the master problem found no plan")
+        with patch(_PATCH_LOAD_CONFIG, return_value=mock_esfex_config), \
+             patch(_PATCH_ORCHESTRATOR, return_value=mock_orch_instance):
+            result = runner.invoke(
+                app, ["run", "--config", str(minimal_config_path),
+                      "--output", str(tmp_path / "results")])
+        assert result.exit_code == 1
+        assert "found no plan" in result.output
+        assert "successfully" not in result.output
+
+    def test_failed_windows_exit_nonzero(self, minimal_config_path, mock_esfex_config,
+                                         tmp_path):
+        """A year whose dispatch windows failed is not a successful run."""
+        from esfex.runner import YearResults
+
+        mock_orch_instance = MagicMock()
+        mock_orch_instance.run.return_value = [
+            YearResults(year=2025, objective=1.0, solve_time=0.0, feasible=True),
+            YearResults(year=2026, objective=1.0, solve_time=0.0, feasible=False)]
+        with patch(_PATCH_LOAD_CONFIG, return_value=mock_esfex_config), \
+             patch(_PATCH_ORCHESTRATOR, return_value=mock_orch_instance):
+            result = runner.invoke(
+                app, ["run", "--config", str(minimal_config_path),
+                      "--output", str(tmp_path / "results")])
+        assert result.exit_code == 1
+        assert "2026" in result.output and "2025" not in result.output
+        assert "successfully" not in result.output
 
     def test_successful_run(self, minimal_config_path, mock_esfex_config, tmp_path):
         """Successful Orchestrator.run() should exit with code 0."""
@@ -337,7 +426,7 @@ class TestRunCommand:
                 ],
             )
         assert result.exit_code == 0
-        mock_orch_instance.run.assert_called_once_with(years=5)
+        mock_orch_instance.run.assert_called_once_with(years=5, start_year=None)
 
 
 # ---------------------------------------------------------------------------

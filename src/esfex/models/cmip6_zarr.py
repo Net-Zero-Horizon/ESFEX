@@ -163,7 +163,10 @@ def _open_regional(model, scenario, node_lats, node_lons, start, end):
 
 
 def _cell_to_hourly(sel, start, end):
-    """One grid cell's daily tasmax/tasmin (Kelvin) → {year: ndarray(8760)}."""
+    """One grid cell's daily tasmax/tasmin (Kelvin) → {year: ndarray(8760)}.
+
+    A 366-day year loses 29 February (ESFEX's 8760-h calendar), not
+    31 December."""
     import numpy as np
 
     from esfex.models.demand_projection import _daily_to_hourly_temperature
@@ -171,9 +174,12 @@ def _cell_to_hourly(sel, start, end):
     tmax = np.asarray(sel["tasmax"].values, dtype=np.float64) - 273.15
     tmin = np.asarray(sel["tasmin"].values, dtype=np.float64) - 273.15
     yrs = sel["time"].dt.year.values
+    feb29 = (sel["time"].dt.month.values == 2) & (sel["time"].dt.day.values == 29)
     out: dict[int, np.ndarray] = {}
     for yr in range(start, end + 1):
         m = yrs == yr
+        if int(m.sum()) == 366:
+            m &= ~feb29
         n = int(m.sum())
         if n < 300:                       # tolerate 360-day model calendars
             continue

@@ -26,36 +26,47 @@ class ResultsExporter:
 def to_csv(self, output_dir: Union[str, Path]) -> None
 ```
 
-Export all datasets from the HDF5 file as individual CSV files. Preserves group hierarchy as directory structure.
+Export the datasets of `summary_results/`, each `detailed_results/<scenario>/` and `demand/` as one CSV file per dataset.
 
 **Output structure:**
 
 ```
 output_dir/
-    summary/
+    summary/                      # /summary_results/*
+        year.csv
+        threshold.csv
+        feasible.csv
         total_cost.csv
-        gen_investment_power.csv
-        ...
-    year_2025_threshold_0.5/
+        renewable_penetration.csv
+        co2_emissions.csv
+        loss_of_load.csv
+        n1_security_cost.csv
+    year_2025_threshold_0/        # /detailed_results/year_2025_threshold_0/*
         generation/
-            Solar_PV.csv
-            Diesel.csv
+            Solar PV.csv          # one file per dataset in the group
             ...
         battery_charge/
-            Li_Ion.csv
-            ...
-        battery_discharge/
-            Li_Ion.csv
             ...
         curtailment.csv
         electricity_prices.csv
         CO2_emissions.csv
-        power_flow.csv
-    year_2026_threshold_0.5/
         ...
-    demand/
+    year_2026_threshold_0/
+        ...
+    demand/                       # /demand/*
+        year_2025_base_demand.csv
         ...
 ```
+
+How datasets are laid out:
+
+- 1-D and 2-D datasets keep their layout (for `[node, step]` datasets: one row per node, one column per step). A scalar dataset becomes a one-cell file.
+- 3-D datasets (`power_flow` and `transfer_margin` of multi-node runs, `[from_node, to_node, step]`) get one row per node pair: the first two columns are `from_node` and `to_node`, then one column per step. Other datasets with more than two axes are written the same way, with index columns named `dim_0`, `dim_1`, ...
+- Nested groups become nested folders (`technology_selling_prices/<gen>/prices_weights.csv`, `n1_security/trans_reserve_duals/*.csv`, `primary_energy/<section>/<fuel>.csv`).
+
+Limitations:
+
+- Attributes are not exported, so groups that hold only attributes (`cost_breakdown/`, `global/cost_breakdown/`) and all `mga/`, `global/`, `inter_system/` and `system_configuration/` content are left out.
 
 #### to_excel
 
@@ -63,7 +74,7 @@ output_dir/
 def to_excel(self, output_path: Union[str, Path]) -> None
 ```
 
-Export results to a single Excel workbook with multiple sheets: "Summary" (summary_results group) and "Generation" (first scenario's generation data, summed across nodes).
+Export results to a single Excel workbook with two sheets: "Summary" (the `summary_results` datasets, one row per year) and "Generation" (first scenario only: one column per generator, summed across nodes, one row per timestep).
 
 Uses `openpyxl` engine.
 
@@ -73,28 +84,32 @@ Uses `openpyxl` engine.
 def to_json(self, output_path: Union[str, Path]) -> None
 ```
 
-Export metadata and summary data to a JSON file with nested structure matching the HDF5 hierarchy. Scenario names and attributes are included; large hourly arrays are NOT exported to JSON (use CSV or HDF5 for full time-series data).
+Export the root attributes, the `summary_results` datasets and the attributes of each scenario to a JSON file. Attribute values are converted to strings. Time-series arrays are NOT exported to JSON (use CSV or HDF5 for full time-series data).
 
-**JSON structure:**
+**JSON structure** (for a runner results file):
 
 ```json
 {
   "metadata": {
     "creation_date": "2026-01-15T10:30:00",
-    "hours": "8760",
     "num_nodes": "4",
-    "num_generators": "7",
-    "num_batteries": "1"
+    "num_years": "25",
+    "simulation_mode": "development",
+    "years_range": "2025-2049",
+    "...": "..."
   },
   "summary": {
+    "year": [2025, 2026, ...],
     "total_cost": [1234567.0, ...],
-    "gen_investment_power": [...]
+    "...": [...]
   },
   "scenarios": {
-    "year_2025_threshold_0.5": {
+    "year_2025_threshold_0": {
       "year": "2025",
-      "threshold": "0.5",
-      "objective": "5432100.0"
+      "threshold": "0",
+      "total_cost": "5432100.0",
+      "renewable_penetration": "0.42",
+      "...": "..."
     }
   }
 }
@@ -105,7 +120,7 @@ Export metadata and summary data to a JSON file with nested structure matching t
 ```python
 from esfex.io.exporter import ResultsExporter
 
-exporter = ResultsExporter("results/isla_juventud.h5")
+exporter = ResultsExporter("results/isla_juventud_15012026_1030.h5")
 
 # Export to CSV directory
 exporter.to_csv("results/csv/")
@@ -134,7 +149,7 @@ def export_system_results(
 ) -> Path
 ```
 
-Write optimization results to an HDF5 file. Called by the runner after each simulation.
+Write optimization results to an HDF5 file in a legacy one-shot layout (data under `hourly_data/`). This is a standalone writer: the runner does not call it and writes its own files with `Orchestrator._initialize_hdf5()`, `_append_year_to_hdf5()` and `_finalize_hdf5()` (layout in [HDF5 Output Schema](../reference/hdf5-output-schema.md)). The layout below differs from runner files.
 
 **Parameters:**
 
@@ -166,10 +181,10 @@ results_20260215_143000.h5
         battery_names: ["Li_Ion"]
 
     detailed_results/
-        year_2025_threshold_0.5/
+        year_2025_threshold_0/
             [attrs]
                 year: 2025
-                threshold: 0.5
+                threshold: 0
                 objective: 5432100.0
                 total_generation: 1234000.0
                 renewable_generation: 987000.0
@@ -199,17 +214,17 @@ results_20260215_143000.h5
                 loss_of_inertia      [hours]          (units: GW*s)
 
                 capacity_factor/
-                    Solar_PV  [1]  (dimensionless)
-                    Wind      [1]  (dimensionless)
+                    Solar_PV  [array as given]  (dimensionless)
+                    Wind      [array as given]  (dimensionless)
                     ...
 
                 lcoe/
-                    Solar_PV  [1]  (USD/MWh)
-                    Diesel    [1]  (USD/MWh)
+                    Solar_PV  [array as given]  (USD/MWh)
+                    Diesel    [array as given]  (USD/MWh)
                     ...
 
                 vallcoe/
-                    Solar_PV  [1]  (USD/MWh)
+                    Solar_PV  [array as given]  (USD/MWh)
                     ...
 
                 technology_selling_prices/
@@ -226,16 +241,7 @@ All time-series datasets use gzip compression and chunked storage for efficient 
 
 ## Derived Metrics
 
-Derived metrics computed by the runner's `_compute_derived_metrics()` method:
-
-| Metric | Description | Formula |
-|--------|-------------|---------|
-| Capacity Factor | Fraction of maximum possible output | `total_generation / (rated_power * hours)` |
-| LCOE | Levelized cost of energy | `(fixed_cost + fuel_cost + maintenance) / total_generation` |
-| VALLCOE | Value-adjusted LCOE | `LCOE - (revenue_from_selling_price / total_generation)` |
-| Technology Selling Price | Revenue-weighted average price | `sum(price * generation) / sum(generation)` |
-
-Stored as per-generator datasets in the `capacity_factor/`, `lcoe/`, `vallcoe/`, and `technology_selling_prices/` groups.
+The derived metrics in runner files (`capacity_factor/`, `lcoe/`, `vallcoe/`, `battery_*` and `technology_selling_prices/`) are computed by the runner's `Orchestrator._compute_derived_metrics()`, not by this module. They are hourly `(nodes, hours)` arrays per unit, not scalars. See [Results Export § Derived Metrics](../user-guide/results-export.md#derived-metrics) for the formulas.
 
 ---
 
@@ -259,15 +265,14 @@ Read results from an HDF5 file back into Python.
 {
     "metadata": {
         "creation_date": "2026-02-15T14:30:00",
-        "hours": 8760,
         "num_nodes": 4,
-        ...
+        ...                       # root attributes as stored
     },
     "scenarios": {
-        "year_2025_threshold_0.5": {
-            "attrs": {"year": 2025, "threshold": 0.5, "objective": 5432100.0},
-            "hourly_data": {
-                "generation": {"Solar_PV": np.ndarray, "Diesel": np.ndarray, ...},
+        "year_2025_threshold_0": {
+            "attrs": {"year": 2025, "threshold": 0, "total_cost": 5432100.0, ...},
+            "hourly_data": {      # key name kept for both formats
+                "generation": {"Solar PV": np.ndarray, "Diesel": np.ndarray, ...},
                 "battery_charge": {"Li_Ion": np.ndarray},
                 "curtailment": np.ndarray,
                 "electricity_prices": np.ndarray,
@@ -279,16 +284,18 @@ Read results from an HDF5 file back into Python.
 ```
 
 Handles both HDF5 formats:
-- Incremental format: data directly in scenario group.
-- One-shot format: data nested in `hourly_data/` subgroup.
+- Incremental format (runner files): data directly in the scenario group.
+- One-shot format (`export_system_results`): data nested in an `hourly_data/` subgroup.
+
+Only datasets directly in the scenario group, or one group level below it, are read. Deeper datasets (for example `technology_selling_prices/<gen>/prices_weights`) are skipped.
 
 **Example:**
 
 ```python
 from esfex.io.exporter import read_results
 
-results = read_results("results/isla_juventud.h5")
-gen_data = results["scenarios"]["year_2030_threshold_0.5"]["hourly_data"]["generation"]
-solar_output = gen_data["Solar_PV"]  # np.ndarray shape (nodes, hours)
+results = read_results("results/isla_juventud_15012026_1030.h5")
+gen_data = results["scenarios"]["year_2030_threshold_0"]["hourly_data"]["generation"]
+solar_output = gen_data["Solar PV"]  # np.ndarray shape (nodes, hours)
 print(f"Peak solar: {solar_output.max():.1f} MW")
 ```

@@ -8,9 +8,11 @@ optimization models.
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,6 +21,16 @@ logger = logging.getLogger(__name__)
 # Global Julia instance
 _julia_instance = None
 _esfex_module = None
+
+
+_julia_logger = logging.getLogger("esfex.julia")
+
+
+def _forward_julia_log(level: int, message: str, milestone: bool) -> None:
+    """One Julia log record (``ESFEX.CallbackLogger``) → the ``esfex.julia``
+    logger, at its level. Benders progress lines are milestones, shown by
+    the basic console too."""
+    _julia_logger.log(int(level), str(message), extra={"milestone": bool(milestone)})
 
 
 def get_julia_path() -> Path:
@@ -78,6 +90,156 @@ def _sysimage_is_stale(sysimage: Path) -> bool:
     return False
 
 
+# ── Dependency repair ─────────────────────────────────────────────
+
+# Environment variable that allows ESFEX to re-resolve its Julia project
+# (``Pkg.resolve``) when ``Pkg.instantiate`` cannot install the recorded
+# dependencies. Off by default: re-resolving picks new package versions.
+RESOLVE_ENV_VAR = "ESFEX_JULIA_RESOLVE"
+
+# Julia messages that mean "a package is missing or not installed", the only
+# load errors a dependency repair can fix.
+_MISSING_PACKAGE_PATTERNS = (
+    re.compile(r"Package \S+ not found in current path"),
+    re.compile(r"is required but does not seem to be installed"),
+    # Julia's own hint for missing packages and missing artifacts
+    re.compile(r"Pkg\.instantiate\(\)"),
+)
+
+
+def _is_missing_package_error(err_str: str) -> bool:
+    """True when a module load error is a missing/uninstalled package."""
+    return any(p.search(err_str) for p in _MISSING_PACKAGE_PATTERNS)
+
+
+def _source_load_error_message(err_str: str) -> str:
+    """Message for a load error in the Julia sources (not a dependency)."""
+    # A ParseError names the exact line and column; otherwise the innermost
+    # "in expression starting at" is the failing file and line.
+    m = re.search(r"# Error @ (.+?:\d+:\d+)", err_str) or re.search(
+        r"in expression starting at (.+?:\d+)\s*$", err_str, re.MULTILINE
+    )
+    where = f" at {m.group(1)}" if m else ""
+    return (
+        f"the ESFEX Julia sources failed to load{where}. This is an error in "
+        "the Julia code, not a missing package, so the Julia environment was "
+        f"left unchanged.\n{err_str}"
+    )
+
+
+def _manifest_julia_version(julia_path: Path) -> Optional[str]:
+    """``julia_version`` recorded in the project's Manifest.toml, if any."""
+    manifest = julia_path / "Manifest.toml"
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(r'^julia_version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+def _major_minor(version: str) -> Optional[tuple[int, int]]:
+    m = re.match(r"\s*v?(\d+)\.(\d+)", version)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _warn_julia_version_mismatch(jl: Any, julia_path: Path) -> None:
+    """Warn once when the Manifest was resolved by another Julia minor version.
+
+    juliacall may run a different Julia than the ``julia`` on the PATH; a
+    Manifest resolved by one minor version can fail to load or instantiate
+    on another.
+    """
+    manifest_version = _manifest_julia_version(julia_path)
+    if manifest_version is None:
+        return
+    try:
+        running = str(jl.seval("string(VERSION)"))
+    except Exception:
+        return
+    mv, rv = _major_minor(manifest_version), _major_minor(running)
+    if mv is None or rv is None or mv == rv:
+        return
+    logger.warning(
+        "ESFEX's Julia Manifest.toml (%s) was resolved with Julia %s, but "
+        "juliacall runs Julia %s. Packages recorded for one Julia version may "
+        "fail to load or install on another; use the same Julia for both "
+        "(see the installation troubleshooting guide).",
+        julia_path / "Manifest.toml", manifest_version, running,
+    )
+
+
+def _backup_manifest(manifest: Path) -> Optional[Path]:
+    """Copy Manifest.toml to a timestamped backup next to it."""
+    if not manifest.exists():
+        return None
+    backup = manifest.with_name(
+        f"Manifest.toml.bak-{time.strftime('%Y%m%d-%H%M%S')}"
+    )
+    shutil.copy2(manifest, backup)
+    logger.warning("Backed up %s to %s", manifest, backup)
+    return backup
+
+
+def _repair_julia_dependencies(jl: Any, julia_path: Path, err_str: str) -> None:
+    """Install the ESFEX project's missing Julia dependencies.
+
+    Runs ``Pkg.instantiate()``, which installs the versions the Manifest
+    records. Manifest.toml is never deleted: it is backed up first, and a
+    re-resolve (``Pkg.resolve()``, which may pick other package versions)
+    runs only when the ``ESFEX_JULIA_RESOLVE`` environment variable is set.
+    """
+    manifest = julia_path / "Manifest.toml"
+    first_line = err_str.strip().splitlines()[0] if err_str.strip() else err_str
+    logger.warning(
+        "ESFEX Julia dependencies are missing (%s). Running Pkg.instantiate() "
+        "on %s", first_line, julia_path,
+    )
+    before = manifest.read_bytes() if manifest.exists() else None
+    backup = _backup_manifest(manifest)
+
+    def _settle_backup() -> bool:
+        """Drop a redundant backup; True when the Manifest changed."""
+        after = manifest.read_bytes() if manifest.exists() else None
+        if before is not None and after != before:
+            logger.warning(
+                "Manifest.toml changed during the dependency repair "
+                "(previous version: %s)", backup,
+            )
+            return True
+        if backup is not None:
+            backup.unlink(missing_ok=True)
+            logger.info("Manifest.toml unchanged; removed backup %s", backup)
+        return False
+
+    try:
+        jl.seval("Pkg.instantiate()")
+    except Exception as pkg_err:
+        if os.environ.get(RESOLVE_ENV_VAR, "").strip().lower() not in (
+            "1", "true", "yes", "on",
+        ):
+            changed = _settle_backup()
+            state = (
+                f"Manifest.toml changed; the previous version is in {backup}"
+                if changed else "Manifest.toml was left unchanged"
+            )
+            raise RuntimeError(
+                f"Pkg.instantiate() could not install ESFEX's Julia "
+                f"dependencies: {pkg_err}\n{state}. To re-resolve the Julia "
+                f"project (this may pick other package versions), set "
+                f"{RESOLVE_ENV_VAR}=1 and run ESFEX again, or see the "
+                "installation troubleshooting guide."
+            ) from pkg_err
+        logger.warning(
+            "Pkg.instantiate() failed: %s. %s is set: re-resolving the Julia "
+            "project with Pkg.resolve()%s", pkg_err, RESOLVE_ENV_VAR,
+            f" (previous Manifest kept at {backup})" if backup else "",
+        )
+        jl.seval("Pkg.resolve(); Pkg.instantiate()")
+    _settle_backup()
+    logger.warning("Julia dependency repair finished; reloading ESFEX")
+
+
 # ── Julia initialization ──────────────────────────────────────────
 
 
@@ -90,11 +252,15 @@ def initialize_julia(
     Initialize the Julia runtime and load the ESFEX module.
 
     Automatically detects and uses a sysimage if one exists.
-    Subsequent calls return the cached Julia instance.
+    Subsequent calls return the cached Julia instance. A load error caused
+    by a missing package runs ``Pkg.instantiate()`` (see
+    :func:`_repair_julia_dependencies`; Manifest.toml is never deleted);
+    any other load error is raised with the failing file and line.
 
     Args:
         threads: Number of threads for Julia
-        compile: Whether to precompile the ESFEX module
+        compile: Accepted for compatibility; not used (build a sysimage
+            with ``esfex precompile`` instead)
         verbose: Enable verbose output
 
     Returns:
@@ -164,8 +330,12 @@ def initialize_julia(
         solvers_env = str(get_solvers_env_path()).replace("\\", "/")
         jl.seval(f'("{solvers_env}" in LOAD_PATH) || push!(LOAD_PATH, "{solvers_env}")')
 
-        # Try to load the ESFEX module directly first
-        # Only run instantiate if dependencies are missing
+        _warn_julia_version_mismatch(jl, julia_path)
+
+        # Load the ESFEX module. Only a missing/uninstalled package triggers a
+        # dependency repair; any other load error (syntax error, error thrown
+        # by ESFEX's own top-level code) is reported as-is and the Julia
+        # environment is left untouched.
         logger.info("Loading ESFEX Julia module...")
         try:
             jl.seval(f'include("{jl_src}")')
@@ -176,25 +346,25 @@ def initialize_julia(
                 # Module already loaded in this Julia session — just use it
                 logger.info("ESFEX module already loaded, reusing existing.")
                 jl.seval("using .ESFEX")
-            elif "LoadError" in err_str or "ArgumentError" in err_str:
-                # Dependencies might be missing, try to instantiate
-                logger.info("Installing missing Julia dependencies...")
+            elif _is_missing_package_error(err_str):
+                _repair_julia_dependencies(jl, julia_path, err_str)
                 try:
-                    jl.seval("Pkg.instantiate()")
-                except Exception as pkg_err:
-                    logger.warning(
-                        "Pkg.instantiate() failed: %s. "
-                        "Deleting Manifest.toml and retrying...", pkg_err,
-                    )
-                    manifest = julia_path / "Manifest.toml"
-                    if manifest.exists():
-                        manifest.unlink()
-                    jl.seval("Pkg.resolve(); Pkg.instantiate()")
-                # Retry loading
-                jl.seval(f'include("{jl_src}")')
-                jl.seval("using .ESFEX")
+                    jl.seval(f'include("{jl_src}")')
+                    jl.seval("using .ESFEX")
+                except Exception as retry_error:
+                    raise RuntimeError(
+                        "the ESFEX Julia module still fails to load after "
+                        "Pkg.instantiate(). A package used by the code but "
+                        "missing from Project.toml must be added to it; to "
+                        f"re-resolve the project set {RESOLVE_ENV_VAR}=1.\n"
+                        f"{retry_error}"
+                    ) from None
             else:
-                raise
+                raise RuntimeError(_source_load_error_message(err_str)) from None
+
+        # Julia's @info/@warn go to the Python logger (console and log
+        # file) instead of the bare process stderr
+        jl.ESFEX.set_log_callback(_forward_julia_log)
 
         # Pre-import optional solvers so their MOI methods live in the current
         # world age (avoids Julia 1.12 world-age errors when ESFEX lazy-loads
@@ -215,7 +385,7 @@ def initialize_julia(
         return jl
 
     except Exception as e:
-        raise RuntimeError(f"Julia initialization failed: {e}")
+        raise RuntimeError(f"Julia initialization failed: {e}") from e
 
 
 def get_julia() -> Any:

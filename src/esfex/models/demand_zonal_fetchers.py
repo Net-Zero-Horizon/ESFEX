@@ -1,7 +1,7 @@
 """Zonal demand fetchers (Option B, Phase 1 greenfield).
 
 These fetchers produce **per-zone** hourly load data instead of a single
-national total. Each zone becomes its own TFT training sample with
+national total. Each zone becomes its own training sample with
 features sampled at the zone's population-weighted centroid.
 
 Output: zonal Parquet files at
@@ -37,6 +37,23 @@ from esfex.paths import DEMAND_DATASET_DIR, DEMAND_ERA5_DIR, NEW_SOURCES_DIR
 
 logger = logging.getLogger(__name__)
 
+# Time base of each zonal source's rows (see demand_real_data.SOURCE_TIME_BASES);
+# write_zonal_parquet puts them on the local civil time of each zone centroid.
+# - TWN / THA / BRA: naive civil-time stamps, reindexed on that wall clock
+#   (_align_year_8760: a repeated wall hour keeps its first occurrence, a
+#   skipped one holds the hour after; ONS Brazil had DST until 2019).
+# - CHN: an hour index 1..8760 in Beijing time.
+# - AUS NEM: market time, AEST (UTC+10) all year, in every region.
+# - CAN IESO: Eastern Standard Time (UTC-5) all year.
+ZONAL_TIME_BASES: dict[str, str] = {
+    "TWN": "Asia/Taipei",
+    "THA": "Asia/Bangkok",
+    "CHN": "Asia/Shanghai",
+    "BRA": "America/Sao_Paulo",
+    "AUS": "Etc/GMT-10",
+    "CAN": "Etc/GMT+5",
+}
+
 
 def _resample_hourly(df: pd.DataFrame, dt_col: str = "datetime") -> pd.DataFrame:
     """Force hourly resolution by taking the mean over each clock hour."""
@@ -47,12 +64,28 @@ def _resample_hourly(df: pd.DataFrame, dt_col: str = "datetime") -> pd.DataFrame
     return df.resample("1h", label="left").mean()
 
 
-def _align_year_8760(series: pd.Series, year: int) -> Optional[np.ndarray]:
-    """Clip a datetime-indexed Series to the year, drop Feb 29, pad to 8760."""
+def _align_year_8760(series: pd.Series, year: int,
+                     time_zone: Optional[str] = None) -> Optional[np.ndarray]:
+    """Clip a datetime-indexed Series to the year, drop Feb 29, pad to 8760.
+
+    The index is wall time of the source. A label repeated when clocks fall
+    back keeps its first occurrence (the order the caller gives, sorted
+    stably); with *time_zone*, a wall hour skipped when they spring forward
+    holds the hour after it. That is the convention of
+    ``model_clock.to_local_time``. Other gaps of up to 6 h are filled
+    forward (then backward).
+    """
+    series = series[~series.index.duplicated(keep="first")]
     start = pd.Timestamp(f"{year}-01-01 00:00:00")
     end = pd.Timestamp(f"{year}-12-31 23:00:00")
     hourly_index = pd.date_range(start, end, freq="1h")
     series = series.reindex(hourly_index)
+    if time_zone is not None:
+        skipped = hourly_index.tz_localize(
+            time_zone, nonexistent="NaT",
+            ambiguous=np.ones(len(hourly_index), dtype=bool)).isna()
+        if skipped.any():
+            series = series.where(~skipped, series.shift(-1))
     # Remove Feb 29 for leap years (dataset-wide convention)
     if pd.Timestamp(f"{year}-01-01").is_leap_year:
         mask = ~((hourly_index.month == 2) & (hourly_index.day == 29))
@@ -74,41 +107,15 @@ def _ensure_era5_for_zone(
     iso3: str, zone: str, year: int, lat: float, lon: float,
     era5_dir: Optional[Path] = None,
 ) -> Optional[np.ndarray]:
-    """Fetch ERA5 temperature for (iso3, zone, year) if not already cached.
-
-    Uses the same open-meteo archive API the national fetcher uses, but
-    writes to ``era5_{zone}_{year}.npy`` so it survives alongside the
-    national cache.
-    """
+    """ERA5 temperature (UTC, the whole calendar year) at a zone centroid,
+    cached as ``{era5_dir}/{iso3}/era5_utc_{zone}_{year}.npy``."""
     if era5_dir is None:
         era5_dir = DEMAND_ERA5_DIR
-    country_dir = era5_dir / iso3
-    country_dir.mkdir(parents=True, exist_ok=True)
-    zone_cache = country_dir / f"era5_{zone}_{year}.npy"
-    if zone_cache.exists():
-        return np.load(zone_cache)
-
-    # _fetch_era5_year writes to era5_{year}.npy — we need era5_{zone}_{year}.npy.
-    # Reuse its HTTP logic but write to the zonal filename.
-    import requests
-    url = (
-        "https://archive-api.open-meteo.com/v1/archive"
-        f"?latitude={lat:.4f}&longitude={lon:.4f}"
-        f"&start_date={year}-01-01&end_date={year}-12-31"
-        "&hourly=temperature_2m&timezone=UTC"
-    )
-    try:
-        resp = requests.get(url, timeout=60)
-        resp.raise_for_status()
-        temps = resp.json().get("hourly", {}).get("temperature_2m", [])
-        if len(temps) >= 8760:
-            arr = np.array(temps[:8760], dtype=np.float64)
-            np.save(zone_cache, arr)
-            return arr
-    except Exception as exc:
-        logger.warning("ERA5 %s/%s %d (%.2f, %.2f) failed: %s",
-                       iso3, zone, year, lat, lon, exc)
-    return None
+    arr = _fetch_era5_year(lat, lon, year, era5_dir / iso3, zone=zone)
+    if arr is None:
+        logger.warning("ERA5 %s/%s %d (%.2f, %.2f) failed", iso3, zone, year,
+                       lat, lon)
+    return arr
 
 
 def _update_manifest_zones(
@@ -195,7 +202,7 @@ def fetch_taiwan_zonal(
             series = hourly[zone_id] if zone_id in hourly.columns else None
             if series is None:
                 continue
-            arr = _align_year_8760(series, year)
+            arr = _align_year_8760(series, year, ZONAL_TIME_BASES["TWN"])
             if arr is None or np.nanmean(arr) <= 0:
                 logger.info("TWN %s %d: insufficient data, skipping", zone_id, year)
                 continue
@@ -204,7 +211,9 @@ def fetch_taiwan_zonal(
             if download_era5:
                 temp = _ensure_era5_for_zone("TWN", zone_id, year,
                                              centroid.lat, centroid.lon)
-            write_zonal_parquet("TWN", zone_id, year, arr, temp, cache_dir)
+            write_zonal_parquet("TWN", zone_id, year, arr, temp, cache_dir,
+                                lat=centroid.lat, lon=centroid.lon,
+                                time_base=ZONAL_TIME_BASES["TWN"])
             zones_out.setdefault(zone_id, {"lat": centroid.lat,
                                            "lon": centroid.lon,
                                            "source": "Taipower",
@@ -265,7 +274,7 @@ def fetch_thailand_zonal(
             centroid = centroids.get(zone_id)
             if col not in hourly.columns or centroid is None:
                 continue
-            arr = _align_year_8760(hourly[col], year)
+            arr = _align_year_8760(hourly[col], year, ZONAL_TIME_BASES["THA"])
             if arr is None or np.nanmean(arr) <= 0:
                 logger.info("THA %s %d: insufficient data, skipping",
                             zone_id, year)
@@ -274,7 +283,9 @@ def fetch_thailand_zonal(
             if download_era5:
                 temp = _ensure_era5_for_zone("THA", zone_id, year,
                                              centroid.lat, centroid.lon)
-            write_zonal_parquet("THA", zone_id, year, arr, temp, cache_dir)
+            write_zonal_parquet("THA", zone_id, year, arr, temp, cache_dir,
+                                lat=centroid.lat, lon=centroid.lon,
+                                time_base=ZONAL_TIME_BASES["THA"])
             zones_out.setdefault(zone_id, {"lat": centroid.lat,
                                            "lon": centroid.lon,
                                            "source": "EGAT",
@@ -353,7 +364,9 @@ def fetch_china_zonal(
         if download_era5:
             temp = _ensure_era5_for_zone("CHN", code, year,
                                          centroid.lat, centroid.lon)
-        write_zonal_parquet("CHN", code, year, arr, temp, cache_dir)
+        write_zonal_parquet("CHN", code, year, arr, temp, cache_dir,
+                            lat=centroid.lat, lon=centroid.lon,
+                            time_base=ZONAL_TIME_BASES["CHN"])
         zones_out[code] = {"lat": centroid.lat, "lon": centroid.lon,
                            "source": "CSG/SGCC (2018 est.)",
                            "centroid_method": centroid.method,
@@ -430,15 +443,17 @@ def fetch_brazil_zonal(
                 continue
             # Build hourly series, drop Feb 29 for leap consistency.
             series = (year_df.set_index("din_instante")
-                      ["val_cargaenergiahomwmed"].sort_index())
-            arr = _align_year_8760(series, int(yr))
+                      ["val_cargaenergiahomwmed"].sort_index(kind="stable"))
+            arr = _align_year_8760(series, int(yr), ZONAL_TIME_BASES["BRA"])
             if arr is None or np.nanmean(arr) <= 0:
                 continue
             temp = None
             if download_era5:
                 temp = _ensure_era5_for_zone("BRA", zone_id, int(yr),
                                              centroid.lat, centroid.lon)
-            write_zonal_parquet("BRA", zone_id, int(yr), arr, temp, cache_dir)
+            write_zonal_parquet("BRA", zone_id, int(yr), arr, temp, cache_dir,
+                                lat=centroid.lat, lon=centroid.lon,
+                                time_base=ZONAL_TIME_BASES["BRA"])
             zones_out.setdefault(zone_id, {"lat": centroid.lat,
                                            "lon": centroid.lon,
                                            "source": "ONS (HF)",
@@ -534,14 +549,16 @@ def fetch_aemo_nem_zonal(
                       ["TOTALDEMAND"].astype(float).sort_index())
             # 5-min → 1h
             hourly = series.resample("1h", label="left").mean()
-            arr = _align_year_8760(hourly, year)
+            arr = _align_year_8760(hourly, year, ZONAL_TIME_BASES["AUS"])
             if arr is None or np.nanmean(arr) <= 0:
                 continue
             temp = None
             if download_era5:
                 temp = _ensure_era5_for_zone("AUS", region, year,
                                              centroid.lat, centroid.lon)
-            write_zonal_parquet("AUS", region, year, arr, temp, cache_dir)
+            write_zonal_parquet("AUS", region, year, arr, temp, cache_dir,
+                                lat=centroid.lat, lon=centroid.lon,
+                                time_base=ZONAL_TIME_BASES["AUS"])
             zones_out.setdefault(region, {"lat": centroid.lat,
                                           "lon": centroid.lon,
                                           "source": "AEMO NEM",
@@ -638,14 +655,17 @@ def fetch_ieso_ontario_zonal(
             if zone_id not in df.columns:
                 logger.warning("IESO %d: zone %s not in CSV", year, zone_id)
                 continue
-            series = df.set_index("timestamp")[zone_id].astype(float).sort_index()
-            arr = _align_year_8760(series, year)
+            series = (df.set_index("timestamp")[zone_id].astype(float)
+                      .sort_index(kind="stable"))
+            arr = _align_year_8760(series, year, ZONAL_TIME_BASES["CAN"])
             if arr is None or np.nanmean(arr) <= 0:
                 continue
             temp = None
             if download_era5:
                 temp = _ensure_era5_for_zone("CAN", zone_id, year, lat, lon)
-            write_zonal_parquet("CAN", zone_id, year, arr, temp, cache_dir)
+            write_zonal_parquet("CAN", zone_id, year, arr, temp, cache_dir,
+                                lat=lat, lon=lon,
+                                time_base=ZONAL_TIME_BASES["CAN"])
             zones_out.setdefault(zone_id, {"lat": lat, "lon": lon,
                                            "source": "IESO",
                                            "centroid_method": "hardcoded",
