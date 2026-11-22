@@ -32,6 +32,12 @@ Per-release notes are also published on the
   the drawn network wherever a node boundary crosses a substation (the
   reduced Cuba case lost 10 of its 38 transformers). They are drawn as
   links between the two blocks.
+- **The single-line diagram's legend shows a neutral line.** The
+  Transmission Line sample took the colour of the first line drawn (red
+  on Hokkaido, where that line joins buses of different voltages); lines
+  take the colour of their voltage, given under Voltage Levels. Lines
+  between buses of different voltages, drawn red and dashed, have their
+  own legend row.
 
 ### Changed
 
