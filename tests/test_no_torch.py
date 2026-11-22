@@ -78,8 +78,12 @@ def test_package_and_train_demand_model_help_work_with_torch_blocked():
         assert not [m for m in sys.modules if m.split(".")[0] in BLOCKED]
         print("OK")
     """)
-    env = {**os.environ, "PYTHONPATH": str(_PKG_DIR.parent),
-           "QT_QPA_PLATFORM": "offscreen", "COLUMNS": "200", "NO_COLOR": "1"}
+    # Plain help text: Typer forces colour under GITHUB_ACTIONS, FORCE_COLOR or
+    # PY_COLORS whatever NO_COLOR says, and the colour codes split "--folds".
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GITHUB_ACTIONS", "FORCE_COLOR", "PY_COLORS")}
+    env.update({"PYTHONPATH": str(_PKG_DIR.parent), "QT_QPA_PLATFORM": "offscreen",
+                "COLUMNS": "200", "NO_COLOR": "1", "_TYPER_FORCE_DISABLE_TERMINAL": "1"})
     proc = subprocess.run([sys.executable, "-c", code], capture_output=True,
                           text=True, env=env, timeout=300)
     assert proc.returncode == 0, proc.stdout + proc.stderr

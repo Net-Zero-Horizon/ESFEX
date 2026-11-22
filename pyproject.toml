@@ -96,6 +96,10 @@ dependencies = [
     "zarr>=2.14.0",
     # Demand estimation (former [ml]):
     "xgboost>=2.0.0",
+    # Holiday predictors of the demand density model. Pinned to the release
+    # its training table was built with: later releases move holidays (India
+    # in 0.109) and the predictions drift from the article's.
+    "holidays==0.94",
 ]
 
 [project.optional-dependencies]

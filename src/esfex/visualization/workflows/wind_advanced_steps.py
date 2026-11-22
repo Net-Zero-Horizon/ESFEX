@@ -359,7 +359,7 @@ class _SensitivityWorker(QThread):
         self._max_workers = max_workers
 
     def run(self):
-        from windrex import compute_lcoe_sensitivity
+        from windrex.economics.sensitivity import compute_lcoe_sensitivity
         lcoes = compute_lcoe_sensitivity(
             self._inputs, self._param_name, self._sweep.tolist(),
             max_workers=self._max_workers,
@@ -535,7 +535,7 @@ class WindFinancialStep(QWidget):
             self._spin_lifetime.setValue(preset["lifetime"])
 
     def _get_inputs(self):
-        from windrex import WindFinancialInputs
+        from windrex.economics.financial import WindFinancialInputs
         return WindFinancialInputs(
             capacity_mw=self._capacity_mw,
             capacity_factor=self._capacity_factor,

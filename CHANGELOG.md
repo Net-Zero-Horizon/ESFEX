@@ -1763,6 +1763,16 @@ Per-release notes are also published on the
 
 ### Fixed
 
+- **The wind workflows run with windrex from PyPI.** The Wind wizard, its
+  advanced steps and the availability generator's turbine list imported
+  names that windrex 0.1.1 does not export at the top of the package, so
+  they stopped with an `ImportError`. They import them from their modules.
+
+- **The demand model gets its holidays.** `holidays` was used but not a
+  dependency: without it every day was a working day. It is now a
+  dependency, pinned to 0.94, the release the model's training table was
+  built with (0.109 moves India's holidays).
+
 - **The Marginal Technology chart says what its colours mean.** A legend
   names the technology of each colour, and each panel has a title. The
   hourly strip was painted with Plotly's default colours instead of the
