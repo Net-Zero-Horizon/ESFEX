@@ -38,6 +38,14 @@ Per-release notes are also published on the
   take the colour of their voltage, given under Voltage Levels. Lines
   between buses of different voltages, drawn red and dashed, have their
   own legend row.
+- **The Grid Builder gives a transformer to every voltage a station's lines
+  run at.** A line end snaps to a bus of its own voltage or to an untagged
+  one, so an untagged substation collected its 220 and 110 kV lines on one
+  bus (Boca de Jaruco, Cuba), and a chain of untagged buses between a 220 kV
+  and a 110 kV line ended on a bus with both (TE Nuevitas). The bus took
+  the highest voltage and the other lines joined two voltages with no
+  transformer. Each other voltage now gets a bus at the same place and the
+  substation's transformer; the build report lists them.
 
 ### Changed
 

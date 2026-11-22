@@ -97,6 +97,7 @@ class ParseResult:
         "decimal_slip": "grid_builder.voltage_rule_decimal_slip",
         "isolated_mv": "grid_builder.voltage_rule_isolated_mv",
         "unreached_mv": "grid_builder.voltage_rule_unreached_mv",
+        "split_by_line_voltage": "grid_builder.voltage_rule_split_by_line_voltage",
     }
 
     def voltage_summary(self) -> str:
