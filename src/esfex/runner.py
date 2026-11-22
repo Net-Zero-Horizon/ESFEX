@@ -79,7 +79,8 @@ if sys.platform == "win32":
 console = Console(force_terminal=True)
 
 
-def _node_link_impedances(lines, buses, dc_config, s_base_mva) -> dict[tuple[int, int], tuple[float, float]]:
+def _node_link_impedances(lines, buses, dc_config, s_base_mva,
+                          transformers=()) -> dict[tuple[int, int], tuple[float, float]]:
     """Equivalent series (R, X) in p.u. of the bus-level lines between each node pair.
 
     The master problem joins nodes with one synthetic link per pair; this gives
@@ -87,17 +88,30 @@ def _node_link_impedances(lines, buses, dc_config, s_base_mva) -> dict[tuple[int
     flow F in proportion to 1/X: the equivalent reactance is 1 / Σ 1/X_k, and
     the loss F² Σ R_k s_k² with s_k = (1/X_k)/Σ 1/X gives the equivalent R.
     R and X are those of each whole line (all its circuits), as in the
-    dispatch network.
+    dispatch network. A transformer whose ends sit in two nodes joins them
+    too, with the R and X the bridge gives it (convert_transformer_data).
     """
+    def _ends(br):
+        a = buses[br.from_bus].parent_node if br.from_bus is not None and br.from_bus < len(buses) else br.from_node
+        b = buses[br.to_bus].parent_node if br.to_bus is not None and br.to_bus < len(buses) else br.to_node
+        return a, b
+
     by_pair: dict[tuple[int, int], list[tuple[float, float]]] = {}
     for line in lines:
-        a = buses[line.from_bus].parent_node if line.from_bus is not None and line.from_bus < len(buses) else line.from_node
-        b = buses[line.to_bus].parent_node if line.to_bus is not None and line.to_bus < len(buses) else line.to_node
+        a, b = _ends(line)
         if a == b:
             continue
         x = line_reactance_pu(line, line.length_km, dc_config, s_base_mva)
         by_pair.setdefault((min(a, b), max(a, b)), []).append(
             (line.resistance_pu or 0.0, x))
+    for tr in transformers:
+        a, b = _ends(tr)
+        if a == b:
+            continue
+        z = float(tr.impedance_pu)
+        r = tr.resistance_pu if tr.resistance_pu is not None else tr.losses_fraction * z
+        x = math.sqrt(max(z * z - r * r, 1e-12))
+        by_pair.setdefault((min(a, b), max(a, b)), []).append((r, x))
     result = {}
     for pair, rx in by_pair.items():
         total_b = sum(1.0 / x for _, x in rx)
@@ -1986,7 +2000,7 @@ class Orchestrator:
         # follow the network the dispatch sees.
         master_lines: list[TransmissionLineGeo] = []
         link_z = _node_link_impedances(merged_lines_geo, merged_buses, base.dc_power_flow,
-                                       system_s_base(base))
+                                       system_s_base(base), merged_transformers)
         link_flow_cost = _link_flow_costs(electrical_links, offsets)
         line_idx = 0
         for i in range(total_nodes):

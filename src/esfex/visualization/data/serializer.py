@@ -2933,7 +2933,9 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
         if any(c["latitude"] != 0.0 or c["longitude"] != 0.0 for c in coords):
             sys_dict["nodes"]["node_coordinates"] = coords
 
-    # Rebuild adjacency matrix (SUM parallel lines between same node pair).
+    # Rebuild adjacency matrix (SUM parallel lines and transformers between
+    # the same node pair: a transformer whose ends sit in two nodes carries
+    # power between them as much as a line does).
     # Derive each end's node from its BUS (bus.parent_node is the authoritative
     # mapping and is kept in sync when nodes are removed); the line's own
     # from_node/to_node are deprecated mirrors that go stale on any index shift
@@ -2946,6 +2948,12 @@ def _apply_gui_state_to_dict(state: GuiSystemState, sys_dict: dict):
         if 0 <= fn < n and 0 <= tn < n:
             connections[fn * n + tn] += line.capacity_mw
             connections[tn * n + fn] += line.capacity_mw
+    for tr in state.transformers:
+        fn = _bus_parent.get(tr.from_bus, tr.from_node)
+        tn = _bus_parent.get(tr.to_bus, tr.to_node)
+        if fn != tn and 0 <= fn < n and 0 <= tn < n:
+            connections[fn * n + tn] += tr.rated_power_mva
+            connections[tn * n + fn] += tr.rated_power_mva
     sys_dict.setdefault("nodes", {})
     sys_dict["nodes"]["nodes_connections"] = connections
     sys_dict["nodes"]["num_nodes"] = n
