@@ -1532,6 +1532,7 @@ function _edgeLabel(type) {
     switch (type) {
         case 'transformer': return _t('web.sld.edge_transformer');
         case 'converter':   return _t('web.sld.edge_converter');
+        case 'mismatch':    return _t('web.sld.edge_voltage_mismatch');
         default:            return _t('web.sld.edge_transmission');
     }
 }
@@ -1541,6 +1542,7 @@ var _edgeSpecs = {
     'transmission': { dash: 'none', sw: 2.5, sym: null },
     'transformer':  { dash: 'none', sw: 2,   sym: 'trafo' },
     'converter':    { dash: '6,3',  sw: 2,   sym: 'conv' },
+    'mismatch':     { dash: '6,4',  sw: 2.5, sym: null },
 };
 
 /**
@@ -1565,17 +1567,27 @@ function _drawLegend(data) {
         });
     });
 
+    // A line takes the colour of its voltage (the Voltage Levels rows), so
+    // its sample is neutral: it took the colour of the first line drawn,
+    // red when that line was a voltage mismatch. A mismatch line (red,
+    // dashed) gets its own row.
     var edgeTypes = [];
     var edgeSeen = {};
+    var mismatch = null;
     var edges = (data.elkGraph && data.elkGraph.edges) || [];
     edges.forEach(function(e) {
         var p = e.properties || {};
         var et = p.edgeType || 'transmission';
+        if (p.voltageMismatch && !mismatch) {
+            mismatch = { type: 'mismatch', color: p.color || T.edgeLine };
+        }
         if (!edgeSeen[et]) {
             edgeSeen[et] = true;
-            edgeTypes.push({ type: et, color: p.color || T.edgeLine });
+            edgeTypes.push({ type: et,
+                             color: et === 'transmission' ? T.edgeLine : (p.color || T.edgeLine) });
         }
     });
+    if (mismatch) edgeTypes.push(mismatch);
 
     var voltages = [];
     var seenKv = {};

@@ -5109,6 +5109,7 @@
       "edge_transmission": "Línea de transmisión",
       "edge_transformer": "Transformador",
       "edge_converter": "Convertidor",
+      "edge_voltage_mismatch": "Tensiones distintas",
       "legend": "Leyenda",
       "legend_equipment": "Equipos",
       "legend_connections": "Conexiones",

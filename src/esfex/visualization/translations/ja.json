@@ -5109,6 +5109,7 @@
       "edge_transmission": "送電線",
       "edge_transformer": "変圧器",
       "edge_converter": "変換器",
+      "edge_voltage_mismatch": "電圧不一致",
       "legend": "凡例",
       "legend_equipment": "機器",
       "legend_connections": "接続",
