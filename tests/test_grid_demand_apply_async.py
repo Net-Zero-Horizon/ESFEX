@@ -59,14 +59,17 @@ def test_apply_runs_in_the_background(tmp_path):
     w, step, model = _wizard(tmp_path)
     busy = []
     step.busyChanged.connect(busy.append)
+    # Every value the bar takes: polling it between event loops can miss
+    # them all when one loop delivers the queued updates at once.
+    seen = set()
+    step._apply_progress.valueChanged.connect(seen.add)
     t0 = time.monotonic()
     step._apply_all()
     assert time.monotonic() - t0 < 1.0          # returned at once
     assert busy == [True]
     assert not w._btn_next.isEnabled()          # Close held while it runs
     assert not step._btn_apply.isEnabled()
-    seen = set()
-    _wait(app, lambda: seen.add(step._apply_progress.value()) or busy == [True, False])
+    _wait(app, lambda: busy == [True, False])
     assert seen - {0, 100}                      # it showed intermediate progress
     assert step._apply_progress.value() == 100
     assert w._btn_next.isEnabled()
