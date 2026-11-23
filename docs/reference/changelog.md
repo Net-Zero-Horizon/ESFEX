@@ -4,6 +4,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
 
 ## [Unreleased]
 
+### Fixed
+
+- **Grid Builder: the systems of a project no longer replace each other's
+  demand and availability files.** The demand step wrote
+  `demand_<node>.csv` and the build `<generator id>_availability.csv` into
+  folders every system of the project shares, so two systems with a node of
+  the same name kept one file, and both had the demand of whichever was
+  forecast last. The nodes the naming leaves as `Node 17`, `Node 18`, ...
+  repeat in every system built in a project. The file names now carry the
+  system (`demand_<system>_<node>.csv`,
+  `<system>_<generator id>_availability.csv`). A system built before keeps its
+  files as they are; forecast its demand again to separate them.
+- **Grid Builder: demand and availability files go to the project's folder.**
+  The wizard looked for the project's path on its own window, which has none,
+  so every file went to `demand/` and `availability/` under the directory the
+  Studio was started from, whatever project was open, and only reached the
+  project when it was exported. They are now written under the folder the
+  project was loaded from (the working directory only for a project with no
+  file yet).
+
 ## [0.4.0] — 2026-11-20
 
 ### Highlights

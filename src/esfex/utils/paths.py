@@ -16,8 +16,16 @@ against a path that came in from configuration data.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Union
+
+
+def file_name_part(name: str) -> str:
+    """*name* as a part of a file name: letters, digits, ``.``, ``_`` and ``-``
+    kept, every other run of characters turned into one ``_``, none at the
+    ends. Empty when nothing is left."""
+    return re.sub(r"[^0-9A-Za-z._-]+", "_", name or "").strip("_")
 
 
 def safe_resolve_under(root: Union[str, Path], candidate: Union[str, Path]) -> Path:

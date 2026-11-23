@@ -43,6 +43,10 @@ class BuildParams:
     use_weather: bool
     cfg_path: str | None = None
     reconnect_max_km: float = 0.0
+    # Folder of the project (``project_data_dir``): the availability profiles
+    # go to its ``availability/``. Without it, the folder of ``cfg_path``, else
+    # the working directory.
+    data_dir: str | None = None
 
 
 class GridBuildWorker(QThread):
@@ -249,8 +253,10 @@ class GridBuildWorker(QThread):
                 from esfex.plugins.availability_generator.grid_builder_hook import (
                     generate_for_grid_build,
                 )
-                out_dir = (Path(p.cfg_path).parent / "availability"
-                           if p.cfg_path else Path.cwd() / "availability")
+                base = (Path(p.data_dir) if p.data_dir
+                        else Path(p.cfg_path).parent if p.cfg_path
+                        else Path.cwd())
+                out_dir = base / "availability"
                 # Weather downloads are paced to Open-Meteo's rate limit and
                 # can take minutes on large systems: surface their progress.
                 def _avail_progress(_pct, msg):

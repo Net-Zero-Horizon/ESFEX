@@ -137,7 +137,8 @@ def generate_for_grid_build(
         ``latitude`` / ``longitude`` / ``fuel`` populated.
     output_dir
         Where to write CSVs (created if missing).  One file per
-        generator: ``<instance_id>_availability.csv``.
+        generator: ``<system>_<instance_id>_availability.csv`` (without the
+        prefix for a state with no name).
     use_weather_data
         When True, wind and solar generators query the weather backend
         for their (lat, lng) — realistic, but network-bound. Queries are
@@ -218,6 +219,11 @@ def generate_for_grid_build(
         compute_constant_cf,
     )
 
+    # The file names carry the system's name: the systems of a project write to
+    # the same folder, and generator ids such as ``gen_wind_4`` repeat.
+    from esfex.utils.paths import file_name_part
+    tag = file_name_part(getattr(state, "name", "") or "")
+
     written: dict[str, Path] = {}
     skipped: list[str] = []
     total = len(classified)
@@ -258,7 +264,8 @@ def generate_for_grid_build(
                 )
                 cf = compute_constant_cf(_default_for_kind(kind))
 
-        csv_path = output_dir / f"{gid}_availability.csv"
+        csv_path = output_dir / (f"{tag}_{gid}_availability.csv" if tag
+                                 else f"{gid}_availability.csv")
         np.savetxt(csv_path, cf, delimiter=",", fmt="%.6f")
         gen.availability_file = str(csv_path)
         written[gid] = csv_path

@@ -85,6 +85,42 @@ def stop_thread(thread, wait_ms: int = 4000) -> None:
         pass
 
 
+def project_data_dir(widget):
+    """Folder of the project *widget* works on, or ``None`` without one.
+
+    The folder the project's relative data paths resolve against: where a
+    workflow writes the files the configuration will refer to (``demand/``,
+    ``availability/``). It is the Studio main window's ``_data_base_dir()``,
+    else the folder of its ``_config_path``. A workflow step lives in a wizard
+    dialog whose own window has neither, so the search goes from the widget's
+    window up through its parents; ``widget.window()`` alone found nothing
+    and the files went to the directory the Studio was started from.
+    """
+    from pathlib import Path
+
+    seen = set()
+    w = widget
+    while w is not None and id(w) not in seen:
+        seen.add(id(w))
+        base = getattr(w, "_data_base_dir", None)
+        if callable(base):
+            try:
+                found = base()
+            except Exception:
+                found = None
+            if found:
+                return str(found)
+        cfg = getattr(w, "_config_path", None)
+        if cfg:
+            return str(Path(cfg).parent)
+        top = w.window() if hasattr(w, "window") else None
+        if top is not None and top is not w:
+            w = top
+        else:
+            w = w.parentWidget() if hasattr(w, "parentWidget") else None
+    return None
+
+
 def cleanup_wizard(wizard) -> None:
     """Cancel running workers and reset the shared map widget.
 

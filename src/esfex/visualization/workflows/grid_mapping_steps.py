@@ -1705,7 +1705,7 @@ class GridMappingBuildStep(QWidget):
         )
 
         self._lbl_build_status.setText(tr("grid_builder.building_network"))
-        main_window = self.window()
+        from esfex.visualization.workflows._wizard_utils import project_data_dir
         params = BuildParams(
             node_positions=node_positions,
             n_clusters=len(node_positions) if node_positions else 0,
@@ -1717,7 +1717,7 @@ class GridMappingBuildStep(QWidget):
             min_component=self._spin_min_component.value(),
             gen_availability=self._chk_gen_availability.isChecked(),
             use_weather=True,  # weather-based CF is now the default behaviour
-            cfg_path=getattr(main_window, "_config_path", None),
+            data_dir=project_data_dir(self),
             # Faithful topology: no bounded reconnection from the GUI. The pass
             # fabricated bridging spans (up to the old 8 km "reach") and, before
             # demand exists, deleted real islanded subsystems (Hokkaido/Shikoku/
@@ -3791,7 +3791,8 @@ def fuel_auto_route(
 
 def write_forecast_demand_csvs(nodes, result, out_dir: Path,
                                model_clock=None,
-                               start_year: Optional[int] = None) -> int:
+                               start_year: Optional[int] = None,
+                               system: str = "") -> int:
     """Persist a demand forecast onto the model's nodes.
 
     :func:`forecast_node_demands` followed by storing each node's
@@ -3799,7 +3800,7 @@ def write_forecast_demand_csvs(nodes, result, out_dir: Path,
     received demand.
     """
     demands = forecast_node_demands(nodes, result, out_dir, model_clock,
-                                    start_year)
+                                    start_year, system=system)
     for i, demand in demands:
         nodes[i].demand = demand
     return len(demands)
@@ -3807,13 +3808,17 @@ def write_forecast_demand_csvs(nodes, result, out_dir: Path,
 
 def forecast_node_demands(nodes, result, out_dir: Path, model_clock=None,
                           start_year: Optional[int] = None, progress=None,
-                          cancelled=None) -> list:
+                          cancelled=None, system: str = "") -> list:
     """Each node's demand of a forecast, written to CSV; the nodes untouched.
 
     Writes each node's hourly series (the full multi-year forecast when
     available, otherwise the single representative year — the same choice the
-    standalone demand wizard's export makes) to ``out_dir/demand_<node>.csv``
-    and stores a full :class:`GuiNodeDemand` (``csv_path`` + ``data`` + stats)
+    standalone demand wizard's export makes) to ``out_dir/demand_<node>.csv``,
+    or ``out_dir/demand_<system>_<node>.csv`` when *system* (the name of the
+    nodes' system) is given: the systems of a project share ``out_dir``, and
+    two systems with a node of the same name ("Node 18") would write the same
+    file, the second replacing the first's demand. It
+    stores a full :class:`GuiNodeDemand` (``csv_path`` + ``data`` + stats)
     on the node. That is what lets the serializer emit the system's
     ``demand_paths`` and the runner load per-node demand. Returns the number of
     nodes that received demand. The series stays in memory even if a file write
@@ -3831,9 +3836,10 @@ def forecast_node_demands(nodes, result, out_dir: Path, model_clock=None,
     after each node, and a true *cancelled* ``()`` stops it, returning what
     was done so far.
     """
-    import re
-
+    from esfex.utils.paths import file_name_part
     from esfex.visualization.data.gui_model import GuiNodeDemand
+
+    tag = file_name_part(system)
 
     series = getattr(result, "demand_multi_year", None)
     if series is None:
@@ -3858,9 +3864,7 @@ def forecast_node_demands(nodes, result, out_dir: Path, model_clock=None,
         if i >= ncols or (cancelled is not None and cancelled()):
             break
         col = series[:, i] if series.ndim > 1 else series
-        safe = re.sub(
-            r"[^0-9A-Za-z._-]+", "_",
-            node.name or f"node_{i}").strip("_") or f"node_{i}"
+        safe = file_name_part(node.name or f"node_{i}") or f"node_{i}"
         base, k = safe, 1
         while safe in used:
             safe, k = f"{base}_{k}", k + 1
@@ -3868,7 +3872,8 @@ def forecast_node_demands(nodes, result, out_dir: Path, model_clock=None,
         data_list = [float(x) for x in col]
         csv_path = None
         try:
-            path = out_dir / f"demand_{safe}.csv"
+            path = out_dir / (f"demand_{tag}_{safe}.csv" if tag
+                              else f"demand_{safe}.csv")
             np.savetxt(str(path), col, fmt="%.4f")
             csv_path = str(path)
         except Exception:
@@ -5538,10 +5543,13 @@ class GridMappingDemandStep(QWidget):
         # and the runner finds the files.
         job = None
         if self._forecast_result is not None:
-            # Output dir: alongside the loaded YAML if known (same convention as
-            # availability profiles), else the working directory.
-            cfg_path = getattr(self.window(), "_config_path", None)
-            out_dir = (Path(cfg_path).parent if cfg_path else Path.cwd()) / "demand"
+            # Output dir: the project's folder if it has one (same convention
+            # as the availability profiles), else the working directory.
+            from esfex.visualization.workflows._wizard_utils import (
+                project_data_dir,
+            )
+            data_dir = project_data_dir(self)
+            out_dir = (Path(data_dir) if data_dir else Path.cwd()) / "demand"
             # The forecast is in local time: save it on the model clock (the
             # one the weather availability already used, else the standard
             # time of the zone with most forecast demand) and record it.
@@ -5562,6 +5570,9 @@ class GridMappingDemandStep(QWidget):
             return
 
         nodes, result, out_dir, clock = job
+        # The file names carry the system: every system of the project
+        # writes to the same folder.
+        system = getattr(self._model.state, "name", "") or ""
 
         def _progress(done, total):
             self._ui_call.emit(lambda d=done, t=total: (
@@ -5574,7 +5585,8 @@ class GridMappingDemandStep(QWidget):
             try:
                 demands = forecast_node_demands(
                     nodes, result, out_dir, model_clock=clock,
-                    progress=_progress, cancelled=cancel.is_set)
+                    progress=_progress, cancelled=cancel.is_set,
+                    system=system)
             except Exception as exc:
                 logger.exception("Applying the demand forecast failed")
                 self._ui_call.emit(lambda e=exc: self._fail_apply(e, cancel))
