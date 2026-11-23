@@ -476,6 +476,124 @@ def region_cells_025(
     return lats, lons, cell_area_km2(lats), inside
 
 
+def _cell_population_pixels(lat: float, lon: float, epoch: int = 2020):
+    """Population density of the GPW 30″ pixels inside the 0.25° cell centred
+    at (*lat*, *lon*): ``(lats, lons, density)`` of the pixel centres, or
+    ``None`` when no raster covers the cell (open ocean, or the tile could not
+    be downloaded)."""
+    try:
+        from rasterio.windows import from_bounds
+
+        from esfex.models.pixel_features import _gpw_path, _open_raster
+        path = _gpw_path(epoch, lat, lon)
+        if path is None:
+            return None
+        ds = _open_raster(str(path))
+        h = _CELL_DEG / 2.0
+        win = from_bounds(lon - h, lat - h, lon + h, lat + h, ds.transform)
+        win = win.round_offsets().round_lengths()
+        if win.width <= 0 or win.height <= 0:
+            return None
+        arr = ds.read(1, window=win, boundless=True, fill_value=0).astype(np.float64)
+        if ds.nodata is not None:
+            arr[arr == ds.nodata] = 0.0
+        arr[~np.isfinite(arr) | (arr < 0)] = 0.0
+        tr = ds.window_transform(win)
+        cols = np.arange(arr.shape[1]) + 0.5
+        rows = np.arange(arr.shape[0]) + 0.5
+        lons = tr.c + cols * tr.a
+        lats = tr.f + rows * tr.e
+        grid_lat, grid_lon = np.meshgrid(lats, lons, indexing="ij")
+        return grid_lat.ravel(), grid_lon.ravel(), arr.ravel()
+    except Exception as exc:                      # no raster: the caller splits by area
+        logger.debug("No population pixels for cell (%.3f, %.3f): %s", lat, lon, exc)
+        return None
+
+
+def split_cells_among_nodes(
+    cell_lats, cell_lons, node_lats, node_lons,
+    polygon_latlon=None, n_sub: int = 10, min_share: float = 0.005,
+    pixels_fn=None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Share of each 0.25° cell that belongs to each node.
+
+    A cell is about 27 km wide; the nodes of a grid are often closer than that.
+    Giving a whole cell to the node nearest to its centre left every other node
+    in the cell without demand. Here the
+    cell is cut into its 30″ population pixels (GPW, about 1 km); each pixel
+    goes to its nearest node and weighs its population, so a node takes the
+    part of the cell's people that are nearer to it than to any other node.
+    Pixels outside the study region weigh nothing. A cell with no population
+    raster (or no people in it) is cut into ``n_sub × n_sub`` equal parts
+    instead: a split by area.
+
+    Returns ``(share, part_lat, part_lon, n_by_area)``: ``share[c, n]`` is the
+    fraction of cell ``c`` that node ``n`` takes (each row sums to 1; shares
+    below *min_share* are dropped and the row renormalised), ``part_lat`` /
+    ``part_lon`` the weighted centre of that part (NaN where the share is 0),
+    and ``n_by_area`` the number of cells split by area. *pixels_fn*
+    ``(lat, lon) -> (lats, lons, weights) | None`` replaces the population
+    raster (tests)."""
+    import shapely
+
+    clat = np.asarray(cell_lats, dtype=np.float64)
+    clon = np.asarray(cell_lons, dtype=np.float64)
+    nlat = np.asarray(node_lats, dtype=np.float64)
+    nlon = np.asarray(node_lons, dtype=np.float64)
+    n_c, n_n = len(clat), len(nlat)
+    share = np.zeros((n_c, n_n), dtype=np.float64)
+    plat = np.full((n_c, n_n), np.nan)
+    plon = np.full((n_c, n_n), np.nan)
+    if n_c == 0 or n_n == 0:
+        return share, plat, plon, 0
+    poly = _make_poly(polygon_latlon) if _as_rings(polygon_latlon) else None
+    if poly is not None:
+        if not poly.is_valid:
+            poly = shapely.make_valid(poly)
+        shapely.prepare(poly)
+    pixels_fn = pixels_fn or _cell_population_pixels
+    mlng = math.cos(math.radians(float(np.mean(clat))))
+    nx = nlon * mlng
+    off = ((np.arange(n_sub) + 0.5) / n_sub - 0.5) * _CELL_DEG
+    n_by_area = 0
+    for c in range(n_c):
+        px = pixels_fn(float(clat[c]), float(clon[c]))
+        w = None
+        if px is not None:
+            la, lo, w = (np.asarray(v, dtype=np.float64) for v in px)
+            if poly is not None:
+                inside = shapely.contains_xy(poly, lo, la)
+                if (w * inside).sum() > 0:
+                    w = w * inside
+            if w.sum() <= 0:
+                w = None
+        if w is None:                             # no people known: split by area
+            n_by_area += 1
+            grid_lat, grid_lon = np.meshgrid(clat[c] + off, clon[c] + off, indexing="ij")
+            la, lo = grid_lat.ravel(), grid_lon.ravel()
+            w = np.ones(la.size)
+            if poly is not None:
+                inside = shapely.contains_xy(poly, lo, la)
+                if inside.any():
+                    w = inside.astype(np.float64)
+        keep = w > 0
+        la, lo, w = la[keep], lo[keep], w[keep]
+        d2 = (lo[:, None] * mlng - nx[None, :]) ** 2 + (la[:, None] - nlat[None, :]) ** 2
+        owner = np.argmin(d2, axis=1)
+        tot = np.bincount(owner, weights=w, minlength=n_n)
+        row = tot / tot.sum()
+        small = (row > 0) & (row < min_share)
+        if small.any() and (row[~small] > 0).any():
+            row[small] = 0.0
+            row /= row.sum()
+        share[c] = row
+        has = row > 0
+        with np.errstate(invalid="ignore", divide="ignore"):
+            plat[c, has] = (np.bincount(owner, weights=w * la, minlength=n_n) / tot)[has]
+            plon[c, has] = (np.bincount(owner, weights=w * lo, minlength=n_n) / tot)[has]
+    return share, plat, plon, n_by_area
+
+
 def predict_region_cell_demand(
     model: "DemandDensityModel",
     lats: np.ndarray,

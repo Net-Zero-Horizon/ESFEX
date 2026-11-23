@@ -5434,18 +5434,24 @@ class GridMappingDemandStep(QWidget):
         # resulting bus fractions stay finite instead of failing the split.
         cann[~np.isfinite(cann) | (cann < 0)] = 0.0
 
-        # Assign each cell to its nearest node (projected) — preserves the
-        # density model's validated per-node totals; the transport only splits
-        # within a node.
-        nlat = np.array([nd.centroid_lat for nd in nodes], dtype=float)
-        nlon = np.array([nd.centroid_lng for nd in nodes], dtype=float)
-        mlng0 = 111.320 * math.cos(math.radians(float(np.mean(clat))))
-        cx = clon * mlng0; cy = clat * 110.540
-        nx = nlon * mlng0; ny = nlat * 110.540
-        cell_node = np.array([
-            int(np.argmin((nx - cx[i]) ** 2 + (ny - cy[i]) ** 2))
-            for i in range(len(clat))
-        ])
+        # Each demand point (a node's part of a 0.25° cell) belongs to the node
+        # the forecast gave it to — this keeps the forecast's per-node totals;
+        # the transport only splits within a node. A result without that list
+        # (an older or hand-made one) falls back to the nearest node.
+        owner = getattr(res, "cell_nodes", None)
+        if owner is not None and len(owner) == len(clat) and all(
+                0 <= int(o) < len(nodes) for o in owner):
+            cell_node = np.asarray(owner, dtype=int)
+        else:
+            nlat = np.array([nd.centroid_lat for nd in nodes], dtype=float)
+            nlon = np.array([nd.centroid_lng for nd in nodes], dtype=float)
+            mlng0 = 111.320 * math.cos(math.radians(float(np.mean(clat))))
+            cx = clon * mlng0; cy = clat * 110.540
+            nx = nlon * mlng0; ny = nlat * 110.540
+            cell_node = np.array([
+                int(np.argmin((nx - cx[i]) ** 2 + (ny - cy[i]) ** 2))
+                for i in range(len(clat))
+            ])
 
         # Per-bus capacity: sum of MVA of transformers touching the bus, with a
         # voltage-kV fallback scaled into the MVA range (so a node mixing

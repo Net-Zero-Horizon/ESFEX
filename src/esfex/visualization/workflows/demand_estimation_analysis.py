@@ -972,6 +972,7 @@ class DemandProfileBuilder:
             place_predictors,
             predict_region_cell_demand,
             region_cells_025,
+            split_cells_among_nodes,
         )
         from esfex.utils.model_clock import (
             node_time_zones,
@@ -1005,17 +1006,23 @@ class DemandProfileBuilder:
         if len(clats) == 0:
             raise ValueError("No 0.25° cells in the study region for density inference.")
 
-        # ── Assign each cell to its nearest node (projected) ─────────
-        nlat = np.asarray(proxy.node_lats, dtype=np.float64)
-        nlon = np.asarray(proxy.node_lons, dtype=np.float64)
-        mean_lat = float(np.mean(clats))
-        mlng = 111320.0 * math.cos(math.radians(mean_lat))
-        nx = nlon * mlng; ny = nlat * 110540.0
-        cx = clons * mlng; cy = clats * 110540.0
-        cell_node = np.array([
-            int(np.argmin((nx - cx[i]) ** 2 + (ny - cy[i]) ** 2))
-            for i in range(len(clats))
-        ])
+        # ── Share of each cell that belongs to each node ─────────────
+        # A cell is about 27 km wide and nodes are often closer than that: the
+        # cell's people are split among the nodes nearest to them (30″
+        # population pixels), not given whole to the node nearest to the
+        # cell's centre, which left the other nodes without demand.
+        emit(15, "Splitting cells among nodes by population…")
+        cell_share, part_lat, part_lon, n_by_area = split_cells_among_nodes(
+            clats, clons, list(proxy.node_lats)[:num_nodes],
+            list(proxy.node_lons)[:num_nodes], polygon_latlon=poly)
+        if cell_share.shape[1] < num_nodes:              # nodes without coordinates
+            pad = num_nodes - cell_share.shape[1]
+            cell_share = np.pad(cell_share, ((0, 0), (0, pad)))
+            part_lat = np.pad(part_lat, ((0, 0), (0, pad)), constant_values=np.nan)
+            part_lon = np.pad(part_lon, ((0, 0), (0, pad)), constant_values=np.nan)
+        if n_by_area:
+            logger.info("Density: %d of %d cells have no population pixels and "
+                        "are split among nodes by area.", n_by_area, len(clats))
 
         # Each node's time zone: the model reads UTC hours, the forecast is
         # returned on each node's local civil time.
@@ -1091,7 +1098,7 @@ class DemandProfileBuilder:
             raise ValueError("No populated cells with GDP in the study region.")
         alat = clats[idx]; alon = clons[idx]; aarea = land0[idx]
         a_land_w = aarea * cell_w[idx]                   # land of the cell in the region
-        a_node = cell_node[idx]
+        a_share = cell_share[idx]                        # (cells, nodes), rows sum to 1
         base_pd = pop0[idx] / aarea                      # people per km² of land
 
         # Population growth (SSP / UN WPP per-year rates from the projection
@@ -1110,7 +1117,7 @@ class DemandProfileBuilder:
             list(proxy.node_lats), list(proxy.node_lons), base_year, years,
             ssp=getattr(self._cfg, "ssp_scenario", None))
         n_cmip6 = sum(1 for c in cmip6 if c)
-        cells_by_node = [np.where(a_node == nd)[0] for nd in range(num_nodes)]
+        cells_by_node = [np.where(a_share[:, nd] > 0)[0] for nd in range(num_nodes)]
 
         def _temp_utc(nd, yr):
             """Node *nd*'s temperature of year *yr* on UTC hours: CMIP6 (a
@@ -1127,7 +1134,8 @@ class DemandProfileBuilder:
         # ── Per-year, per-node: per-cell density inference → node demand ──
         emit(32, "Per-cell density inference (per year, GDP+pop+CMIP6)…")
         hourly_all = np.zeros((years, hpy, num_nodes), dtype=np.float64)
-        cell_annual = np.zeros(idx.size, dtype=np.float64)   # base-year MWh/cell
+        # Base-year MWh of each node's part of each cell.
+        part_annual = [np.zeros(a.size, dtype=np.float64) for a in cells_by_node]
         # Climate normals, electricity-use context and local-date offset of
         # every cell: fixed over the horizon (present-day, as in the article).
         places = {}
@@ -1149,14 +1157,14 @@ class DemandProfileBuilder:
                 if a.size == 0:
                     continue
                 cell_mw = predict_region_cell_demand(
-                    model, alat[a], alon[a], a_land_w[a],
+                    model, alat[a], alon[a], a_land_w[a] * a_share[a, nd],
                     lpd[a], lgd[a], lgpc[a],
                     _temp_utc(nd, yr), yr, country_iso=macro.country_iso,
                     places=places[nd],
                 )                                            # (n_cells_nd, hpy) MW, UTC
                 hourly_all[y, :, nd] = cell_mw.sum(axis=0)
                 if y == 0:
-                    cell_annual[a] = cell_mw.sum(axis=1)     # MWh per cell, base yr
+                    part_annual[nd] = cell_mw.sum(axis=1)    # MWh per part, base yr
             emit(32 + int(58 * (y + 1) / years), f"Year {yr}: {idx.size} cells")
 
         # UTC hours → each node's local civil time (the forecast's time base;
@@ -1177,7 +1185,7 @@ class DemandProfileBuilder:
         if target_gwh > 0 and base_gwh > 0:
             scale = target_gwh / base_gwh
             hourly_all *= scale
-            cell_annual *= scale
+            part_annual = [v * scale for v in part_annual]
             logger.info("Density: anchored base-year to %.0f GWh "
                         "(raw model integral %.0f GWh).", target_gwh, base_gwh)
         else:
@@ -1220,12 +1228,21 @@ class DemandProfileBuilder:
         result.level0_annual_mwh_by_year = [
             float(hourly_all[y].sum()) for y in range(years)
         ]
-        # Spatial demand per cell → bus-level distribution can assign each cell
-        # to its nearest bus instead of using a building-footprint proxy.
-        result.cell_lats = [float(v) for v in alat]
-        result.cell_lons = [float(v) for v in alon]
-        result.cell_nodes = [int(v) for v in a_node]
-        result.cell_annual_mwh = [float(v) for v in cell_annual]
+        # Spatial demand per part of a cell (the share one node takes of it,
+        # at the centre of that share's people) → the bus-level distribution
+        # splits each node's parts among its buses instead of using a
+        # building-footprint proxy.
+        a_plat = part_lat[idx]
+        a_plon = part_lon[idx]
+        result.cell_lats, result.cell_lons = [], []
+        result.cell_nodes, result.cell_annual_mwh = [], []
+        for nd in range(num_nodes):
+            a = cells_by_node[nd]
+            for k, c in enumerate(a):
+                result.cell_lats.append(float(a_plat[c, nd]))
+                result.cell_lons.append(float(a_plon[c, nd]))
+                result.cell_nodes.append(int(nd))
+                result.cell_annual_mwh.append(float(part_annual[nd][k]))
 
         if self._cfg.resolution_hours != 1.0:
             result.demand = _resample_array(result.demand, self._cfg.resolution_hours)

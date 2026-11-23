@@ -9,6 +9,21 @@ Per-release notes are also published on the
 
 ## [Unreleased]
 
+### Changed
+
+- **Demand forecast: a cell is shared among the nodes whose people live in
+  it.** The density model predicts demand per 0.25° cell, about 27 km wide,
+  and each cell went whole to the node nearest to its centre. Nodes closer
+  together than a cell were left with no demand at all, and the node that
+  took the cell carried the demand of its neighbours. Each cell is now cut
+  into its 30-arc-second population pixels (GPW v4); a pixel goes to its
+  nearest node and a node takes the fraction of the cell's people that fall
+  to it (`split_cells_among_nodes`; a cell without a population raster is
+  shared by area). The system total does not change; the demand of each
+  node does, so a forecast run again gives different node files. The bus
+  distribution receives each node's part of each cell, placed at the centre
+  of its population, instead of whole cells.
+
 ### Fixed
 
 - **Grid Builder: the systems of a project no longer replace each other's
