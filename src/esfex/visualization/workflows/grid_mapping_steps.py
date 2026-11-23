@@ -4727,6 +4727,10 @@ class GridMappingDemandStep(QWidget):
             ssp_scenario=self._combo_gdp_ssp.currentData() or "SSP2",
         )
 
+        with_bus = {b.parent_node
+                    for b in (getattr(state, "buses", None) or {}).values()}
+        if self._target_node is not None:      # single-node forecast: that node
+            with_bus = set()
         # Build proxy data from nodes. The drawn-area bounds give the density
         # model the study region for the per-node area partition and the SSP
         # GDP / population raster sampling.
@@ -4743,6 +4747,10 @@ class GridMappingDemandStep(QWidget):
             node_names=[n.name for n in nodes],
             bounds=self._bounds,
             area_polygon=getattr(self, "_polygon", None) or [],
+            # A node without a bus cannot carry demand (it would stay
+            # unserved): its people go to the nearest node that has one.
+            # Before the network is built no node has a bus and all count.
+            node_eligible=[n.index in with_bus for n in nodes] if with_bus else [],
         )
 
         # Build macro data from WB fetch

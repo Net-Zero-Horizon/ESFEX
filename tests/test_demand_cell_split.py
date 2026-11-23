@@ -111,3 +111,20 @@ def test_forecast_gives_demand_to_two_nodes_of_the_same_cell():
     for nd in range(3):
         part = sum(m for m, n in zip(res.cell_annual_mwh, res.cell_nodes) if n == nd) / 1000.0
         assert part == pytest.approx(gwh[nd], rel=1e-3)
+
+
+def test_a_node_without_a_bus_takes_no_share():
+    # Three nodes in one cell; the middle one has no bus. Its people go to the
+    # nearer of the other two instead of staying with a node that cannot serve them.
+    args = ([18.125], [-77.125], [18.125, 18.125, 18.125], [-77.20, -77.125, -77.05])
+    every, _, _, _ = split_cells_among_nodes(*args, pixels_fn=_pixels(lambda la, lo: 1.0))
+    barred, _, _, _ = split_cells_among_nodes(*args, pixels_fn=_pixels(lambda la, lo: 1.0),
+                                              eligible=[True, False, True])
+    assert every[0, 1] > 0.2
+    assert barred[0, 1] == 0.0
+    assert barred[0].sum() == pytest.approx(1.0)
+    assert barred[0, 0] == pytest.approx(0.5) and barred[0, 2] == pytest.approx(0.5)
+    # No flag set for any node: all take part.
+    none, _, _, _ = split_cells_among_nodes(*args, pixels_fn=_pixels(lambda la, lo: 1.0),
+                                            eligible=[False, False, False])
+    assert none[0] == pytest.approx(every[0])

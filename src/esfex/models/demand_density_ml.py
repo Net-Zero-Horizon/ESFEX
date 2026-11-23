@@ -513,7 +513,7 @@ def _cell_population_pixels(lat: float, lon: float, epoch: int = 2020):
 def split_cells_among_nodes(
     cell_lats, cell_lons, node_lats, node_lons,
     polygon_latlon=None, n_sub: int = 10, min_share: float = 0.005,
-    pixels_fn=None,
+    pixels_fn=None, eligible=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """Share of each 0.25° cell that belongs to each node.
 
@@ -531,7 +531,10 @@ def split_cells_among_nodes(
     fraction of cell ``c`` that node ``n`` takes (each row sums to 1; shares
     below *min_share* are dropped and the row renormalised), ``part_lat`` /
     ``part_lon`` the weighted centre of that part (NaN where the share is 0),
-    and ``n_by_area`` the number of cells split by area. *pixels_fn*
+    and ``n_by_area`` the number of cells split by area. *eligible* (one flag
+    per node) leaves nodes out of the split: a node with no bus cannot carry
+    demand, which would stay unserved, so its people go to the nearest node
+    that can (all nodes when no flag is set). *pixels_fn*
     ``(lat, lon) -> (lats, lons, weights) | None`` replaces the population
     raster (tests)."""
     import shapely
@@ -554,6 +557,10 @@ def split_cells_among_nodes(
     pixels_fn = pixels_fn or _cell_population_pixels
     mlng = math.cos(math.radians(float(np.mean(clat))))
     nx = nlon * mlng
+    # Nodes that take no demand are out of reach of every pixel.
+    barred = np.zeros(n_n, dtype=bool)
+    if eligible is not None and len(eligible) == n_n and any(eligible):
+        barred = ~np.asarray(eligible, dtype=bool)
     off = ((np.arange(n_sub) + 0.5) / n_sub - 0.5) * _CELL_DEG
     n_by_area = 0
     for c in range(n_c):
@@ -579,6 +586,7 @@ def split_cells_among_nodes(
         keep = w > 0
         la, lo, w = la[keep], lo[keep], w[keep]
         d2 = (lo[:, None] * mlng - nx[None, :]) ** 2 + (la[:, None] - nlat[None, :]) ** 2
+        d2[:, barred] = np.inf
         owner = np.argmin(d2, axis=1)
         tot = np.bincount(owner, weights=w, minlength=n_n)
         row = tot / tot.sum()

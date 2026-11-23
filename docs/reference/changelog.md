@@ -14,7 +14,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/). Versioning: [Semantic V
   into its 30-arc-second population pixels (GPW v4); a pixel goes to its
   nearest node and a node takes the fraction of the cell's people that fall
   to it (`split_cells_among_nodes`; a cell without a population raster is
-  shared by area). The system total does not change; the demand of each
+  shared by area). A node without a bus takes no share, since the dispatch
+  could not serve its demand: its people go to the nearest node that has a
+  bus. The system total does not change; the demand of each
   node does, so a forecast run again gives different node files. The bus
   distribution receives each node's part of each cell, placed at the centre
   of its population, instead of whole cells.

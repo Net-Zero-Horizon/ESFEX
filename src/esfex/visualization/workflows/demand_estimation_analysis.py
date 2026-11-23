@@ -142,6 +142,9 @@ class ProxyData:
     node_lats: list[float] = field(default_factory=list)
     node_lons: list[float] = field(default_factory=list)
     node_names: list[str] = field(default_factory=list)
+    # Whether each node can carry demand (it has a bus). Empty: all can. The
+    # density forecast gives a node that cannot no share of any cell.
+    node_eligible: list[bool] = field(default_factory=list)
 
     # Study region (for per-node area / Voronoi partition in the density model).
     # area_polygon: drawn domain ring as [(lat, lon), …]; bounds: (S, W, N, E).
@@ -1014,7 +1017,8 @@ class DemandProfileBuilder:
         emit(15, "Splitting cells among nodes by population…")
         cell_share, part_lat, part_lon, n_by_area = split_cells_among_nodes(
             clats, clons, list(proxy.node_lats)[:num_nodes],
-            list(proxy.node_lons)[:num_nodes], polygon_latlon=poly)
+            list(proxy.node_lons)[:num_nodes], polygon_latlon=poly,
+            eligible=list(proxy.node_eligible)[:num_nodes] or None)
         if cell_share.shape[1] < num_nodes:              # nodes without coordinates
             pad = num_nodes - cell_share.shape[1]
             cell_share = np.pad(cell_share, ((0, 0), (0, pad)))
